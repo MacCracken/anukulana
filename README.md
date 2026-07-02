@@ -15,9 +15,13 @@ them: the weight **format** is `tula`; the transformer **forward** is `rupantara
 
 ## Status
 
-**0.1.0 — M0 buildable scaffold** (prints usage/version; builds + 1 test green).
-The importer/forward/LoRA land per [`docs/development/roadmap.md`](docs/development/roadmap.md).
-Cyrius pin **6.3.27**.
+**0.2.0 — the importer works on a real model.** `inspect` reads a sovereign **tula**
+checkpoint (M1); `gpt2` imports a real **GPT-2-small safetensors** (foreign format,
+parsed via **bayan**'s JSON DOM + IEEE-754 fp32→f64 widening), maps it onto
+**rupantara**'s layout (fused-QKV split, no transpose), and runs `ru_model_fwd` —
+verified on HF's actual 124M checkpoint: config inferred, 0 NaN params, batch
+forward == KV-cache decode bit-identical, logits finite. LoRA/QLoRA land per
+[`docs/development/roadmap.md`](docs/development/roadmap.md). Cyrius pin **6.3.31**.
 
 ## Build & test
 

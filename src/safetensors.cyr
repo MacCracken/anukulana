@@ -227,3 +227,29 @@ fn st_read_f64(r, e, dst): i64 {
     }
     return 0 - 1;
 }
+
+# read a whole safetensors file from disk (up to `maxlen` bytes) into a heap buffer
+# and open it. No size syscall here — the caller passes a `maxlen` >= the file size
+# (file_read_all reads to EOF and st_open uses the ACTUAL byte count). Returns a
+# reader or 0 (missing / too-large-for-maxlen / malformed).
+fn st_read_file(path, maxlen): i64 {
+    var buf = alloc(maxlen);                # NB: alloc caps at 256MB (ALLOC_MAX)
+    if (buf == 0) { return 0; }
+    var n = file_read_all(path, buf, maxlen);
+    if (n <= 0) { return 0; }
+    return st_open(buf, n);
+}
+
+# mmap a safetensors file read-only (zero-copy; bypasses the 256MB alloc cap) and
+# open it. The mapping outlives the fd. Returns a reader or 0. Use this for large
+# models (GPT-2-small is 548 MB — well past the alloc cap).
+fn st_open_mmap(path): i64 {
+    var fd = file_open(path, 0, 0);          # O_RDONLY
+    if (fd < 0) { return 0; }
+    var size = xlseek(fd, 0, 2);             # SEEK_END -> file size
+    if (size <= 8) { file_close(fd); return 0; }
+    var addr = mmap_file_ro(fd, size);       # maps from offset 0
+    file_close(fd);                          # mapping survives the close
+    if (addr == 0) { return 0; }
+    return st_open(addr, size);
+}

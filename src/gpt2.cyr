@@ -160,3 +160,19 @@ fn anuk_gpt2_pack(r, cfg, params): i64 {
     if (rc != 0) { return rc; }
     return 0;
 }
+
+# One-shot: read a GPT-2 safetensors from `path` (up to maxbytes), infer config
+# (heads = nh — NOT in safetensors), OVERRIDE the context to T_run (a short window
+# for a run; only pos_emb truncates, blocks are unchanged), and pack a fresh params
+# buffer. Fills cfg (caller's 64B). Returns the params ptr, or 0 on any failure.
+fn anuk_gpt2_import(path, nh, T_run, cfg): i64 {
+    var r = st_open_mmap(path);              # zero-copy; file is well past the alloc cap
+    if (r == 0) { return 0; }
+    if (anuk_gpt2_infer_cfg(r, cfg, nh) != 0) { return 0; }
+    ru_cfg_init(cfg, _cfg_V(cfg), _cfg_C(cfg), T_run, nh, nh, _cfg_NL(cfg), _cfg_F(cfg), 1);
+    var np = ru_params_count(cfg);
+    var params = mmap_anon(np * 8);          # ~1 GB for GPT-2-small -> bypass ALLOC_MAX
+    if (params == 0) { return 0; }
+    if (anuk_gpt2_pack(r, cfg, params) != 0) { return 0; }
+    return params;
+}

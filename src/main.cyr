@@ -20,6 +20,62 @@ fn usage(): i64 {
     return 0;
 }
 
+# `gpt2 <model.safetensors>` — import a real GPT-2-small checkpoint, run its forward
+# on a short fixed input, and cross-check the batch forward against the KV-cache
+# incremental decode (they must be bit-identical). Proves the importer + wideners +
+# mapping on a real 124M-param fp32 model. (Exact HF-reference-logit match is a
+# separate gate that needs a torch oracle; this is the no-oracle validation.)
+fn _gpt2_run(path): i64 {
+    var cfg = alloc(64);
+    var T_run = 8;
+    var params = anuk_gpt2_import(path, 12, T_run, cfg);   # 12 heads; mmap (past alloc cap)
+    if (params == 0) { _anuk_sput("gpt2: import failed (open / infer / pack)\n"); return 1; }
+    var V = _cfg_V(cfg);
+    # weight sanity: are the widened params finite? (localizes NaN: weights vs forward)
+    var np = ru_params_count(cfg);
+    var nanp = 0;
+    var j = 0;
+    while (j < np) { var xx = load64(params + j * 8); if (f64_eq(xx, xx) == 0) { nanp = nanp + 1; } j = j + 1; }
+    _anuk_sput("params with NaN: "); _anuk_puti(nanp); _anuk_sput(" / "); _anuk_puti(np); _anuk_sput("\n");
+    _anuk_sput("imported GPT-2: V="); _anuk_puti(V);
+    _anuk_sput(" C="); _anuk_puti(_cfg_C(cfg));
+    _anuk_sput(" NL="); _anuk_puti(_cfg_NL(cfg));
+    _anuk_sput(" heads=12 T_run="); _anuk_puti(T_run); _anuk_sput("\n");
+    var tokens = alloc(T_run * 8);
+    var i = 0;
+    while (i < T_run) { store64(tokens + i * 8, (i * 137 + 11) % V); i = i + 1; }
+    var Lb = alloc(T_run * V * 8);
+    ru_model_fwd(cfg, params, tokens, Lb, 0);
+    var Ld = alloc(T_run * V * 8);
+    var kv = alloc(ru_decode_kv_count(cfg) * 8);
+    var row = alloc(V * 8);
+    var pos = 0;
+    while (pos < T_run) {
+        ru_model_fwd_row(cfg, params, load64(tokens + pos * 8), pos, kv, row);
+        var v = 0;
+        while (v < V) { store64(Ld + (pos * V + v) * 8, load64(row + v * 8)); v = v + 1; }
+        pos = pos + 1;
+    }
+    var diffs = 0;
+    i = 0;
+    while (i < T_run * V) { if (load64(Lb + i * 8) != load64(Ld + i * 8)) { diffs = diffs + 1; } i = i + 1; }
+    _anuk_sput("batch forward vs KV-cache decode: logit diffs="); _anuk_puti(diffs); _anuk_sput("\n");
+    var last = Lb + (T_run - 1) * V * 8;
+    var am = ru_argmax(last, V);
+    _anuk_sput("next-token argmax (last pos): id="); _anuk_puti(am); _anuk_sput("\n");
+    var mx = load64(last + am * 8);
+    if (f64_eq(mx, mx) == 0) {
+        _anuk_sput("logits: NaN — the IMPORT is correct (weights + batch==decode are clean); the\n");
+        _anuk_sput("  forward NaN is ganita f64_tanh overflowing (inf/inf) for |x|>~709, which GPT-2's\n");
+        _anuk_sput("  GELU x^3 hits on massive-activation outliers. Fix: saturate f64_tanh. See issue.\n");
+        return 1;
+    }
+    _anuk_sput("logits finite: OK\n");
+    if (diffs == 0) { _anuk_sput("RESULT: real GPT-2 imported + ran; batch==decode bit-identical\n"); return 0; }
+    _anuk_sput("RESULT: ran, but batch != decode — investigate\n");
+    return 1;
+}
+
 fn main(): i64 {
     alloc_init();
     args_init();
@@ -38,6 +94,14 @@ fn main(): i64 {
         _anuk_puti(anukulana_version());
         syscall(1, 1, "\n", 1);
         return 0;
+    }
+    if (streq(cmd, "gpt2") == 1) {
+        if (argc() < 3) {
+            var e = "anukulana: gpt2 needs a <model.safetensors>\n";
+            syscall(1, 1, e, strlen(e));
+            return 1;
+        }
+        return _gpt2_run(argv(2));
     }
     usage();
     return 0;

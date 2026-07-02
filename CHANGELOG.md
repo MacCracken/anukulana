@@ -6,6 +6,15 @@ moving, no API freeze until v1.0).
 
 ## [Unreleased]
 
+## [0.2.0] — 2026-07-02
+
+**M2 — the foreign importer works on a real model.** anukulana imports a real
+**GPT-2-small** safetensors checkpoint and runs its forward through rupantara: parse
+(bayan JSON DOM) → fp32/f16/bf16→f64 widen → GPT-2→rupantara layout map (fused-QKV
+split, no transpose) → `ru_model_fwd`. Verified on HF's actual 124M checkpoint.
+Along the way it surfaced + fixed a real ecosystem bug (ganita `f64_tanh` NaN
+overflow). Additive over 0.1.0 (new `safetensors` / `gpt2` surface; no breaking change).
+
 **M2 — foreign safetensors importer (bite 1: the parser).** anukulana parses a
 foreign **safetensors** checkpoint sovereignly — the first step toward importing a
 real GPT-2 checkpoint and running it on rupantara.
@@ -45,11 +54,26 @@ real GPT-2 checkpoint and running it on rupantara.
   **bit-identical** and (b) `ru_model_fwd` logits **bit-identical** to the direct
   forward. Suite 39 → **49**.
 
+- **Bite 3 — real GPT-2-small imports + runs cleanly. ✅** `src/safetensors.cyr`
+  `st_open_mmap` (zero-copy mmap; the 548 MB file + ~1 GB params both exceed the
+  256 MB `ALLOC_MAX`, so file → `mmap_file_ro`, params → `mmap_anon`);
+  `anuk_gpt2_import` (mmap → infer_cfg → override context → pack); `gpt2` CLI
+  subcommand. Verified on the **real HF gpt2 checkpoint** (548 MB / 148 tensors,
+  fp32): config inferred (V=50257 C=768 NL=12), **0 NaN in 123.6 M widened
+  params**, **batch forward == KV-cache decode bit-identical**, and **logits
+  finite** (real next-token argmax). Runs in ~3.7 s.
+- **Toolchain pin 6.3.27 → 6.3.31.** Bite 3 first surfaced a real bug —
+  `ganita_f64_tanh` overflowed to `inf/inf`=NaN for |x|>~709, which GPT-2's GELU
+  `x³` hits on massive-activation outliers (localized to block 2, one position).
+  Fixed in **ganita 1.0.2** (saturate for |x|>20, bit-exact); cyrius **6.3.31**
+  re-folded it, and pinning here picks it up — the forward is now clean. Filed:
+  `docs/development/issues/2026-07-02-ganita-f64-tanh-overflow.md`.
+
 ### Remaining (M2)
-- **Bite 3 (headline):** import a *real* GPT-2-small safetensors + match the
-  reference (HF / nanoGPT `from_pretrained`) logits on a fixed input — needs the
-  external checkpoint + fp32 payload (wideners + mapping already proven here).
-  Then LoRA (M3) — two low-rank `rosnet.linear` passes (FD-gated).
+- **Exact fidelity gate:** real GPT-2 logits vs HF `from_pretrained` on a fixed
+  input — needs a torch oracle staged (not installed here). The import + forward
+  are proven; this is the last correctness check. Then LoRA (M3) — two low-rank
+  `rosnet.linear` passes (FD-gated).
 
 ## [0.1.0] — 2026-07-02
 

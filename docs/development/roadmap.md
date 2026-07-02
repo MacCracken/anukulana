@@ -78,9 +78,14 @@ M2 when rupantara's forward lands.
   direct copy. `tests/tcyr/gpt2.tcyr` (10) — export→import round-trip with packed
   params **and** `ru_model_fwd` logits both **bit-identical** to the direct forward
   (bayan-built safetensors writer in the test). Suite 39 → **49**.
-- **Bite 3 (headline, next) — real GPT-2-small:** import an actual HF GPT-2-small
-  safetensors (fp32) and match the reference (`from_pretrained`) logits on a fixed
-  input. Needs the external checkpoint; the parser + wideners + mapping are proven.
+- **✅ Bite 3 — real GPT-2-small imports + runs cleanly (2026-07-02):** `gpt2` CLI
+  on the real HF checkpoint (548 MB / 148 tensors, fp32) via mmap — config inferred
+  (V=50257 C=768 NL=12), 0 NaN in 123.6 M widened params, batch fwd == KV-decode
+  bit-identical, logits finite, ~3.7 s. First surfaced + fixed the `ganita_f64_tanh`
+  NaN-overflow bug (ganita 1.0.2; cyrius 6.3.31 re-fold; pin bumped 6.3.27→6.3.31).
+- **Remaining (M2): exact fidelity gate** — real GPT-2 logits vs HF
+  `from_pretrained` on a fixed input (needs a torch oracle staged). Import + forward
+  proven; this is the last correctness check before LoRA (M3).
 - **Acceptance (fidelity gate):** logits match the reference (HF / nanoGPT
   `from_pretrained`) on a fixed input within tolerance — the B-series fairness
   shape. `tests/tcyr/import.tcyr` + a recorded number in `docs/benchmarks.md`.

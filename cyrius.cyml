@@ -5,7 +5,7 @@ description = "anukulana (अनुकूलन — adaptation) — sovereign Ty
 license = "GPL-3.0-only"
 repository = "https://github.com/MacCracken/anukulana"
 language = "cyrius"
-cyrius = "6.3.27"
+cyrius = "6.3.31"
 
 # anukulana is a reference BINARY (like attn11 / tarka) — no [lib]/distlib.
 [build]
