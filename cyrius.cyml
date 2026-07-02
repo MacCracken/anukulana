@@ -1,0 +1,34 @@
+[package]
+name = "anukulana"
+version = "${file:VERSION}"
+description = "anukulana (अनुकूलन — adaptation) — sovereign Type-3 'Pre-Trained' reference: import a real pretrained checkpoint (tula format / foreign safetensors|GGUF), run its forward on rosnet through rupantara's transformer blocks, and adapt it (LoRA -> QLoRA/NF4). The 'sovereign AND interoperable with the world's weights' proof. Cyrius reference binary; M0 is a buildable scaffold."
+license = "GPL-3.0-only"
+repository = "https://github.com/MacCracken/anukulana"
+language = "cyrius"
+cyrius = "6.3.27"
+
+# anukulana is a reference BINARY (like attn11 / tarka) — no [lib]/distlib.
+[build]
+entry = "src/main.cyr"
+output = "build/anukulana"
+
+[deps]
+# M0 scaffold is stdlib-only. Milestones wire the consumed libs (git+path+tag):
+#   [deps.tula]      — the weight format (read/write)          (M1)
+#   [deps.rupantara] — the transformer forward                 (M2)
+#   [deps.rosnet]    — f64 tensors + matmul + LoRA linears     (M2)
+#   [deps.akshara]   — the tokenizer                           (M2)
+# plus stdlib += "math".
+stdlib = [
+    "string",
+    "fmt",
+    "alloc",
+    "io",
+    "vec",
+    "str",
+    "syscalls",
+    "args",
+    "flags",
+    "assert",
+    "bench",
+]

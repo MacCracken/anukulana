@@ -1,0 +1,28 @@
+# @public — anukulana include chain (stdlib + domain modules).
+# Included by src/main.cyr and by tests/tcyr/*.tcyr. main() lives ONLY in
+# src/main.cyr, so this file is safe to include from a test's own main.
+#
+# Stdlib includes live only here; domain modules (src/*.cyr, excluding main.cyr)
+# are flat. M1+ add the importer / forward-driver / adapt modules here in
+# dependency order, plus the consumed-lib includes (tula / rupantara / rosnet /
+# akshara) once wired in cyrius.cyml.
+
+# ================================================================
+# Standard library (M0 minimal; M1+ add math + the consumed libs)
+# ================================================================
+include "lib/string.cyr"
+include "lib/fmt.cyr"
+include "lib/alloc.cyr"
+include "lib/vec.cyr"
+include "lib/str.cyr"
+include "lib/io.cyr"
+include "lib/syscalls.cyr"
+include "lib/args.cyr"
+include "lib/flags.cyr"
+include "lib/assert.cyr"
+include "lib/bench.cyr"
+
+# ================================================================
+# anukulana domain modules — flat, dependency order.
+# ================================================================
+include "src/version.cyr"

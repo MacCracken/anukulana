@@ -1,0 +1,28 @@
+# anukulana (अनुकूलन — adaptation) — Type-3 pretrained-import reference (binary).
+#
+# M0 scaffold: prints usage + version. The real subcommands — import (foreign
+# checkpoint -> tula), run (forward on rosnet via rupantara -> logits), lora,
+# qlora — land per docs/development/roadmap.md.
+
+include "src/lib.cyr"
+
+fn usage(): i64 {
+    var l1 = "anukulana - sovereign pretrained-import reference (M0 scaffold)\n\n";
+    var l2 = "usage: anukulana <command>\n";
+    var l3 = "  version    print the packed version int\n";
+    var l4 = "  (import / run / lora / qlora land per the roadmap)\n";
+    syscall(1, 1, l1, strlen(l1));
+    syscall(1, 1, l2, strlen(l2));
+    syscall(1, 1, l3, strlen(l3));
+    syscall(1, 1, l4, strlen(l4));
+    return 0;
+}
+
+fn main(): i64 {
+    alloc_init();
+    usage();
+    return 0;
+}
+
+var exit_code = main();
+syscall(60, exit_code);

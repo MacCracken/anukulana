@@ -1,0 +1,118 @@
+# anukulana — Roadmap (march to v1.0)
+
+> **For a secondary agent picking this up cold.** Self-contained plan. Read this
+> + `CLAUDE.md` (conventions) + `docs/adr/0001-anukulana-scope.md` (scope).
+> anukulana is the Type-3 pretrained-import **reference binary** — it consumes
+> tula (format) / rupantara (forward) / rosnet (tensors) / akshara (tokenizer),
+> and does not reinvent them. Pre-1.0: surface may move, no freeze until v1.0.
+
+---
+
+## Working agreement
+
+- **Build/test:** `make build` (binary) · `make test` · pin in `cyrius.cyml`.
+- **Binary layout:** `main()` only in `src/main.cyr`; `src/lib.cyr` is the shared
+  include chain (stdlib + domain modules). New module → `src/lib.cyr` (order).
+  Consumed libs wired in `cyrius.cyml [deps.*]` + included in `src/lib.cyr` at
+  their milestone. LSP "undefined" across flat modules is expected.
+- **Definition of done each bite:** `make test` green · `cyrius fmt` clean ·
+  `cyrius lint` no `warn ` (**keep lines ≤120 — split long strings**) · CHANGELOG
+  `[Unreleased]` updated.
+- **Do NOT bump VERSION or git** — maintainer cuts releases; work under `[Unreleased]`.
+
+## Discipline (from attn11)
+
+Cyrius-native, no BLAS/libc/autodiff. **FD-gate any new gradient** (the LoRA A,B
+path). The import is gated by a **logit-fidelity benchmark vs the reference
+implementation** (fairness-ruled). Honest-negatives reported (small-scale import
+fidelity, NF4 quant error).
+
+---
+
+## Shipped
+
+- **M0 ✅** buildable scaffold (usage/version binary; `smoke.tcyr` 1).
+
+---
+
+## Cross-repo dependency order (read before sequencing)
+
+```
+tula (format, RELEASED 0.1.0) ──┐
+rupantara (forward) ── M1 needed ┼──> anukulana M2 (import+run) needs BOTH
+rosnet / akshara (exist) ───────┘
+```
+**anukulana M1 (consume tula) is unblocked now.** anukulana M2 (the forward/import
+headline) is **gated on rupantara M1** (the transformer forward). Do M1 now;
+M2 when rupantara's forward lands.
+
+---
+
+## Remaining milestones
+
+### M1 — consume tula (weight-file I/O) — unblocked
+- Wire `[deps.tula]` (git+path+tag). A `run`/`inspect` subcommand that opens a
+  tula file (`tula_open`/`tula_read_file`), enumerates tensors (name/dtype/shape),
+  and verifies a signed file (`tula_verify`).
+- **Acceptance:** `tests/tcyr/tula_io.tcyr` — build a tula file (or load one from
+  tula's fixtures), enumerate + verify; CLI `anukulana inspect <file>` works.
+
+### M2 — import + run (THE headline) ⚠ gated on rupantara M1
+- Wire `[deps.rupantara]` + `[deps.rosnet]` + `[deps.akshara]` + stdlib `math`.
+- **Foreign parsers:** read a real **GPT-2-small** checkpoint — parse
+  **safetensors** and/or **GGUF** headers (own parsers, no libs) → tensors.
+- **Tensor-name mapping:** map foreign names/shapes onto rupantara's layout
+  (per-source-arch table); dtype convert (fp16/bf16 → f64).
+- **Run:** forward on rosnet via rupantara → logits.
+- **Acceptance (fidelity gate):** logits match the reference (HF / nanoGPT
+  `from_pretrained`) on a fixed input within tolerance — the B-series fairness
+  shape. `tests/tcyr/import.tcyr` + a recorded number in `docs/benchmarks.md`.
+
+### M3 — LoRA
+- `W' = W + (α/r)·B·A`; A gaussian, B zero; gradients route **only** into A,B via
+  two `rosnet.linear_bwd` passes (no new gradient op). ⚠ the naive
+  `dL/dA = Bᵀ·dL/dZ` is wrong (omits the activation `Xᵀ`) — let `linear_bwd`
+  supply it. **FD-gate the A,B path.** A fine-tune measurably adapts the base.
+
+### M4 — QLoRA / NF4
+- 4-bit blockwise **NormalFloat** (block 64) + per-block absmax scale +
+  **double-quant**; LoRA over the frozen NF4 base; dequant-on-the-fly. Store via
+  tula's `nf4` dtype helpers (tula M2). **User-confirmed additive step.**
+- **Acceptance:** NF4 pack→dequant error bounded; LoRA-over-NF4 fine-tune works.
+
+### M5 — hardening + fuzz + bench
+- Harden the **foreign parsers** (safetensors/GGUF are untrusted input — bounds/
+  overflow/lying-header safe, reject malformed). Fuzz them. Bench import + forward
+  → `docs/benchmarks.md`.
+
+### M6 — security audit + SECURITY.md
+- 6-dimension audit (memory safety · integer overflow · untrusted-parser bounds ·
+  LoRA-gradient correctness · resource caps · fail-loud). Report + `SECURITY.md`.
+
+### v1.0 — freeze & clean cut
+- CLI + API frozen + `docs/api.md` + `STABILITY.md`; ≥1 downstream consumer/example
+  (e.g. a served model via hoosh, or a documented import→adapt→save flow);
+  maintainer bumps VERSION → 1.0.0 + tags.
+
+---
+
+## v1.0 criteria
+
+- [ ] CLI/API frozen + documented (`docs/api.md` + `STABILITY.md`)
+- [ ] **GPT-2 import logit-fidelity gate** (matches reference) — the headline
+- [ ] LoRA FD-gated; QLoRA/NF4 working
+- [ ] Foreign parsers hardened + fuzz clean; bench (`docs/benchmarks.md`)
+- [ ] Security audit + `SECURITY.md`
+- [ ] ≥1 downstream consumer/example green
+- [ ] CHANGELOG complete; version consistency (CI docs gate)
+
+---
+
+## Gates / relations
+
+- **Deps:** tula (format, released) · rupantara (forward — **M2 blocker**) ·
+  rosnet (tensors + LoRA linears) · akshara (tokenizer) · math. CPU-f64 first;
+  larger models want rosnet's mabda GPU profile (deferred).
+- **Boundary:** NF4 import-quant is anukulana's; QAT-from-scratch is tentib's
+  (`integer-native-ml.md`). Rotation-PTQ / one-shot-sparsity stay research-watch.
+- **Ecosystem:** gap #1's importer — `type3-weight-import.md` + `software-port-path.md`.
