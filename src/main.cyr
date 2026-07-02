@@ -1,25 +1,44 @@
 # anukulana (अनुकूलन — adaptation) — Type-3 pretrained-import reference (binary).
 #
-# M0 scaffold: prints usage + version. The real subcommands — import (foreign
-# checkpoint -> tula), run (forward on rosnet via rupantara -> logits), lora,
-# qlora — land per docs/development/roadmap.md.
+# M1: consume tula (the sovereign weight format) — `inspect` opens a checkpoint,
+# lists tensors, and reports its signature. The foreign safetensors/GGUF import +
+# forward-on-rupantara path (the headline) lands in M2 per docs/development/roadmap.md.
 
 include "src/lib.cyr"
 
 fn usage(): i64 {
-    var l1 = "anukulana - sovereign pretrained-import reference (M0 scaffold)\n\n";
-    var l2 = "usage: anukulana <command>\n";
-    var l3 = "  version    print the packed version int\n";
-    var l4 = "  (import / run / lora / qlora land per the roadmap)\n";
+    var l1 = "anukulana - sovereign pretrained-import reference\n\n";
+    var l2 = "usage: anukulana <command> [args]\n";
+    var l3 = "  inspect <file.tula>   open a tula checkpoint: list tensors + signature\n";
+    var l4 = "  version               print the packed version int\n";
+    var l5 = "  (import / run / lora / qlora land per the roadmap)\n";
     syscall(1, 1, l1, strlen(l1));
     syscall(1, 1, l2, strlen(l2));
     syscall(1, 1, l3, strlen(l3));
     syscall(1, 1, l4, strlen(l4));
+    syscall(1, 1, l5, strlen(l5));
     return 0;
 }
 
 fn main(): i64 {
     alloc_init();
+    args_init();
+    if (argc() < 2) { usage(); return 0; }
+    var cmd = argv(1);
+    if (streq(cmd, "inspect") == 1) {
+        if (argc() < 3) {
+            var e = "anukulana: inspect needs a <file.tula>\n";
+            syscall(1, 1, e, strlen(e));
+            return 1;
+        }
+        if (anuk_inspect(argv(2)) < 0) { return 1; }
+        return 0;
+    }
+    if (streq(cmd, "version") == 1) {
+        _anuk_puti(anukulana_version());
+        syscall(1, 1, "\n", 1);
+        return 0;
+    }
     usage();
     return 0;
 }

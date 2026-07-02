@@ -8,21 +8,45 @@
 # akshara) once wired in cyrius.cyml.
 
 # ================================================================
-# Standard library (M0 minimal; M1+ add math + the consumed libs)
+# Standard library — the tula+sigil consumer set (mirrors tula/src/lib.cyr) plus
+# anukulana's CLI needs (args/flags). thread.cyr self-includes mmap + atomic.
 # ================================================================
-include "lib/string.cyr"
-include "lib/fmt.cyr"
+include "lib/assert.cyr"
 include "lib/alloc.cyr"
-include "lib/vec.cyr"
+include "lib/freelist.cyr"
 include "lib/str.cyr"
-include "lib/io.cyr"
+include "lib/string.cyr"
+include "lib/vec.cyr"
+include "lib/hashmap.cyr"
 include "lib/syscalls.cyr"
+include "lib/io.cyr"
+include "lib/fs.cyr"
+include "lib/fmt.cyr"
+include "lib/result.cyr"
+include "lib/fnptr.cyr"
+include "lib/bayan.cyr"
+include "lib/chrono.cyr"
+include "lib/tagged.cyr"
+include "lib/process.cyr"
+include "lib/slice.cyr"
+include "lib/ct.cyr"
+include "lib/keccak.cyr"
+include "lib/thread.cyr"
+include "lib/thread_local.cyr"
+include "lib/random.cyr"
+include "lib/bench.cyr"
 include "lib/args.cyr"
 include "lib/flags.cyr"
-include "lib/assert.cyr"
-include "lib/bench.cyr"
+
+# ================================================================
+# Consumed libraries (resolved from [deps.*] into lib/). sigil BEFORE tula:
+# tula's dist references ed25519_* which sigil supplies.
+# ================================================================
+include "lib/sigil.cyr"
+include "lib/tula.cyr"
 
 # ================================================================
 # anukulana domain modules — flat, dependency order.
 # ================================================================
 include "src/version.cyr"
+include "src/inspect.cyr"      # M1: consume tula (open / enumerate / verify)

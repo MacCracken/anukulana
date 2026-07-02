@@ -50,12 +50,16 @@ M2 when rupantara's forward lands.
 
 ## Remaining milestones
 
-### M1 — consume tula (weight-file I/O) — unblocked
-- Wire `[deps.tula]` (git+path+tag). A `run`/`inspect` subcommand that opens a
-  tula file (`tula_open`/`tula_read_file`), enumerates tensors (name/dtype/shape),
-  and verifies a signed file (`tula_verify`).
-- **Acceptance:** `tests/tcyr/tula_io.tcyr` — build a tula file (or load one from
-  tula's fixtures), enumerate + verify; CLI `anukulana inspect <file>` works.
+### M1 — consume tula (weight-file I/O) ✅ DONE (2026-07-02)
+- Wired `[deps.tula]` 1.0.0 + `[deps.sigil]` 3.9.9. `src/inspect.cyr`: `anuk_inspect`
+  opens a tula file (`tula_read_file`, full validation), `anuk_enumerate` lists
+  tensors (name/dtype/shape/bytes), `anuk_verify` checks the Ed25519 signature
+  (and rejects a wrong key). `inspect` + `version` subcommands in `src/main.cyr`.
+- **Acceptance MET:** `tests/tcyr/tula_io.tcyr` (8 assertions) builds+signs a
+  checkpoint, reads it as untrusted, enumerates (2 tensors), verifies (OK +
+  wrong-key rejected), payload-ok guard, bit-exact tensor round-trip; suite 1 → **9**
+  green. CLI `anukulana inspect <file>` verified end-to-end; missing/malformed file
+  fails cleanly (rc=1, no crash).
 
 ### M2 — import + run (THE headline) ⚠ gated on rupantara M1
 - Wire `[deps.rupantara]` + `[deps.rosnet]` + `[deps.akshara]` + stdlib `math`.

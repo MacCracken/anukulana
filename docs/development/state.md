@@ -5,9 +5,12 @@
 
 ## Version
 
-**0.1.0 — unreleased.** **M0: buildable scaffold** for the Type-3 pretrained-import
-reference binary. `src/main.cyr` prints usage/version; builds + 1 test green. No
-importer/forward yet — those are M1 (tula I/O) and M2 (import+run).
+**0.1.0 — unreleased.** **M1: consume tula DONE** (2026-07-02) — `inspect` opens a
+tula checkpoint, enumerates tensors (name/dtype/shape/bytes), and verifies its
+Ed25519 signature (tamper-reject); `tests/tcyr/tula_io.tcyr` **9** green, CLI
+verified end-to-end, malformed input fails cleanly. M0 scaffold underneath. Next:
+**M2** — the foreign safetensors importer + forward on rupantara (**unblocked**:
+rupantara released 0.4.0).
 
 No released tags yet.
 
@@ -24,11 +27,14 @@ block in `cyrius.cyml`).
 
 ## Cross-repo status
 
-- **tula** — released 0.1.0 (format ready). anukulana **M1 is unblocked**.
-- **rupantara** — scaffolded (forward is its M1). anukulana **M2 gated on it**.
-- **rosnet / akshara** — exist.
+- **tula** — released 1.0.0 (format frozen). anukulana **M1 DONE** (consumed).
+- **rupantara** — released 0.4.0 (forward + KV-cache decode, parity-proven).
+  anukulana **M2 UNBLOCKED**.
+- **rosnet / akshara** — exist (M2 wires them).
 
 ## Next
 
-**M1** — consume tula: an `inspect`/`run` subcommand that opens a tula file,
-enumerates tensors, verifies signatures. See `roadmap.md`.
+**M2 — import + run (the headline):** parse a foreign **GPT-2-small safetensors**
+(own parser, no libs) → map foreign tensor names/shapes onto rupantara's packed
+layout (fp16/bf16 → f64) → run `ru_model_fwd` → logit-fidelity gate vs a reference.
+Untrusted-parser hardening pulled forward. See `roadmap.md`.

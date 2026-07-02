@@ -1,0 +1,89 @@
+# @public — anukulana M1: consume tula (weight-file I/O). Open a tula checkpoint,
+# enumerate its tensors, and verify/report its signature. This is the Type-3
+# importer's first capability — read the SOVEREIGN weight format (tula) before the
+# foreign safetensors/GGUF path lands in M2. Untrusted-input safe by delegation:
+# tula_read_file fully validates (bomb-guard + tula_validate) before any accessor.
+
+fn _anuk_sput(s): i64 { syscall(1, 1, s, strlen(s)); return 0; }
+
+# print an i64 as decimal to stdout (minimal; dims / counts / lengths).
+fn _anuk_puti(n): i64 {
+    if (n < 0) { _anuk_sput("-"); n = 0 - n; }
+    if (n == 0) { _anuk_sput("0"); return 0; }
+    var buf = alloc(24);
+    var i = 0;
+    while (n > 0) {
+        store8(buf + i, (n % 10) + 48);
+        n = n / 10;
+        i = i + 1;
+    }
+    var j = i - 1;
+    while (j >= 0) { syscall(1, 1, buf + j, 1); j = j - 1; }
+    return 0;
+}
+
+# tula dtype int -> human name (tula has no such helper).
+fn _anuk_dtype_name(dt): i64 {
+    if (dt == TULA_DT_F64) { return "f64"; }
+    if (dt == TULA_DT_INT8) { return "int8"; }
+    if (dt == TULA_DT_TERNARY) { return "ternary"; }
+    if (dt == TULA_DT_NF4) { return "nf4"; }
+    return "?";
+}
+
+# enumerate the tensors in an opened+validated tula reader; returns the count.
+fn anuk_enumerate(r): i64 {
+    var n = tula_count(r);
+    _anuk_sput("tensors: "); _anuk_puti(n); _anuk_sput("\n");
+    var i = 0;
+    while (i < n) {
+        var e = tula_entry(r, i);
+        _anuk_sput("  ");
+        _anuk_sput(tula_entry_name(e));
+        _anuk_sput("  dtype=");
+        _anuk_sput(_anuk_dtype_name(tula_entry_dtype(e)));
+        _anuk_sput("  shape=[");
+        var nd = tula_entry_ndim(e);
+        var k = 0;
+        while (k < nd) {
+            if (k > 0) { _anuk_sput(","); }
+            _anuk_puti(tula_entry_dim(e, k));
+            k = k + 1;
+        }
+        _anuk_sput("]  bytes=");
+        _anuk_puti(tula_entry_data_len(e));
+        _anuk_sput("\n");
+        i = i + 1;
+    }
+    return n;
+}
+
+# verify a reader against a 32-byte Ed25519 public key. Returns the TulaSigStatus
+# (TULA_SIG_UNSIGNED / TULA_SIG_OK / TULA_SIG_BAD) and prints a line.
+fn anuk_verify(r, pk): i64 {
+    var st = tula_verify(r, pk);
+    if (st == TULA_SIG_OK) { _anuk_sput("signature: OK (Ed25519 verified)\n"); }
+    elif (st == TULA_SIG_UNSIGNED) { _anuk_sput("signature: none\n"); }
+    else { _anuk_sput("signature: BAD (rejected)\n"); }
+    return st;
+}
+
+# open a tula file + report + enumerate. Returns tensor count, or -1 if the file
+# is missing/malformed (tula_read_file returned 0 after full validation).
+fn anuk_inspect(path): i64 {
+    var r = tula_read_file(path);
+    if (r == 0) {
+        _anuk_sput("anukulana: cannot open (missing or malformed): ");
+        _anuk_sput(path);
+        _anuk_sput("\n");
+        return 0 - 1;
+    }
+    _anuk_sput("tula file: "); _anuk_sput(path); _anuk_sput("\n");
+    _anuk_sput("format: v"); _anuk_puti(tula_format_version(r)); _anuk_sput("\n");
+    if (tula_is_signed(r) != 0) {
+        _anuk_sput("signature: present (Ed25519) — pass a pubkey to verify\n");
+    } else {
+        _anuk_sput("signature: none\n");
+    }
+    return anuk_enumerate(r);
+}

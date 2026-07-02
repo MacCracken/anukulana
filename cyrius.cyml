@@ -19,16 +19,51 @@ output = "build/anukulana"
 #   [deps.rosnet]    — f64 tensors + matmul + LoRA linears     (M2)
 #   [deps.akshara]   — the tokenizer                           (M2)
 # plus stdlib += "math".
+# M1 wires tula (weight format) + sigil (its Ed25519 signature dep). The stdlib
+# set is the union of anukulana's CLI needs (args/flags) and tula+sigil's
+# (mirrors tula/dist/tula.deps); extras are DCE'd.
 stdlib = [
-    "string",
-    "fmt",
+    "assert",
     "alloc",
-    "io",
-    "vec",
+    "freelist",
     "str",
+    "string",
+    "vec",
+    "hashmap",
     "syscalls",
+    "io",
+    "fs",
+    "fmt",
+    "result",
+    "fnptr",
+    "bayan",
+    "chrono",
+    "tagged",
+    "process",
+    "slice",
+    "ct",
+    "keccak",
+    "thread",
+    "thread_local",
+    "random",
+    "bench",
     "args",
     "flags",
-    "assert",
-    "bench",
 ]
+
+# sigil — the sovereign crypto boundary; supplies the ed25519_* that tula's
+# dist/tula.cyr leaves unresolved (the standard consumer-bundle pattern). Local
+# dev resolves via path=../sigil; CI via git+tag.
+[deps.sigil]
+git = "https://github.com/MacCracken/sigil.git"
+path = "../sigil"
+tag = "3.9.9"
+modules = ["dist/sigil.cyr"]
+
+# tula — the sovereign weight-file format (read/write/verify). M1 consumes it to
+# open + enumerate + verify a checkpoint before the foreign safetensors path (M2).
+[deps.tula]
+git = "https://github.com/MacCracken/tula.git"
+path = "../tula"
+tag = "1.0.0"
+modules = ["dist/tula.cyr"]

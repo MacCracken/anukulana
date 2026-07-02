@@ -6,6 +6,24 @@ moving, no API freeze until v1.0).
 
 ## [0.1.0] — Unreleased
 
+**M1 — consume tula (weight-file I/O).** anukulana reads the sovereign weight
+format: `inspect <file.tula>` opens a checkpoint, enumerates its tensors
+(name / dtype / shape / bytes), and reports/verifies its Ed25519 signature.
+Untrusted-input safe — `tula_read_file` fully validates before any accessor, and a
+missing/malformed file fails cleanly (rc=1, no crash).
+
+### Added
+- **tula + sigil wired** (`[deps.tula]` 1.0.0 + `[deps.sigil]` 3.9.9; stdlib set =
+  the tula+sigil consumer union + `args`/`flags`). `src/inspect.cyr`:
+  `anuk_inspect` (open + report + enumerate), `anuk_enumerate` (list tensors),
+  `anuk_verify` (Ed25519 verify / tamper-reject), plus local dtype-name + decimal
+  printers.
+- **`inspect` + `version` subcommands** (`src/main.cyr`, `argc`/`argv` dispatch).
+- **`tests/tcyr/tula_io.tcyr`** (8 assertions): build+sign a checkpoint → read as
+  untrusted → enumerate (2 tensors) → verify OK / wrong-key rejected → payload-ok
+  guard → tensor round-trips bit-exact. Suite 1 → **9**. CLI `anukulana inspect`
+  verified end-to-end on the signed fixture.
+
 **M0 — buildable scaffold.** Repo skeleton for the Type-3 pretrained-import
 reference binary.
 

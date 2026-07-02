@@ -1,0 +1,75 @@
+# tests/tcyr/tula_io.tcyr — M1: consume tula (weight-file I/O).
+# Build a signed tula checkpoint, then load it as untrusted input and exercise
+# anukulana's M1 surface: enumerate tensors, verify the signature (and reject a
+# wrong key), and confirm a tensor round-trips bit-exact.
+include "src/lib.cyr"
+include "lib/assert.cyr"
+
+fn test_tula_io(): i64 {
+    # ---- a tiny "checkpoint": a 2x2 f64 weight + a length-2 f64 bias ----
+    var n = 4;
+    var w = alloc(n * 8);
+    store64(w + 0 * 8, f64_from(1)); store64(w + 1 * 8, f64_from(2));
+    store64(w + 2 * 8, f64_from(3)); store64(w + 3 * 8, f64_from(4));
+    var bn = 2;
+    var bias = alloc(bn * 8);
+    store64(bias + 0 * 8, f64_from(5)); store64(bias + 1 * 8, f64_from(6));
+
+    # ---- Ed25519 keypair (deterministic seed) ----
+    var sk = alloc(64);
+    var pk = alloc(32);
+    var seed = alloc(32);
+    var k = 0;
+    while (k < 32) { store8(seed + k, (k + 3) & 0xFF); k = k + 1; }
+    ed25519_keypair(seed, sk, pk);
+
+    # ---- build + sign ----
+    var shapeW = alloc(16);
+    store64(shapeW, 2); store64(shapeW + 8, 2);      # 2 x 2
+    var shapeB = alloc(8);
+    store64(shapeB, bn);
+    var b = tula_builder_new();
+    tula_builder_add(b, "layer.w", TULA_DT_F64, shapeW, 2, w, n * 8);
+    tula_builder_add(b, "layer.b", TULA_DT_F64, shapeB, 1, bias, bn * 8);
+    var buf = tula_builder_finish_signed(b, sk);
+    var total = tula_total_len(buf);
+    var path = "/tmp/anuk_m1_test.tula";
+    assert_eq(tula_write_file(path, buf, total), total, "wrote signed tula file");
+
+    # ---- load as untrusted (fresh reader) ----
+    var r = tula_read_file(path);
+    assert(r != 0, "tula_read_file opened + validated the file");
+
+    # enumerate via anukulana's M1 surface
+    assert_eq(anuk_enumerate(r), 2, "anuk_enumerate found 2 tensors");
+
+    # verify: correct pubkey OK, wrong pubkey rejected (tamper/authenticity gate)
+    assert_eq(anuk_verify(r, pk), TULA_SIG_OK, "anuk_verify OK with correct pubkey");
+    var badpk = alloc(32);
+    k = 0;
+    while (k < 32) { store8(badpk + k, (k + 99) & 0xFF); k = k + 1; }
+    assert(anuk_verify(r, badpk) != TULA_SIG_OK, "anuk_verify rejects a wrong pubkey");
+
+    # tensor round-trips bit-exact through the validated reader
+    var ew = tula_find(r, "layer.w");
+    assert(ew != 0, "tula_find located layer.w");
+    assert_eq(tula_entry_payload_ok(ew), 1, "payload-ok guard passes for layer.w");
+    var wp = tula_entry_data(r, ew);
+    var ok = 1;
+    var i = 0;
+    while (i < n) {
+        if (load64(wp + i * 8) != load64(w + i * 8)) { ok = 0; }
+        i = i + 1;
+    }
+    assert_eq(ok, 1, "layer.w round-trips bit-exact");
+    return 0;
+}
+
+fn main(): i64 {
+    alloc_init();
+    test_tula_io();
+    return assert_summary();
+}
+
+var rc = main();
+syscall(60, rc);
