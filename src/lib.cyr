@@ -37,13 +37,18 @@ include "lib/random.cyr"
 include "lib/bench.cyr"
 include "lib/args.cyr"
 include "lib/flags.cyr"
+include "lib/math.cyr"
+include "lib/ganita.cyr"
 
 # ================================================================
-# Consumed libraries (resolved from [deps.*] into lib/). sigil BEFORE tula:
-# tula's dist references ed25519_* which sigil supplies.
+# Consumed libraries (resolved from [deps.*] into lib/). sigil BEFORE tula
+# (tula's dist references ed25519_*); rosnet BEFORE rupantara (rupantara's
+# forward calls rosnet's linear_fwd + tensor helpers).
 # ================================================================
 include "lib/sigil.cyr"
 include "lib/tula.cyr"
+include "lib/rosnet.cyr"
+include "lib/rupantara.cyr"
 
 # ================================================================
 # anukulana domain modules — flat, dependency order.

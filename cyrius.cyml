@@ -49,6 +49,8 @@ stdlib = [
     "bench",
     "args",
     "flags",
+    "math",
+    "ganita",
 ]
 
 # sigil — the sovereign crypto boundary; supplies the ed25519_* that tula's
@@ -67,3 +69,20 @@ git = "https://github.com/MacCracken/tula.git"
 path = "../tula"
 tag = "1.0.0"
 modules = ["dist/tula.cyr"]
+
+# rosnet — f64 tensors + BLAS-1 + matmul (linear_fwd/linear_bwd, t_alloc/…). M2
+# runs the imported model's forward through it (via rupantara) + LoRA linears.
+[deps.rosnet]
+git = "https://github.com/MacCracken/rosnet.git"
+path = "../rosnet"
+tag = "0.2.0"
+modules = ["dist/rosnet.cyr"]
+
+# rupantara — the sovereign transformer FORWARD (ru_model_fwd). M2 maps an
+# imported GPT-2 checkpoint onto rupantara's packed layout and runs it. CPU-only
+# (no mabda/gpu). rosnet MUST be included before rupantara (rupantara calls it).
+[deps.rupantara]
+git = "https://github.com/MacCracken/rupantara.git"
+path = "../rupantara"
+tag = "0.4.0"
+modules = ["dist/rupantara.cyr"]

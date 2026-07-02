@@ -28,6 +28,10 @@ real GPT-2 checkpoint and running it on rupantara.
   and F32 widened bit-exact, `__metadata__` skipped, truncated/overrun rejected).
   Suite 9 → **39**.
 
+- **Forward stack wired** — `[deps.rupantara]` 0.4.0 + `[deps.rosnet]` 0.2.0 +
+  stdlib `math`/`ganita`. `ru_model_fwd` / `ru_cfg_init` / `linear_fwd` now callable;
+  build green, suite unchanged (39).
+
 ### Remaining (M2)
 - Map GPT-2 tensor names/shapes onto rupantara's packed layout (fused-QKV split,
   Conv1D transpose via `ganita`) → run `ru_model_fwd` → logit-fidelity gate.
