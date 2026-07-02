@@ -70,11 +70,17 @@ M2 when rupantara's forward lands.
   + full parse round-trip + untrusted-buffer rejection). Suite 9 → **39**.
   *("own parsers, no libs" clarified: no foreign safetensors/GGUF lib — but bayan
   IS the sovereign JSON parser; use it, don't reinvent.)*
-- **Bite 2 (next) — GPT-2 → rupantara mapping:** wire `[deps.rupantara]` +
-  `[deps.rosnet]` + `[deps.akshara]` + stdlib `math`. Map foreign names/shapes onto
-  rupantara's packed layout (per-source-arch table; **fused-QKV split** of GPT-2
-  `c_attn`; **Conv1D transpose** via `ganita`); dtype convert (fp16/bf16 → f64, done).
-- **Bite 3 — run:** forward on rosnet via `ru_model_fwd` → logits.
+- **✅ Bite 2 — GPT-2 → rupantara mapping DONE (2026-07-02):** `src/gpt2.cyr`
+  (`anuk_gpt2_infer_cfg` + `anuk_gpt2_pack`, packing through rupantara's own
+  `_ru_o_*`/`_p_*` offset helpers). **Weight convention verified vs rosnet source
+  = `[in,out]` (GPT-2 Conv1D) ⇒ NO transpose** (nanoGPT transposes only for
+  `nn.Linear`); the real remap is the **fused-QKV column split**, everything else a
+  direct copy. `tests/tcyr/gpt2.tcyr` (10) — export→import round-trip with packed
+  params **and** `ru_model_fwd` logits both **bit-identical** to the direct forward
+  (bayan-built safetensors writer in the test). Suite 39 → **49**.
+- **Bite 3 (headline, next) — real GPT-2-small:** import an actual HF GPT-2-small
+  safetensors (fp32) and match the reference (`from_pretrained`) logits on a fixed
+  input. Needs the external checkpoint; the parser + wideners + mapping are proven.
 - **Acceptance (fidelity gate):** logits match the reference (HF / nanoGPT
   `from_pretrained`) on a fixed input within tolerance — the B-series fairness
   shape. `tests/tcyr/import.tcyr` + a recorded number in `docs/benchmarks.md`.

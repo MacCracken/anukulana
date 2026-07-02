@@ -10,9 +10,13 @@
 parses `[u64 len][JSON header][data]` (header via **bayan**'s sovereign JSON DOM,
 not hand-rolled) into a bounds-checked tensor directory; IEEE-754 f32/f16/bf16→f64
 wideners; `st_read_f64`. `tests/tcyr/safetensors.tcyr` **30** green (wideners
-bit-exact + parse round-trip + untrusted-buffer rejection); suite **39**. Next:
-**bite 2** — GPT-2→rupantara layout mapping (fused-QKV split, Conv1D transpose via
-ganita) → run `ru_model_fwd` → fidelity gate.
+bit-exact + parse round-trip + untrusted-buffer rejection). **Bite 2 — GPT-2→rupantara
+mapping DONE** (`src/gpt2.cyr`; fused-QKV split, NO transpose [rosnet `linear_fwd`
+is Conv1D `[in,out]`, verified vs source]; packs via rupantara's own offset
+helpers). `tests/tcyr/gpt2.tcyr` (10) — export→import round-trip with packed params
+**and** forward logits both **bit-identical**; suite **49**. Forward stack wired
+(rupantara 0.4.0 + rosnet 0.2.0). Next: **bite 3** — real HF GPT-2-small (fp32) +
+reference-logit fidelity gate (needs the external checkpoint).
 
 Released: **0.1.0**.
 

@@ -29,12 +29,27 @@ real GPT-2 checkpoint and running it on rupantara.
   Suite 9 → **39**.
 
 - **Forward stack wired** — `[deps.rupantara]` 0.4.0 + `[deps.rosnet]` 0.2.0 +
-  stdlib `math`/`ganita`. `ru_model_fwd` / `ru_cfg_init` / `linear_fwd` now callable;
-  build green, suite unchanged (39).
+  stdlib `math`/`ganita`. `ru_model_fwd` / `ru_cfg_init` / `linear_fwd` now callable.
+- **`src/gpt2.cyr` — GPT-2 → rupantara mapping (bite 2).** `anuk_gpt2_infer_cfg`
+  (reads V/C/T/NL from tensor shapes; nh supplied) + `anuk_gpt2_pack` (packs an
+  imported checkpoint into rupantara's layout via *its own* `_ru_o_*`/`_p_*`
+  offset helpers). **Weight convention verified against rosnet `linear_fwd`
+  source: it is `[in,out]` `y=x@W` — the same as GPT-2's Conv1D — so NO transpose**
+  (nanoGPT transposes only because it targets `nn.Linear`). The one real remap is
+  the **fused-QKV column split** (`c_attn` `[C,3C]`→Wq/Wk/Wv, bias `[3C]`→bq/bk/bv);
+  everything else is a direct copy (learned pos / tanh-GELU / weight-tied head all
+  already match rupantara). fp16/bf16→f64 widening from bite 1.
+- **`tests/tcyr/gpt2.tcyr` (10 assertions) — self-contained round-trip fidelity.**
+  Build a model in rupantara's layout → export as GPT-2-named safetensors (header
+  built by **bayan**, Q/K/V fused) → import back → assert (a) packed params
+  **bit-identical** and (b) `ru_model_fwd` logits **bit-identical** to the direct
+  forward. Suite 39 → **49**.
 
 ### Remaining (M2)
-- Map GPT-2 tensor names/shapes onto rupantara's packed layout (fused-QKV split,
-  Conv1D transpose via `ganita`) → run `ru_model_fwd` → logit-fidelity gate.
+- **Bite 3 (headline):** import a *real* GPT-2-small safetensors + match the
+  reference (HF / nanoGPT `from_pretrained`) logits on a fixed input — needs the
+  external checkpoint + fp32 payload (wideners + mapping already proven here).
+  Then LoRA (M3) — two low-rank `rosnet.linear` passes (FD-gated).
 
 ## [0.1.0] — 2026-07-02
 

@@ -1,0 +1,162 @@
+# @public — anukulana M2: GPT-2 (HuggingFace safetensors) -> rupantara packed layout.
+#
+# CONVENTION (verified against rosnet linear_fwd): GPT-2 uses Conv1D — weight
+# [in, out], y = x @ W — which is EXACTLY rosnet's linear_fwd layout (W[k*N+n],
+# y = x@W). So weight copies are DIRECT: no transpose. (nanoGPT transposes only
+# because it targets nn.Linear, which is [out, in]; rupantara is Conv1D-native.)
+# The one non-trivial remap is the FUSED QKV: GPT-2 packs Q/K/V into one c_attn
+# weight [C, 3C] + bias [3C]; rupantara wants separate Wq/Wk/Wv + bq/bk/bv, so we
+# column-split. wte/wpe/LN/GELU/tied-head already match rupantara (learned-abs
+# positions, tanh-GELU, weight-tied unembed). Params are written through
+# rupantara's OWN offset helpers (_ru_o_* / _p_* / _bq..), the layout's single
+# source of truth. Full-MHA (nh == nkv, Ckv == C), attn_bias = 1 (GPT-2 has biases).
+
+# decimal itoa into buf; returns digit count.
+fn _gpt2_itoa(n, buf): i64 {
+    if (n == 0) { store8(buf, 48); return 1; }
+    var tmp[24];
+    var i = 0;
+    while (n > 0) { store8(&tmp + i, (n % 10) + 48); n = n / 10; i = i + 1; }
+    var j = 0;
+    while (j < i) { store8(buf + j, load8(&tmp + (i - 1 - j))); j = j + 1; }
+    return i;
+}
+
+# build "h.<L>.<suffix>" (null-terminated) into buf; returns buf.
+fn _gpt2_name(buf, L, suffix): i64 {
+    var p = 0;
+    store8(buf + p, 104); p = p + 1;    # 'h'
+    store8(buf + p, 46); p = p + 1;     # '.'
+    p = p + _gpt2_itoa(L, buf + p);
+    store8(buf + p, 46); p = p + 1;     # '.'
+    var s = 0;
+    while (load8(suffix + s) != 0) { store8(buf + p, load8(suffix + s)); p = p + 1; s = s + 1; }
+    store8(buf + p, 0);
+    return buf;
+}
+
+# copy tensor `name` into dst[0..n) (widening per dtype). n = expected nelems.
+# returns 0 | -1 missing | -2 shape mismatch | -3 unsupported dtype.
+fn _gpt2_copy(r, name, dst, n): i64 {
+    var e = st_find(r, name);
+    if (e == 0) { return 0 - 1; }
+    if (st_entry_nelems(e) != n) { return 0 - 2; }
+    if (st_read_f64(r, e, dst) != 0) { return 0 - 3; }
+    return 0;
+}
+# copy the first `n` elements of a possibly-larger tensor (wpe [1024,C] -> [T,C]).
+fn _gpt2_copy_prefix(r, name, dst, n): i64 {
+    var e = st_find(r, name);
+    if (e == 0) { return 0 - 1; }
+    var full = st_entry_nelems(e);
+    if (full < n) { return 0 - 2; }
+    var tmp = t_alloc(full);
+    if (st_read_f64(r, e, tmp) != 0) { return 0 - 3; }
+    var i = 0;
+    while (i < n) { store64(dst + i * 8, load64(tmp + i * 8)); i = i + 1; }
+    return 0;
+}
+
+# Infer V,C,T,NL from tensor shapes (nh is NOT in safetensors -> caller supplies).
+# Fills cfg via ru_cfg_init(V,C,T,nh,nh,NL,4C,1). Returns 0 | -1 (missing shapes).
+fn anuk_gpt2_infer_cfg(r, cfg, nh): i64 {
+    var ew = st_find(r, "wte.weight");
+    var ep = st_find(r, "wpe.weight");
+    if (ew == 0) { return 0 - 1; }
+    if (ep == 0) { return 0 - 1; }
+    if (st_entry_ndim(ew) != 2) { return 0 - 1; }
+    var V = st_entry_dim(ew, 0);
+    var C = st_entry_dim(ew, 1);
+    var T = st_entry_dim(ep, 0);
+    var namebuf = alloc(64);
+    var NL = 0;
+    var more = 1;
+    while (more == 1) {
+        _gpt2_name(namebuf, NL, "ln_1.weight");
+        if (st_find(r, namebuf) == 0) { more = 0; }
+        else { NL = NL + 1; }
+    }
+    ru_cfg_init(cfg, V, C, T, nh, nh, NL, 4 * C, 1);
+    return 0;
+}
+
+# Pack an imported GPT-2 checkpoint into rupantara's packed `params` buffer
+# (sized ru_params_count(cfg)*8). cfg must be configured (anuk_gpt2_infer_cfg).
+# Returns 0, or a negative _gpt2_copy error (missing/mismatched tensor).
+fn anuk_gpt2_pack(r, cfg, params): i64 {
+    var V = _cfg_V(cfg);
+    var C = _cfg_C(cfg);
+    var T = _cfg_T(cfg);
+    var NL = _cfg_NL(cfg);
+    var F = _cfg_F(cfg);
+    var rc = _gpt2_copy(r, "wte.weight", _p_tokemb(params), V * C);
+    if (rc != 0) { return rc; }
+    rc = _gpt2_copy_prefix(r, "wpe.weight", _p_posemb(params, cfg), T * C);
+    if (rc != 0) { return rc; }
+    var namebuf = alloc(64);
+    var catw = t_alloc(C * 3 * C);
+    var catb = t_alloc(3 * C);
+    var L = 0;
+    while (L < NL) {
+        var pblk = params + _ru_blk_base(cfg, L) * 8;
+        rc = _gpt2_copy(r, _gpt2_name(namebuf, L, "ln_1.weight"), pblk + _ru_o_ln1g(cfg) * 8, C);
+        if (rc != 0) { return rc; }
+        rc = _gpt2_copy(r, _gpt2_name(namebuf, L, "ln_1.bias"), pblk + _ru_o_ln1b(cfg) * 8, C);
+        if (rc != 0) { return rc; }
+        # fused c_attn.weight [C,3C] -> Wq/Wk/Wv [C,C] (column split)
+        rc = _gpt2_copy(r, _gpt2_name(namebuf, L, "attn.c_attn.weight"), catw, C * 3 * C);
+        if (rc != 0) { return rc; }
+        var Wq = pblk + _ru_o_Wq(cfg) * 8;
+        var Wk = pblk + _ru_o_Wk(cfg) * 8;
+        var Wv = pblk + _ru_o_Wv(cfg) * 8;
+        var i = 0;
+        while (i < C) {
+            var o = 0;
+            while (o < C) {
+                store64(Wq + (i * C + o) * 8, load64(catw + (i * 3 * C + o) * 8));
+                store64(Wk + (i * C + o) * 8, load64(catw + (i * 3 * C + C + o) * 8));
+                store64(Wv + (i * C + o) * 8, load64(catw + (i * 3 * C + 2 * C + o) * 8));
+                o = o + 1;
+            }
+            i = i + 1;
+        }
+        # fused c_attn.bias [3C] -> bq/bk/bv [C]
+        rc = _gpt2_copy(r, _gpt2_name(namebuf, L, "attn.c_attn.bias"), catb, 3 * C);
+        if (rc != 0) { return rc; }
+        var bq = _bq(cfg, pblk);
+        var bk = _bk(cfg, pblk);
+        var bv = _bv(cfg, pblk);
+        var c = 0;
+        while (c < C) {
+            store64(bq + c * 8, load64(catb + c * 8));
+            store64(bk + c * 8, load64(catb + (C + c) * 8));
+            store64(bv + c * 8, load64(catb + (2 * C + c) * 8));
+            c = c + 1;
+        }
+        # c_proj (Wo, bo)
+        rc = _gpt2_copy(r, _gpt2_name(namebuf, L, "attn.c_proj.weight"), pblk + _ru_o_Wo(cfg) * 8, C * C);
+        if (rc != 0) { return rc; }
+        rc = _gpt2_copy(r, _gpt2_name(namebuf, L, "attn.c_proj.bias"), _bo(cfg, pblk), C);
+        if (rc != 0) { return rc; }
+        # ln_2
+        rc = _gpt2_copy(r, _gpt2_name(namebuf, L, "ln_2.weight"), pblk + _ru_o_ln2g(cfg) * 8, C);
+        if (rc != 0) { return rc; }
+        rc = _gpt2_copy(r, _gpt2_name(namebuf, L, "ln_2.bias"), pblk + _ru_o_ln2b(cfg) * 8, C);
+        if (rc != 0) { return rc; }
+        # mlp
+        rc = _gpt2_copy(r, _gpt2_name(namebuf, L, "mlp.c_fc.weight"), pblk + _ru_o_Wfc(cfg) * 8, C * F);
+        if (rc != 0) { return rc; }
+        rc = _gpt2_copy(r, _gpt2_name(namebuf, L, "mlp.c_fc.bias"), pblk + _ru_o_bfc(cfg) * 8, F);
+        if (rc != 0) { return rc; }
+        rc = _gpt2_copy(r, _gpt2_name(namebuf, L, "mlp.c_proj.weight"), pblk + _ru_o_Wproj(cfg) * 8, F * C);
+        if (rc != 0) { return rc; }
+        rc = _gpt2_copy(r, _gpt2_name(namebuf, L, "mlp.c_proj.bias"), pblk + _ru_o_bproj(cfg) * 8, C);
+        if (rc != 0) { return rc; }
+        L = L + 1;
+    }
+    rc = _gpt2_copy(r, "ln_f.weight", _p_lnfg(params, cfg), C);
+    if (rc != 0) { return rc; }
+    rc = _gpt2_copy(r, "ln_f.bias", _p_lnfb(params, cfg), C);
+    if (rc != 0) { return rc; }
+    return 0;
+}

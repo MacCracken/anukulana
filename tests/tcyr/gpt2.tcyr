@@ -1,0 +1,208 @@
+# tests/tcyr/gpt2.tcyr — M2 bite 2: GPT-2 -> rupantara mapping, round-trip fidelity.
+# Build a model in rupantara's packed layout, EXPORT it as GPT-2-named safetensors
+# (bayan builds the JSON header; Q/K/V fused back into c_attn), then IMPORT it back
+# via anuk_gpt2_infer_cfg + anuk_gpt2_pack and assert (a) the packed params are
+# bit-identical and (b) ru_model_fwd on the imported model == the direct forward.
+# Self-contained (no external checkpoint); the real GPT-2-small + HF-reference gate
+# is bite 3.
+include "src/lib.cyr"
+include "lib/assert.cyr"
+
+fn _put_u32_le(p, x): i64 {
+    store8(p + 0, x & 0xFF); store8(p + 1, (x >> 8) & 0xFF);
+    store8(p + 2, (x >> 16) & 0xFF); store8(p + 3, (x >> 24) & 0xFF);
+    return 0;
+}
+fn _put_u64_le(p, x): i64 {
+    _put_u32_le(p, x & 0xFFFFFFFF); _put_u32_le(p + 4, (x >> 32) & 0xFFFFFFFF);
+    return 0;
+}
+fn _bcopy(dst, src, n): i64 {
+    var i = 0; while (i < n) { store8(dst + i, load8(src + i)); i = i + 1; }
+    return 0;
+}
+fn _shp1(a): i64 { var s = alloc(8); store64(s, a); return s; }
+fn _shp2(a, b): i64 { var s = alloc(16); store64(s, a); store64(s + 8, b); return s; }
+
+# ---- a minimal safetensors WRITER (F64), header built with bayan --------------
+fn _stw_new(): i64 { var w = alloc(8 + 64 * 32); store64(w, 0); return w; }
+fn _stw_nelems(shape, ndim): i64 {
+    var p = 1; var k = 0;
+    while (k < ndim) { p = p * load64(shape + k * 8); k = k + 1; }
+    return p;
+}
+fn _stw_add(w, name, data, shape, ndim): i64 {
+    var n = load64(w);
+    var s = w + 8 + n * 32;
+    store64(s + 0, name); store64(s + 8, data); store64(s + 16, shape); store64(s + 24, ndim);
+    store64(w, n + 1);
+    return 0;
+}
+fn _stw_finish(w, out_len): i64 {
+    var n = load64(w);
+    var root = bayan_json_v_obj_new();
+    var off = 0;
+    var i = 0;
+    while (i < n) {
+        var s = w + 8 + i * 32;
+        var ndim = load64(s + 24);
+        var ne = _stw_nelems(load64(s + 16), ndim);
+        var bytes = ne * 8;
+        var ent = bayan_json_v_obj_new();
+        # bayan obj keys + string values are Str structs, not raw cstrings.
+        bayan_json_v_obj_set(ent, str_from("dtype"), bayan_json_v_str_new(str_from("F64")));
+        var sh = bayan_json_v_arr_new();
+        var k = 0;
+        while (k < ndim) { bayan_json_v_arr_push(sh, bayan_json_v_int_new(load64(load64(s + 16) + k * 8))); k = k + 1; }
+        bayan_json_v_obj_set(ent, str_from("shape"), sh);
+        var of = bayan_json_v_arr_new();
+        bayan_json_v_arr_push(of, bayan_json_v_int_new(off));
+        bayan_json_v_arr_push(of, bayan_json_v_int_new(off + bytes));
+        bayan_json_v_obj_set(ent, str_from("data_offsets"), of);
+        bayan_json_v_obj_set(root, str_from(load64(s + 0)), ent);
+        off = off + bytes;
+        i = i + 1;
+    }
+    var hdr = bayan_json_v_build(root);          # returns a Str, not a cstring
+    var hlen = str_len(hdr);
+    var total = 8 + hlen + off;
+    var blob = alloc(total);
+    _put_u64_le(blob, hlen);
+    _bcopy(blob + 8, str_data(hdr), hlen);
+    var poff = 0;
+    i = 0;
+    while (i < n) {
+        var s = w + 8 + i * 32;
+        var ne = _stw_nelems(load64(s + 16), load64(s + 24));
+        var dst = blob + 8 + hlen + poff;
+        var b = 0;
+        while (b < ne) { store64(dst + b * 8, load64(load64(s + 8) + b * 8)); b = b + 1; }
+        poff = poff + ne * 8;
+        i = i + 1;
+    }
+    store64(out_len, total);
+    return blob;
+}
+
+# name buffers must persist (bayan keys); alloc a fresh one each call.
+fn _nm(L, suffix): i64 { return _gpt2_name(alloc(64), L, suffix); }
+
+# EXPORT rupantara packed params P -> GPT-2 safetensors blob (NL layers).
+fn _export_gpt2(cfg, P, out_len): i64 {
+    var V = _cfg_V(cfg); var C = _cfg_C(cfg); var T = _cfg_T(cfg);
+    var NL = _cfg_NL(cfg); var F = _cfg_F(cfg);
+    var w = _stw_new();
+    _stw_add(w, "wte.weight", _p_tokemb(P), _shp2(V, C), 2);
+    _stw_add(w, "wpe.weight", _p_posemb(P, cfg), _shp2(T, C), 2);
+    var L = 0;
+    while (L < NL) {
+        var pblk = P + _ru_blk_base(cfg, L) * 8;
+        _stw_add(w, _nm(L, "ln_1.weight"), pblk + _ru_o_ln1g(cfg) * 8, _shp1(C), 1);
+        _stw_add(w, _nm(L, "ln_1.bias"), pblk + _ru_o_ln1b(cfg) * 8, _shp1(C), 1);
+        # FUSE Wq/Wk/Wv [C,C] -> c_attn.weight [C,3C]
+        var catw = alloc(C * 3 * C * 8);
+        var Wq = pblk + _ru_o_Wq(cfg) * 8;
+        var Wk = pblk + _ru_o_Wk(cfg) * 8;
+        var Wv = pblk + _ru_o_Wv(cfg) * 8;
+        var i = 0;
+        while (i < C) {
+            var o = 0;
+            while (o < C) {
+                store64(catw + (i * 3 * C + o) * 8, load64(Wq + (i * C + o) * 8));
+                store64(catw + (i * 3 * C + C + o) * 8, load64(Wk + (i * C + o) * 8));
+                store64(catw + (i * 3 * C + 2 * C + o) * 8, load64(Wv + (i * C + o) * 8));
+                o = o + 1;
+            }
+            i = i + 1;
+        }
+        _stw_add(w, _nm(L, "attn.c_attn.weight"), catw, _shp2(C, 3 * C), 2);
+        # FUSE bq/bk/bv [C] -> c_attn.bias [3C]
+        var catb = alloc(3 * C * 8);
+        var bq = _bq(cfg, pblk); var bk = _bk(cfg, pblk); var bv = _bv(cfg, pblk);
+        var c = 0;
+        while (c < C) {
+            store64(catb + c * 8, load64(bq + c * 8));
+            store64(catb + (C + c) * 8, load64(bk + c * 8));
+            store64(catb + (2 * C + c) * 8, load64(bv + c * 8));
+            c = c + 1;
+        }
+        _stw_add(w, _nm(L, "attn.c_attn.bias"), catb, _shp1(3 * C), 1);
+        _stw_add(w, _nm(L, "attn.c_proj.weight"), pblk + _ru_o_Wo(cfg) * 8, _shp2(C, C), 2);
+        _stw_add(w, _nm(L, "attn.c_proj.bias"), _bo(cfg, pblk), _shp1(C), 1);
+        _stw_add(w, _nm(L, "ln_2.weight"), pblk + _ru_o_ln2g(cfg) * 8, _shp1(C), 1);
+        _stw_add(w, _nm(L, "ln_2.bias"), pblk + _ru_o_ln2b(cfg) * 8, _shp1(C), 1);
+        _stw_add(w, _nm(L, "mlp.c_fc.weight"), pblk + _ru_o_Wfc(cfg) * 8, _shp2(C, F), 2);
+        _stw_add(w, _nm(L, "mlp.c_fc.bias"), pblk + _ru_o_bfc(cfg) * 8, _shp1(F), 1);
+        _stw_add(w, _nm(L, "mlp.c_proj.weight"), pblk + _ru_o_Wproj(cfg) * 8, _shp2(F, C), 2);
+        _stw_add(w, _nm(L, "mlp.c_proj.bias"), pblk + _ru_o_bproj(cfg) * 8, _shp1(C), 1);
+        L = L + 1;
+    }
+    _stw_add(w, "ln_f.weight", _p_lnfg(P, cfg), _shp1(C), 1);
+    _stw_add(w, "ln_f.bias", _p_lnfb(P, cfg), _shp1(C), 1);
+    return _stw_finish(w, out_len);
+}
+
+fn _fill(p, n, seed): i64 {
+    var i = 0;
+    while (i < n) {
+        var m = ((i * 131 + seed * 17 + 7) % 101) - 50;
+        store64(p + i * 8, f64_div(f64_from(m), f64_from(37)));
+        i = i + 1;
+    }
+    return 0;
+}
+
+fn test_gpt2_roundtrip(): i64 {
+    var V = 5; var C = 4; var T = 3; var nh = 2; var NL = 1;
+    var cfg = alloc(64);
+    ru_cfg_init(cfg, V, C, T, nh, nh, NL, 4 * C, 1);   # bias=1 (GPT-2)
+    var np = ru_params_count(cfg);
+    var P = alloc(np * 8);
+    _fill(P, np, 3);
+
+    # export -> safetensors, import back
+    var lenbox = alloc(8);
+    var blob = _export_gpt2(cfg, P, lenbox);
+    var total = load64(lenbox);
+    var r = st_open(blob, total);
+    assert(r != 0, "st_open parsed the exported GPT-2 safetensors");
+
+    var cfg2 = alloc(64);
+    assert_eq(anuk_gpt2_infer_cfg(r, cfg2, nh), 0, "infer_cfg ok");
+    assert_eq(_cfg_V(cfg2), V, "inferred V");
+    assert_eq(_cfg_C(cfg2), C, "inferred C");
+    assert_eq(_cfg_T(cfg2), T, "inferred T");
+    assert_eq(_cfg_NL(cfg2), NL, "inferred NL");
+    assert_eq(ru_params_count(cfg2), np, "inferred params count matches");
+
+    var P2 = alloc(np * 8);
+    assert_eq(anuk_gpt2_pack(r, cfg2, P2), 0, "anuk_gpt2_pack ok");
+
+    # (a) packed params bit-identical (import inverts export exactly)
+    var diffs = 0;
+    var i = 0;
+    while (i < np) { if (load64(P + i * 8) != load64(P2 + i * 8)) { diffs = diffs + 1; } i = i + 1; }
+    assert_eq(diffs, 0, "imported params bit-identical to the original");
+
+    # (b) the imported model RUNS and matches the direct forward bit-for-bit
+    var tokens = alloc(T * 8);
+    store64(tokens + 0, 1); store64(tokens + 8, 3); store64(tokens + 16, 0);
+    var L1 = alloc(T * V * 8);
+    var L2 = alloc(T * V * 8);
+    ru_model_fwd(cfg, P, tokens, L1, 0);
+    ru_model_fwd(cfg2, P2, tokens, L2, 0);
+    var ldiff = 0;
+    i = 0;
+    while (i < T * V) { if (load64(L1 + i * 8) != load64(L2 + i * 8)) { ldiff = ldiff + 1; } i = i + 1; }
+    assert_eq(ldiff, 0, "imported model logits bit-identical to the direct forward");
+    return 0;
+}
+
+fn main(): i64 {
+    alloc_init();
+    test_gpt2_roundtrip();
+    return assert_summary();
+}
+
+var rc = main();
+syscall(60, rc);

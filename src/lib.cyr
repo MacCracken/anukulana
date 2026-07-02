@@ -56,3 +56,4 @@ include "lib/rupantara.cyr"
 include "src/version.cyr"
 include "src/inspect.cyr"       # M1: consume tula (open / enumerate / verify)
 include "src/safetensors.cyr"   # M2: foreign safetensors parser (bayan JSON DOM)
+include "src/gpt2.cyr"          # M2: GPT-2 -> rupantara packed-layout mapping
