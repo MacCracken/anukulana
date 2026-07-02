@@ -61,13 +61,20 @@ M2 when rupantara's forward lands.
   green. CLI `anukulana inspect <file>` verified end-to-end; missing/malformed file
   fails cleanly (rc=1, no crash).
 
-### M2 — import + run (THE headline) ⚠ gated on rupantara M1
-- Wire `[deps.rupantara]` + `[deps.rosnet]` + `[deps.akshara]` + stdlib `math`.
-- **Foreign parsers:** read a real **GPT-2-small** checkpoint — parse
-  **safetensors** and/or **GGUF** headers (own parsers, no libs) → tensors.
-- **Tensor-name mapping:** map foreign names/shapes onto rupantara's layout
-  (per-source-arch table); dtype convert (fp16/bf16 → f64).
-- **Run:** forward on rosnet via rupantara → logits.
+### M2 — import + run (THE headline) — UNBLOCKED (rupantara 0.4.0 released)
+- **✅ Bite 1 — safetensors parser DONE (2026-07-02):** `src/safetensors.cyr`
+  parses `[u64 len][JSON header][data]` → bounds-checked tensor directory. **The
+  JSON header uses `bayan`** (the sovereign JSON DOM — the ecosystem lib, NOT a
+  foreign dep and NOT hand-rolled). IEEE-754 f32/f16/bf16→f64 wideners (unhomed →
+  candidate for rosnet). `tests/tcyr/safetensors.tcyr` 30 green (wideners bit-exact
+  + full parse round-trip + untrusted-buffer rejection). Suite 9 → **39**.
+  *("own parsers, no libs" clarified: no foreign safetensors/GGUF lib — but bayan
+  IS the sovereign JSON parser; use it, don't reinvent.)*
+- **Bite 2 (next) — GPT-2 → rupantara mapping:** wire `[deps.rupantara]` +
+  `[deps.rosnet]` + `[deps.akshara]` + stdlib `math`. Map foreign names/shapes onto
+  rupantara's packed layout (per-source-arch table; **fused-QKV split** of GPT-2
+  `c_attn`; **Conv1D transpose** via `ganita`); dtype convert (fp16/bf16 → f64, done).
+- **Bite 3 — run:** forward on rosnet via `ru_model_fwd` → logits.
 - **Acceptance (fidelity gate):** logits match the reference (HF / nanoGPT
   `from_pretrained`) on a fixed input within tolerance — the B-series fairness
   shape. `tests/tcyr/import.tcyr` + a recorded number in `docs/benchmarks.md`.

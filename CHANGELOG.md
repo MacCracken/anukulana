@@ -4,7 +4,35 @@ All notable changes to `anukulana` are documented here. Format follows
 [Keep a Changelog](https://keepachangelog.com/); SemVer (pre-1.0 — surface still
 moving, no API freeze until v1.0).
 
-## [0.1.0] — Unreleased
+## [Unreleased]
+
+**M2 — foreign safetensors importer (bite 1: the parser).** anukulana parses a
+foreign **safetensors** checkpoint sovereignly — the first step toward importing a
+real GPT-2 checkpoint and running it on rupantara.
+
+### Added
+- **`src/safetensors.cyr`** — `st_open` parses the `[u64 LE header_len][JSON
+  header][tensor data]` layout into a bounds-checked tensor directory. **The JSON
+  header is parsed by `bayan`** (the sovereign JSON DOM: `bayan_json_v_parse_str` +
+  `bayan_json_v_obj_*`/`_arr_*`/`_str`/`_int`) — no hand-rolled JSON. Accessors:
+  `st_count` / `st_entry` / `st_entry_{name,dtype,ndim,dim,nelems,data}` / `st_find`;
+  `st_read_f64` reads a tensor into an f64 buffer, widening per dtype.
+- **IEEE-754 wideners** `_st_f32_to_f64` / `_st_f16_to_f64` / `_st_bf16_to_f64`
+  (verified absent from the ecosystem — candidate to promote into rosnet), plus LE
+  readers `_st_u{16,32,64}_le`.
+- **Untrusted-input safe:** header length bounds-checked; every tensor's
+  `data_offsets` validated within the buffer; malformed / truncated / overrun
+  buffers → `st_open` returns 0 (no OOB deref); `__metadata__` skipped.
+- **`tests/tcyr/safetensors.tcyr`** (30 assertions): wideners on known bit patterns
+  (F32/F16/BF16 → bit-exact f64) + a full parse round-trip (2 tensors: F64 bit-exact
+  and F32 widened bit-exact, `__metadata__` skipped, truncated/overrun rejected).
+  Suite 9 → **39**.
+
+### Remaining (M2)
+- Map GPT-2 tensor names/shapes onto rupantara's packed layout (fused-QKV split,
+  Conv1D transpose via `ganita`) → run `ru_model_fwd` → logit-fidelity gate.
+
+## [0.1.0] — 2026-07-02
 
 **M1 — consume tula (weight-file I/O).** anukulana reads the sovereign weight
 format: `inspect <file.tula>` opens a checkpoint, enumerates its tensors

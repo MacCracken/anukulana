@@ -5,14 +5,16 @@
 
 ## Version
 
-**0.1.0 — unreleased.** **M1: consume tula DONE** (2026-07-02) — `inspect` opens a
-tula checkpoint, enumerates tensors (name/dtype/shape/bytes), and verifies its
-Ed25519 signature (tamper-reject); `tests/tcyr/tula_io.tcyr` **9** green, CLI
-verified end-to-end, malformed input fails cleanly. M0 scaffold underneath. Next:
-**M2** — the foreign safetensors importer + forward on rupantara (**unblocked**:
-rupantara released 0.4.0).
+**0.1.0 — RELEASED 2026-07-02** (M0 scaffold + M1 consume-tula). **M2 in progress
+(`[Unreleased]`):** **bite 1 — the foreign safetensors parser DONE** — `st_open`
+parses `[u64 len][JSON header][data]` (header via **bayan**'s sovereign JSON DOM,
+not hand-rolled) into a bounds-checked tensor directory; IEEE-754 f32/f16/bf16→f64
+wideners; `st_read_f64`. `tests/tcyr/safetensors.tcyr` **30** green (wideners
+bit-exact + parse round-trip + untrusted-buffer rejection); suite **39**. Next:
+**bite 2** — GPT-2→rupantara layout mapping (fused-QKV split, Conv1D transpose via
+ganita) → run `ru_model_fwd` → fidelity gate.
 
-No released tags yet.
+Released: **0.1.0**.
 
 ## Toolchain
 

@@ -49,4 +49,5 @@ include "lib/tula.cyr"
 # anukulana domain modules — flat, dependency order.
 # ================================================================
 include "src/version.cyr"
-include "src/inspect.cyr"      # M1: consume tula (open / enumerate / verify)
+include "src/inspect.cyr"       # M1: consume tula (open / enumerate / verify)
+include "src/safetensors.cyr"   # M2: foreign safetensors parser (bayan JSON DOM)

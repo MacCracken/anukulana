@@ -1,0 +1,119 @@
+# tests/tcyr/safetensors.tcyr — M2 bite 1: the foreign safetensors parser.
+# (a) unit-test the IEEE-754 f32/f16/bf16 -> f64 wideners on known bit patterns
+#     (values exactly representable in both formats => bit-exact f64).
+# (b) build a real safetensors blob ([u64 len][JSON header][payload]) and parse it
+#     through st_open (bayan JSON DOM underneath): enumerate, dtype/shape, read +
+#     widen a tensor, and reject a truncated buffer.
+include "src/lib.cyr"
+include "lib/assert.cyr"
+
+fn _put_u32_le(p, x): i64 {
+    store8(p + 0, x & 0xFF);
+    store8(p + 1, (x >> 8) & 0xFF);
+    store8(p + 2, (x >> 16) & 0xFF);
+    store8(p + 3, (x >> 24) & 0xFF);
+    return 0;
+}
+fn _put_u64_le(p, x): i64 {
+    _put_u32_le(p, x & 0xFFFFFFFF);
+    _put_u32_le(p + 4, (x >> 32) & 0xFFFFFFFF);
+    return 0;
+}
+fn _copy(dst, src, n): i64 {
+    var i = 0;
+    while (i < n) { store8(dst + i, load8(src + i)); i = i + 1; }
+    return 0;
+}
+
+fn test_wideners(): i64 {
+    # F32: 1.0=0x3F800000, 2.0=0x40000000, 0.5=0x3F000000, -1.0=0xBF800000, 0.0=0
+    assert_eq(_st_f32_to_f64(0x3F800000), f64_from(1), "f32 1.0 -> f64 1.0");
+    assert_eq(_st_f32_to_f64(0x40000000), f64_from(2), "f32 2.0 -> f64 2.0");
+    assert_eq(_st_f32_to_f64(0x3F000000), f64_div(f64_from(1), f64_from(2)), "f32 0.5 -> f64 0.5");
+    assert_eq(_st_f32_to_f64(0xBF800000), f64_from(0 - 1), "f32 -1.0 -> f64 -1.0");
+    assert_eq(_st_f32_to_f64(0), f64_from(0), "f32 0.0 -> f64 0.0");
+    # BF16: 1.0 = 0x3F80 (high half of the f32)
+    assert_eq(_st_bf16_to_f64(0x3F80), f64_from(1), "bf16 1.0 -> f64 1.0");
+    assert_eq(_st_bf16_to_f64(0xC000), f64_from(0 - 2), "bf16 -2.0 -> f64 -2.0");
+    # F16: 1.0=0x3C00, 2.0=0x4000, 0.5=0x3800
+    assert_eq(_st_f16_to_f64(0x3C00), f64_from(1), "f16 1.0 -> f64 1.0");
+    assert_eq(_st_f16_to_f64(0x4000), f64_from(2), "f16 2.0 -> f64 2.0");
+    assert_eq(_st_f16_to_f64(0x3800), f64_div(f64_from(1), f64_from(2)), "f16 0.5 -> f64 0.5");
+    return 0;
+}
+
+# build a safetensors blob: w(F64 2x2)@[0,32], b(F32 [3])@[32,44], + __metadata__.
+fn _build_blob(out_len): i64 {
+    var h1 = "{\"w\":{\"dtype\":\"F64\",\"shape\":[2,2],\"data_offsets\":[0,32]},";
+    var h2 = "\"b\":{\"dtype\":\"F32\",\"shape\":[3],\"data_offsets\":[32,44]},";
+    var h3 = "\"__metadata__\":{\"format\":\"pt\"}}";
+    var l1 = strlen(h1);
+    var l2 = strlen(h2);
+    var l3 = strlen(h3);
+    var hlen = l1 + l2 + l3;
+    var payload = 44;
+    var total = 8 + hlen + payload;
+    var blob = alloc(total);
+    _put_u64_le(blob, hlen);
+    _copy(blob + 8, h1, l1);
+    _copy(blob + 8 + l1, h2, l2);
+    _copy(blob + 8 + l1 + l2, h3, l3);
+    var p = blob + 8 + hlen;
+    # w = [1,2,3,4] as f64
+    store64(p + 0, f64_from(1)); store64(p + 8, f64_from(2));
+    store64(p + 16, f64_from(3)); store64(p + 24, f64_from(4));
+    # b = [1.0, 2.0, -1.0] as f32 LE
+    _put_u32_le(p + 32, 0x3F800000);
+    _put_u32_le(p + 36, 0x40000000);
+    _put_u32_le(p + 40, 0xBF800000);
+    store64(out_len, total);
+    return blob;
+}
+
+fn test_parse(): i64 {
+    var lenbox = alloc(8);
+    var blob = _build_blob(lenbox);
+    var total = load64(lenbox);
+    var r = st_open(blob, total);
+    assert(r != 0, "st_open parsed the safetensors buffer");
+    assert_eq(st_count(r), 2, "2 tensors (w, b); __metadata__ skipped");
+
+    # w: F64 2x2, values bit-exact
+    var ew = st_find(r, "w");
+    assert(ew != 0, "st_find located w");
+    assert_eq(st_entry_dtype(ew), ST_DT_F64, "w dtype F64");
+    assert_eq(st_entry_ndim(ew), 2, "w ndim 2");
+    assert_eq(st_entry_dim(ew, 0), 2, "w dim0 2");
+    assert_eq(st_entry_dim(ew, 1), 2, "w dim1 2");
+    assert_eq(st_entry_nelems(ew), 4, "w nelems 4");
+    var wbuf = alloc(4 * 8);
+    assert_eq(st_read_f64(r, ew, wbuf), 0, "st_read_f64 w ok");
+    assert_eq(load64(wbuf + 0), f64_from(1), "w[0]=1");
+    assert_eq(load64(wbuf + 24), f64_from(4), "w[3]=4");
+
+    # b: F32 [3], widened bit-exact (1.0/2.0/-1.0 exact in both formats)
+    var eb = st_find(r, "b");
+    assert(eb != 0, "st_find located b");
+    assert_eq(st_entry_dtype(eb), ST_DT_F32, "b dtype F32");
+    assert_eq(st_entry_nelems(eb), 3, "b nelems 3");
+    var bbuf = alloc(3 * 8);
+    assert_eq(st_read_f64(r, eb, bbuf), 0, "st_read_f64 b (F32 widen) ok");
+    assert_eq(load64(bbuf + 0), f64_from(1), "b[0]=1.0");
+    assert_eq(load64(bbuf + 8), f64_from(2), "b[1]=2.0");
+    assert_eq(load64(bbuf + 16), f64_from(0 - 1), "b[2]=-1.0");
+
+    # untrusted-input: a truncated buffer must be rejected, not OOB-deref'd
+    assert_eq(st_open(blob, 4), 0, "reject len<8");
+    assert_eq(st_open(blob, 8 + 3), 0, "reject header overrun");
+    return 0;
+}
+
+fn main(): i64 {
+    alloc_init();
+    test_wideners();
+    test_parse();
+    return assert_summary();
+}
+
+var rc = main();
+syscall(60, rc);
