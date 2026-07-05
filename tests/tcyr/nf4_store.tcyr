@@ -1,0 +1,114 @@
+# tests/tcyr/nf4_store.tcyr — M4 tail: NF4-checkpoint + adapter persistence,
+# toy scale. Gates the round-trip BIT-IDENTICAL and the trust boundary:
+#   * save -> load(pk) reproduces the in-memory quantize->dequant EXACTLY
+#   * cfg tensor reconstructs
+#   * load with the WRONG pk is REJECTED (returns 0)
+#   * a tampered payload byte is REJECTED (signature over [0, sig_off))
+#   * adapter save -> load round-trips A/B/s bit-identical; wrong pk rejected
+include "src/lib.cyr"
+include "lib/assert.cyr"
+
+fn _fillp(p, n): i64 {
+    var i = 0;
+    while (i < n) {
+        var q = ((i * 29 + 7) % 23);
+        store64(p + i * 8, f64_sub(f64_div(f64_from(q), f64_from(23)), f64_div(f64_from(1), f64_from(2))));
+        i = i + 1;
+    }
+    return 0;
+}
+
+fn test_store(): i64 {
+    # tiny model cfg: V=11 C=4 T=2 nh=1 nkv=1 NL=1 F=16
+    var cfg = alloc(64);
+    ru_cfg_init(cfg, 11, 4, 2, 1, 1, 1, 16, 1);
+    var np = ru_params_count(cfg);
+    var params = t_alloc(np);
+    _fillp(params, np);
+
+    var seed = alloc(32);
+    var k = 0;
+    while (k < 32) { store8(seed + k, (k * 5 + 1) & 0xFF); k = k + 1; }
+    var sk = alloc(64);
+    var pk = alloc(32);
+    ed25519_keypair(seed, sk, pk);
+
+    # ---- checkpoint save -> load -> bit-compare -------------------------------
+    var path = "/tmp/anuk_nf4_store_test.tula";
+    assert_eq(anuk_nf4_save(path, cfg, params, sk), 0, "checkpoint saved");
+    # in-memory reference pipeline
+    var bs = NF4_BS();
+    var nb = tula_nf4_blocks(np, bs);
+    var nibbles = alloc(tula_nf4_bytes(np));
+    var scales = t_alloc(nb);
+    tula_nf4_pack(params, np, bs, scales, nibbles);
+    var q8 = alloc(nb);
+    var supers = t_alloc((nb + NF4_SBS() - 1) / NF4_SBS());
+    nf4_dq_pack(scales, nb, q8, supers);
+    var scales_r = t_alloc(nb);
+    nf4_dq_unpack(q8, supers, nb, scales_r);
+    var ref_q = t_alloc(np);
+    tula_nf4_unpack(nibbles, scales_r, np, bs, ref_q);
+    var cfg2 = alloc(64);
+    var loaded = anuk_nf4_load(path, pk, cfg2);
+    assert_nonnull(loaded, "checkpoint loads with the right pk");
+    var diffs = 0;
+    var i = 0;
+    while (i < np) { if (load64(loaded + i * 8) != load64(ref_q + i * 8)) { diffs = diffs + 1; } i = i + 1; }
+    assert_eq(diffs, 0, "loaded base bit-identical to the in-memory pipeline");
+    assert_eq(_cfg_V(cfg2), 11, "cfg.V round-trips");
+    assert_eq(_cfg_F(cfg2), 16, "cfg.F round-trips");
+
+    # ---- trust boundary: wrong pk / tampered byte -----------------------------
+    var pk2 = alloc(32);
+    var sk2 = alloc(64);
+    var seed2 = alloc(32);
+    k = 0;
+    while (k < 32) { store8(seed2 + k, (k * 11 + 9) & 0xFF); k = k + 1; }
+    ed25519_keypair(seed2, sk2, pk2);
+    var cfg3 = alloc(64);
+    assert_eq(anuk_nf4_load(path, pk2, cfg3), 0, "wrong pk REJECTED");
+    # tamper one payload byte on disk
+    var buf = alloc(1024 * 1024);
+    var n = file_read_all(path, buf, 1024 * 1024);
+    assert_gt(n, 200, "read checkpoint back for tampering");
+    store8(buf + n - 100, load8(buf + n - 100) ^ 0x01);
+    var tpath = "/tmp/anuk_nf4_store_tampered.tula";
+    tula_write_file(tpath, buf, n);
+    assert_eq(anuk_nf4_load(tpath, pk, cfg3), 0, "tampered payload REJECTED");
+
+    # ---- adapter round-trip -----------------------------------------------------
+    var C = 4;
+    var r = 2;
+    var V = 11;
+    var A = t_alloc(C * r);
+    var B = t_alloc(r * V);
+    _fillp(A, C * r);
+    _fillp(B, r * V);
+    var s = f64_div(f64_from(3), f64_from(2));
+    var apath = "/tmp/anuk_adapter_store_test.tula";
+    assert_eq(anuk_adapter_save(apath, A, B, C, r, V, s, sk), 0, "adapter saved");
+    var A2 = t_alloc(C * r);
+    var B2 = t_alloc(r * V);
+    var meta = t_alloc(2);
+    assert_eq(anuk_adapter_load(apath, pk, A2, B2, C, r, V, meta), 0, "adapter loads");
+    var ad = 0;
+    i = 0;
+    while (i < C * r) { if (load64(A2 + i * 8) != load64(A + i * 8)) { ad = ad + 1; } i = i + 1; }
+    i = 0;
+    while (i < r * V) { if (load64(B2 + i * 8) != load64(B + i * 8)) { ad = ad + 1; } i = i + 1; }
+    assert_eq(ad, 0, "adapter A/B bit-identical after round-trip");
+    assert(f64_eq(load64(meta), s), "adapter meta s round-trips");
+    var badm = alloc(16);
+    assert_eq(anuk_adapter_load(apath, pk2, A2, B2, C, r, V, badm), 0 - 1, "adapter wrong pk REJECTED");
+    return 0;
+}
+
+fn main(): i64 {
+    alloc_init();
+    test_store();
+    return assert_summary();
+}
+
+var rc = main();
+syscall(60, rc);

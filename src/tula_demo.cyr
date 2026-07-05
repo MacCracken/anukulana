@@ -1,0 +1,166 @@
+# @public — M4 tail demo: `gpt2-tula <model.safetensors> <ckpt.tula> <adapter.tula>`
+# — the full persistence round-trip on the real checkpoint:
+#
+#   1. import f64 -> NF4-quantize -> SAVE the signed .tula checkpoint
+#   2. LOAD it back (Ed25519-verified) -> dequantized base must be
+#      BIT-IDENTICAL to the in-memory quantize->dequant pipeline
+#   3. train the LoRA head adapter over the LOADED base -> SAVE the adapter
+#   4. RELOAD the adapter (verified) -> recomputed adapted logits must be
+#      BIT-IDENTICAL to the freshly-trained ones, task still 8/8
+#
+# Nothing here may drift: quantized data is discrete, adapters are raw f64 —
+# disk round-trips are exact or broken. Signing uses an ephemeral demo keypair
+# (key management is the caller's per tula's charter; the control plane owns
+# real keys later).
+
+fn anuk_gpt2_tula(model_path, ckpt_path, adapter_path): i64 {
+    var cfg = alloc(64);
+    var T = 8;
+    var params = anuk_gpt2_import(model_path, 12, T, cfg);
+    if (params == 0) { _anuk_sput("tula-demo: import failed\n"); return 1; }
+    var V = _cfg_V(cfg);
+    var C = _cfg_C(cfg);
+    var np = ru_params_count(cfg);
+
+    # ephemeral demo keypair
+    var seed = alloc(32);
+    var i = 0;
+    while (i < 32) { store8(seed + i, (i * 7 + 41) & 0xFF); i = i + 1; }
+    var sk = alloc(64);
+    var pk = alloc(32);
+    ed25519_keypair(seed, sk, pk);
+
+    # ---- 1. quantize + save the signed checkpoint -----------------------------
+    if (anuk_nf4_save(ckpt_path, cfg, params, sk) != 0) {
+        _anuk_sput("tula-demo: checkpoint save failed\n");
+        return 1;
+    }
+    _anuk_sput("checkpoint saved: "); _anuk_sput(ckpt_path); _anuk_sput("\n");
+
+    # in-memory reference pipeline (same ops the store uses)
+    var bs = NF4_BS();
+    var nb = tula_nf4_blocks(np, bs);
+    var nibbles = mmap_anon(tula_nf4_bytes(np));
+    var scales = mmap_anon(nb * 8);
+    tula_nf4_pack(params, np, bs, scales, nibbles);
+    var q8 = mmap_anon(nb);
+    var supers = t_alloc((nb + NF4_SBS() - 1) / NF4_SBS());
+    nf4_dq_pack(scales, nb, q8, supers);
+    var scales_r = mmap_anon(nb * 8);
+    nf4_dq_unpack(q8, supers, nb, scales_r);
+    var ref_q = mmap_anon(np * 8);
+    tula_nf4_unpack(nibbles, scales_r, np, bs, ref_q);
+
+    # ---- 2. load + verify + bit-compare ----------------------------------------
+    var cfg2 = alloc(64);
+    var loaded = anuk_nf4_load(ckpt_path, pk, cfg2);
+    if (loaded == 0) { _anuk_sput("tula-demo: checkpoint load failed\n"); return 1; }
+    var diffs = 0;
+    i = 0;
+    while (i < np) { if (load64(loaded + i * 8) != load64(ref_q + i * 8)) { diffs = diffs + 1; } i = i + 1; }
+    _anuk_sput("loaded base vs in-memory pipeline: diffs="); _anuk_puti(diffs); _anuk_sput("\n");
+    var cfg_ok = 1;
+    if (_cfg_V(cfg2) != V) { cfg_ok = 0; }
+    if (_cfg_C(cfg2) != C) { cfg_ok = 0; }
+    if (_cfg_NL(cfg2) != _cfg_NL(cfg)) { cfg_ok = 0; }
+    _anuk_sput("cfg round-trip: ");
+    if (cfg_ok == 1) { _anuk_sput("ok\n"); } else { _anuk_sput("MISMATCH\n"); }
+
+    # ---- 3. train the adapter over the LOADED base ------------------------------
+    var tokens = alloc(T * 8);
+    i = 0;
+    while (i < T) { store64(tokens + i * 8, (i * 137 + 11) % V); i = i + 1; }
+    var targets = alloc(T * 8);
+    i = 0;
+    while (i < T - 1) { store64(targets + i * 8, load64(tokens + (i + 1) * 8)); i = i + 1; }
+    store64(targets + (T - 1) * 8, load64(tokens));
+    var qf = anuk_frozen_features(cfg2, loaded, tokens, T);
+    var base_logits = t_alloc(T * V);
+    ru_head_fwd(qf, _p_tokemb(loaded), base_logits, T, C, V);
+    var r = 8;
+    var s = f64_from(2);
+    rng_seed(20260704);
+    var A = t_alloc(C * r);
+    var B = t_alloc(r * V);
+    lora_init(A, B, C, r, V, f64_div(f64_from(2), f64_from(100)));
+    var u = t_alloc(T * r);
+    var t = t_alloc(T * V);
+    var y = t_alloc(T * V);
+    var probs = t_alloc(T * V);
+    var dy = t_alloc(T * V);
+    var dA = t_alloc(C * r);
+    var dB = t_alloc(r * V);
+    var dys = t_alloc(T * V);
+    var du = t_alloc(T * r);
+    var dxs = t_alloc(T * C);
+    var mA = t_alloc(C * r); var vA = t_alloc(C * r);
+    var mB = t_alloc(r * V); var vB = t_alloc(r * V);
+    var steps = 800;
+    var lr = f64_div(f64_from(1), f64_from(100));
+    var loss0 = f64_from(0);
+    var loss = f64_from(0);
+    var step = 0;
+    while (step < steps) {
+        t_copy(y, base_logits, T * V);
+        lora_fwd(qf, A, B, u, t, y, T, C, r, V, s);
+        loss = lora_xent_loss(y, probs, targets, T, V);
+        if (step == 0) { loss0 = loss; }
+        lora_xent_bwd(probs, targets, dy, T, V);
+        t_zero(dA, C * r);
+        t_zero(dB, r * V);
+        lora_bwd(qf, u, A, B, dy, dA, dB, dys, du, dxs, T, C, r, V, s);
+        lora_adam(A, dA, mA, vA, C * r, lr, step + 1);
+        lora_adam(B, dB, mB, vB, r * V, lr, step + 1);
+        step = step + 1;
+    }
+    _anuk_sput("adapter trained over loaded base: loss "); fmt_float(loss0, 4);
+    _anuk_sput(" -> "); fmt_float(loss, 4); _anuk_sput("\n");
+    t_copy(y, base_logits, T * V);
+    lora_fwd(qf, A, B, u, t, y, T, C, r, V, s);
+    var adapted = t_alloc(T * V);
+    t_copy(adapted, y, T * V);
+
+    # ---- save + reload the adapter, recompute, bit-compare ----------------------
+    if (anuk_adapter_save(adapter_path, A, B, C, r, V, s, sk) != 0) {
+        _anuk_sput("tula-demo: adapter save failed\n");
+        return 1;
+    }
+    _anuk_sput("adapter saved: "); _anuk_sput(adapter_path); _anuk_sput("\n");
+    var A2 = t_alloc(C * r);
+    var B2 = t_alloc(r * V);
+    var meta = t_alloc(2);
+    if (anuk_adapter_load(adapter_path, pk, A2, B2, C, r, V, meta) != 0) {
+        _anuk_sput("tula-demo: adapter load failed\n");
+        return 1;
+    }
+    var s2 = load64(meta);
+    t_copy(y, base_logits, T * V);
+    lora_fwd(qf, A2, B2, u, t, y, T, C, r, V, s2);
+    var adiffs = 0;
+    i = 0;
+    while (i < T * V) { if (load64(y + i * 8) != load64(adapted + i * 8)) { adiffs = adiffs + 1; } i = i + 1; }
+    var mtc = 0;
+    i = 0;
+    while (i < T) {
+        if (ru_argmax(y + i * V * 8, V) == load64(targets + i * 8)) { mtc = mtc + 1; }
+        i = i + 1;
+    }
+    _anuk_sput("reloaded-adapter logits vs freshly-trained: diffs="); _anuk_puti(adiffs);
+    _anuk_sput("  argmax match "); _anuk_puti(mtc);
+    _anuk_sput("/"); _anuk_puti(T); _anuk_sput("\n");
+
+    var ok = 1;
+    if (diffs != 0) { ok = 0; }
+    if (cfg_ok == 0) { ok = 0; }
+    if (f64_lt(loss, loss0) == 0) { ok = 0; }
+    if (adiffs != 0) { ok = 0; }
+    if (mtc < T) { ok = 0; }
+    if (ok == 1) {
+        _anuk_sput("RESULT: tula persistence round-trip PASS ");
+        _anuk_sput("(checkpoint + adapter bit-identical, signed, task ");
+        _anuk_puti(mtc); _anuk_sput("/"); _anuk_puti(T); _anuk_sput(")\n");
+        return 0;
+    }
+    _anuk_sput("RESULT: tula persistence FAIL\n");
+    return 1;
+}

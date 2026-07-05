@@ -129,9 +129,12 @@ M2 when rupantara's forward lands.
   checkpoint (`gpt2-qlora`: xent 15.62 → 0.0000, argmax 0/8 → 8/8, codes
   bit-frozen; the 4-bit base's raw drift at 124M scale reported honestly in the
   CHANGELOG).
-- **Follow-on (open):** store/load NF4 checkpoints via **tula's `nf4` dtype**
-  (the manifest already reserves it) — the "quantize once, ship the 62 MB
-  artifact" step; natural next bite alongside a LoRA-adapter save/load format.
+- **✅ Follow-on SHIPPED (0.5.0, 2026-07-04):** signed NF4 checkpoints + adapter
+  save/load via tula (`src/nf4_store.cyr` + `gpt2-tula`) — 63.8 MB signed
+  artifact, bit-identical round-trips, wrong-key/tamper rejected. The base NF4
+  codec was **reconciled to delegate to tula's shipped codec** on the way (the
+  0.4.0 hand-roll duplicated tula 1.0.0's frozen surface); only the
+  superblock-256 double-quant stays anukulana-local.
 
 ### M5 — hardening + fuzz + bench
 - Harden the **foreign parsers** (safetensors/GGUF are untrusted input — bounds/

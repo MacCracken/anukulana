@@ -5,6 +5,16 @@
 
 ## Version
 
+**0.5.0 — RELEASED 2026-07-04 (M4 tail: signed NF4 persistence — the charter is
+FULLY built).** `src/nf4.cyr` base codec reconciled to **delegate to tula's
+shipped NF4** (the 0.4.0 hand-roll duplicated tula 1.0.0's frozen surface — the
+"know the ecosystem" catch; only superblock-256 double-quant stays local) +
+`src/nf4_store.cyr` (signed checkpoint/adapter save/load, Ed25519-verified,
+wrong-key/tamper REJECTED) + `gpt2-tula` (real checkpoint: **63.8 MB signed NF4
+file**, base + adapter both round-trip **bit-identical**, adapter trains over
+the LOADED base, 8/8). Suite **75**. Cyrius gotcha: `match` is a reserved
+keyword. Prior same-day releases:
+
 **0.4.0 — RELEASED 2026-07-04 (M3 LoRA + M4 QLoRA/NF4 — the adapt arc).**
 `src/lora.cyr` (FD-gated fwd/bwd/merge + xent + SGD/Adam) + `gpt2-lora` (head
 adapter: xent 10.79→0.0000, argmax 8/8, base bit-frozen) + `src/nf4.cyr` (NF4
@@ -31,7 +41,7 @@ exactly).** The M2 arc landed across 0.2.0 + 0.3.0:
   1.05e-6** (fp32-rounding scale); gate frozen at **maxrel ≤ 1e-5** + exact
   argmax + NaN-free. `make fidelity`.
 
-Suite **62**; lint/fmt clean. Released: **0.1.0 · 0.2.0 · 0.3.0 · 0.4.0**.
+Suite **75**; lint/fmt clean. Released: **0.1.0 · 0.2.0 · 0.3.0 · 0.4.0 · 0.5.0**.
 
 ## Toolchain
 
@@ -65,8 +75,11 @@ adapters would patch **attn11** if ever wanted — allowed except SIMD, which
 cyrius delivers next arc). M4: `src/nf4.cyr` (NF4 codec + double-quant, 8-test
 exactness gate) + `gpt2-qlora` — the whole 124M base at 4 bits (codes 62 MB),
 adapter recovers the task 8/8 over it, codes bit-frozen; 4-bit drift at 124M
-scale reported honestly. Suite **62**. Findings: plain SGD diverges on
-real-GPT-2 features (massive-activation outliers → Adam required); the NF4
-table's largest gap is on the NEGATIVE side. **Next bite: NF4 checkpoints via
-tula's `nf4` dtype** (+ adapter save/load) — then the repo is 1.0-track. See
-`roadmap.md`.
+scale reported honestly. Findings: plain SGD diverges on real-GPT-2 features
+(massive-activation outliers → Adam required); the NF4 table's largest gap is
+on the NEGATIVE side. **The persistence bite shipped in 0.5.0** (signed NF4
+checkpoint + adapter via tula, bit-identical round-trips, trust boundary
+gated). **The charter is fully built — the repo is 1.0-track**: remaining to
+1.0 = API freeze + docs (`docs/api.md`), benchmarks capture, security audit,
+CHANGELOG completeness (see the roadmap's v1.0 criteria). GGUF as a second
+import source stays an open post-1.0 candidate. See `roadmap.md`.

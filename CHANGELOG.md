@@ -6,6 +6,49 @@ moving, no API freeze until v1.0).
 
 ## [Unreleased]
 
+## [0.5.0] — 2026-07-04
+
+**M4 tail — signed NF4 persistence via tula: the Type-3 charter is FULLY built.**
+The "quantize once, ship the artifact" step: the NF4 base and the trained LoRA
+adapter each serialize to a **sigil-signed `.tula` file**, and everything
+round-trips **bit-identical** (quantized data is discrete — disk round-trips are
+exact or broken). The real checkpoint ships as **63.8 MB signed** (vs 548 MB
+foreign safetensors / 989 MB f64 in memory); the adapter as **3.3 MB**.
+
+### Changed — the "know the ecosystem" reconciliation
+- **`src/nf4.cyr` base codec now DELEGATES to tula** — the 0.4.0 cut hand-rolled
+  quantize/dequant/codebook, but **tula 1.0.0 already shipped that codec** in its
+  frozen v1 surface (`tula_nf4_pack`/`_unpack`/`_nearest`/`_level`, codebook as
+  exact bit patterns, identical block/nibble/zero-block semantics). The
+  duplicate is deleted; thin wrappers keep call sites/tests stable. What stays
+  genuinely local: **double-quantization per superblock-256** (the paper's
+  granularity — tula's ADR 0002 suggests whole-tensor int8 for scales, too
+  coarse for a 124M checkpoint). The 8-test exactness suite passes unchanged
+  over tula's codec — anukulana now gates tula's NF4 through real usage.
+
+### Added
+- **`src/nf4_store.cyr`** — `anuk_nf4_save/load` (checkpoint: `"cfg"` +
+  `TULA_DT_NF4` codes + double-quantized scales as `INT8` codes + `F64`
+  superblock maxes, per tula's ADR-0002 sidecar convention) and
+  `anuk_adapter_save/load` (`"lora.A"/"lora.B"/"lora.meta"`). Both signed via
+  `tula_builder_finish_signed`; **load VERIFIES Ed25519 and rejects unsigned /
+  wrong-key / tampered files** (the trust boundary tula's format exists for).
+- **`gpt2-tula <model> <ckpt.tula> <adapter.tula>`** CLI + `src/tula_demo.cyr` —
+  the round-trip on the real checkpoint: save signed NF4 ckpt → load+verify →
+  **dequantized base bit-identical** to the in-memory pipeline (0 diffs across
+  123.6M params) + cfg reconstructs → adapter trains over the LOADED base (xent
+  15.62 → 0.0000) → save adapter → reload → **recomputed adapted logits
+  bit-identical, task 8/8**.
+- **`tests/tcyr/nf4_store.tcyr`** (13, suite 62→**75**) — toy-scale round-trip
+  bit-identity + the trust boundary: wrong pk REJECTED, tampered payload byte
+  REJECTED, adapter meta round-trips.
+
+### Notes
+- Key management stays the caller's (tula's charter) — the demo uses an
+  ephemeral keypair; real keys arrive with the control plane (ifran port).
+- Cyrius gotcha collected: `match` is a **reserved keyword** (the compiler
+  rejects it as an identifier).
+
 ## [0.4.0] — 2026-07-04
 
 **M4 — QLoRA/NF4: the adapter fine-tunes over a 4-bit frozen base.** The

@@ -1,148 +1,49 @@
-# @public — M4 QLoRA: the NF4 (4-bit NormalFloat) quantization codec.
+# @public — M4 QLoRA: NF4 quantization, DELEGATED to tula's codec + a local
+# double-quantization layer.
 #
 # The QLoRA recipe (Dettmers et al. 2023, arXiv:2305.14314): quantize the FROZEN
 # imported base to 4-bit blockwise NormalFloat + double-quantize the per-block
 # scales, then fine-tune LoRA adapters (src/lora.cyr, unchanged) in higher
-# precision over it. Import-quantization lives HERE, not tentib (tentib =
-# QAT-from-scratch + STE; this = quantize-an-imported-checkpoint — tentib ADR
-# 0001). Forward = dequantize + the ordinary rupantara/rosnet forward.
+# precision over it. Import-quantization lives HERE, not tentib (tentib ADR 0001).
 #
-# NF4: 16 fixed quantiles of N(0,1) scaled so ±1 are the endpoints (values
-# below = the converged bitsandbytes `create_normal_map` table the paper ships;
-# they are fp32 constants — sub-ulp decimal precision is immaterial). Each
-# block of NF4_BS weights is scaled by its absmax, every weight snaps to the
-# nearest quantile, codes pack 2-per-byte. Double-quant: the per-block f64
-# scales are themselves absmax-quantized to u8 per superblock of NF4_SBS —
-# a symmetric-int8 variant of the paper's FP8+offset scheme (same idea —
-# quantize the quantization constants — simpler codec, error bound ≤ 1/254
-# relative per scale; the design difference is documented, not hidden).
+# ⚠ RECONCILED 2026-07-04 (the "know the ecosystem" rule): the first cut of this
+# module hand-rolled the base codec — but **tula 1.0.0 already ships it** as part
+# of its frozen v1 surface (`tula_nf4_pack`/`_unpack`/`_get`/`_nearest`/`_level`,
+# codebook stored as exact bit patterns, identical block/nibble/zero-block
+# semantics). The base codec now DELEGATES to tula; the thin wrappers below keep
+# anukulana's call sites/tests stable and pin the block-size defaults. What stays
+# genuinely local is **double-quantization of the scales** — tula's ADR 0002
+# suggests whole-tensor `tula_int8_quant` for scales; the paper (and this module)
+# quantizes per SUPERBLOCK of 256 (finer — scale magnitudes vary widely across a
+# 124M-param checkpoint), so that layer is anukulana's, error ≤ 1/254 relative
+# per scale.
 #
 # No gradients here (forward-only codec) — the gates are exactness properties
-# (tests/tcyr/nf4.tcyr): known-answer codes, round-trip error ≤ the max
-# half-gap × absmax, idempotent requant, pack/unpack identity.
+# (tests/tcyr/nf4.tcyr), which now exercise tula's codec through real usage.
 
-fn NF4_BS(): i64 { return 64; }     # weights per quantization block (paper)
-fn NF4_SBS(): i64 { return 256; }   # scales per double-quant superblock (paper)
+fn NF4_BS(): i64 { return TULA_NF4_BLOCK; }   # 64 — the paper's block size (tula constant)
+fn NF4_SBS(): i64 { return 256; }             # scales per double-quant superblock (paper)
 
-fn _nf4_c(num): i64 { return f64_div(f64_from(num), f64_from(10000000000000000)); }
+# ---- base codec: thin delegation to tula -------------------------------------
+fn nf4_value(code): i64 { return tula_nf4_level(code); }
+fn nf4_code(x): i64 { return tula_nf4_nearest(x); }
 
-var _nf4_tab[16];
-var _nf4_ready = 0;
-
-fn _nf4_init(): i64 {
-    if (_nf4_ready == 1) { return 0; }
-    store64(&_nf4_tab + 0 * 8, f64_neg(f64_from(1)));
-    store64(&_nf4_tab + 1 * 8, f64_neg(_nf4_c(6961928009986877)));
-    store64(&_nf4_tab + 2 * 8, f64_neg(_nf4_c(5250730514526367)));
-    store64(&_nf4_tab + 3 * 8, f64_neg(_nf4_c(3949174880981445)));
-    store64(&_nf4_tab + 4 * 8, f64_neg(_nf4_c(2844413816928864)));
-    store64(&_nf4_tab + 5 * 8, f64_neg(_nf4_c(1847734302282333)));
-    store64(&_nf4_tab + 6 * 8, f64_neg(_nf4_c(910500362515450)));
-    store64(&_nf4_tab + 7 * 8, f64_from(0));
-    store64(&_nf4_tab + 8 * 8, _nf4_c(795802995562553));
-    store64(&_nf4_tab + 9 * 8, _nf4_c(1609302014112473));
-    store64(&_nf4_tab + 10 * 8, _nf4_c(2461123019456863));
-    store64(&_nf4_tab + 11 * 8, _nf4_c(3379152417182922));
-    store64(&_nf4_tab + 12 * 8, _nf4_c(4407098293304443));
-    store64(&_nf4_tab + 13 * 8, _nf4_c(5626170039176941));
-    store64(&_nf4_tab + 14 * 8, _nf4_c(7229568362236023));
-    store64(&_nf4_tab + 15 * 8, f64_from(1));
-    _nf4_ready = 1;
-    return 0;
-}
-
-fn nf4_value(code): i64 {
-    _nf4_init();
-    return load64(&_nf4_tab + code * 8);
-}
-
-fn _nf4_abs(x): i64 {
-    if (f64_lt(x, f64_from(0)) == 1) { return f64_neg(x); }
-    return x;
-}
-
-# nearest NF4 code for a normalized value x in [-1, 1] (linear argmin over 16)
-fn nf4_code(x): i64 {
-    _nf4_init();
-    var best = 0;
-    var bd = _nf4_abs(f64_sub(x, load64(&_nf4_tab)));
-    var c = 1;
-    while (c < 16) {
-        var d = _nf4_abs(f64_sub(x, load64(&_nf4_tab + c * 8)));
-        if (f64_lt(d, bd) == 1) { bd = d; best = c; }
-        c = c + 1;
-    }
-    return best;
-}
-
-fn _nf4_get(codes, i): i64 {
-    var b = load8(codes + (i / 2));
-    if ((i % 2) == 1) { return (b >> 4) & 0xF; }
-    return b & 0xF;
-}
-
-fn _nf4_set(codes, i, c): i64 {
-    var p = codes + (i / 2);
-    var b = load8(p);
-    if ((i % 2) == 1) { store8(p, (b & 0x0F) | (c << 4)); }
-    else { store8(p, (b & 0xF0) | c); }
-    return 0;
-}
-
-# ---- quantize ----------------------------------------------------------------
-# W(n f64) -> codes (ceil(n/2) bytes, 2 codes/byte) + scales (ceil(n/BS) f64,
-# per-block absmax). absmax==0 blocks quantize to code 7 (0.0) with scale 0.
+# W(n f64) -> codes (tula_nf4_bytes(n) bytes, 2/byte) + scales (f64 per block)
 fn nf4_quant(W, n, codes, scales): i64 {
-    _nf4_init();
-    var bs = NF4_BS();
-    var blk = 0;
-    var start = 0;
-    while (start < n) {
-        var len = bs;
-        if (start + len > n) { len = n - start; }
-        var amax = f64_from(0);
-        var i = 0;
-        while (i < len) {
-            var a = _nf4_abs(load64(W + (start + i) * 8));
-            if (f64_gt(a, amax) == 1) { amax = a; }
-            i = i + 1;
-        }
-        store64(scales + blk * 8, amax);
-        if (f64_eq(amax, f64_from(0)) == 1) {
-            i = 0;
-            while (i < len) { _nf4_set(codes, start + i, 7); i = i + 1; }
-        } else {
-            var inv = f64_div(f64_from(1), amax);
-            i = 0;
-            while (i < len) {
-                var x = f64_mul(load64(W + (start + i) * 8), inv);
-                _nf4_set(codes, start + i, nf4_code(x));
-                i = i + 1;
-            }
-        }
-        blk = blk + 1;
-        start = start + bs;
-    }
+    tula_nf4_pack(W, n, NF4_BS(), scales, codes);
     return 0;
 }
 
-# ---- dequantize ---------------------------------------------------------------
 fn nf4_dequant(codes, scales, n, W_out): i64 {
-    _nf4_init();
-    var bs = NF4_BS();
-    var i = 0;
-    while (i < n) {
-        var scale = load64(scales + (i / bs) * 8);
-        store64(W_out + i * 8, f64_mul(nf4_value(_nf4_get(codes, i)), scale));
-        i = i + 1;
-    }
+    tula_nf4_unpack(codes, scales, n, NF4_BS(), W_out);
     return 0;
 }
 
-# ---- double-quantization of the scales -----------------------------------------
+# ---- double-quantization of the scales (the local layer) ----------------------
 # scales (nblocks f64, all >= 0) -> q8 (nblocks bytes, 0..127) + supers
 # (ceil(nblocks/SBS) f64, per-superblock absmax). Symmetric-u8 variant of the
-# paper's FP8+offset (see module header).
+# paper's FP8+offset (documented simplification; same idea — quantize the
+# quantization constants).
 fn nf4_dq_pack(scales, nblocks, q8, supers): i64 {
     var sbs = NF4_SBS();
     var sb = 0;

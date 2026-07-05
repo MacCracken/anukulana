@@ -15,18 +15,18 @@ them: the weight **format** is `tula`; the transformer **forward** is `rupantara
 
 ## Status
 
-**0.4.0 — the full adapt arc: LoRA + QLoRA over the frozen import (M3 + M4).**
-The whole Type-3 charter is now built: `gpt2` imports a real **GPT-2-small
-safetensors** and runs it on **rupantara** (batch == KV-decode bit-identical);
-`gpt2-oracle` gates the forward against a **committed HF-reference fixture**
-(argmax identical ×48, maxrel ≤ 1e-5 — torch ran once in a disposable venv,
-never a dependency; `make fidelity`); `gpt2-lora` fine-tunes a **LoRA head
-adapter** over the frozen base (FD-gated dA/dB via two rosnet `linear_bwd`
-passes + hand-derived Adam — xent 10.79→0.0000, argmax 8/8, base bit-frozen);
-and `gpt2-qlora` runs **QLoRA end-to-end**: the 124M base NF4-quantized
-(blockwise-64 + double-quant scales, 989 MB → ~62 MB codes) with the same
-adapter recovering the task 8/8 over the frozen 4-bit base. Remaining: NF4
-checkpoints via tula's `nf4` dtype + adapter save/load — see
+**0.5.0 — the Type-3 charter is FULLY built (import → run → match → adapt →
+persist).** `gpt2` imports a real **GPT-2-small safetensors** and runs it on
+**rupantara** (batch == KV-decode bit-identical); `gpt2-oracle` gates the
+forward against a **committed HF-reference fixture** (argmax identical ×48,
+maxrel ≤ 1e-5 — torch ran once in a disposable venv, never a dependency;
+`make fidelity`); `gpt2-lora` fine-tunes a **LoRA head adapter** over the
+frozen base (FD-gated dA/dB via two rosnet `linear_bwd` passes + hand-derived
+Adam — argmax 8/8, base bit-frozen); `gpt2-qlora` runs **QLoRA** (the 124M base
+NF4-quantized via **tula's codec** + local double-quant, adapter recovers 8/8
+over the 4-bit base); and `gpt2-tula` **persists it all**: a sigil-signed
+63.8 MB NF4 checkpoint + 3.3 MB adapter, both round-tripping **bit-identical**
+with wrong-key/tampered files rejected. See
 [`docs/development/roadmap.md`](docs/development/roadmap.md). Cyrius pin
 **6.3.31**.
 

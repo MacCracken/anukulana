@@ -1,0 +1,138 @@
+# @public — M4 tail: NF4-checkpoint + LoRA-adapter persistence via tula.
+#
+# The "quantize once, ship the 62 MB artifact" step: the NF4-quantized base and
+# the trained adapter each serialize to a sigil-signed `.tula` file (tula's
+# frozen v1 format — TULA_DT_NF4 codes + the ADR-0002 "<name>.scale" sidecar
+# convention, here double-quantized as INT8 codes + F64 superblock maxes).
+# tula owns the codec + container; sigil owns the crypto; this module only
+# assembles tensors and names. Round-trips are gated BIT-IDENTICAL (quantized
+# data is discrete — nothing may drift on disk).
+#
+# Checkpoint layout (names ≤ 47 chars):
+#   "cfg"                 F64  [8]    V,C,T,nh,nkv,NL,F,tie — as f64_from ints
+#   "base.nf4"            NF4  [np]   packed codes (2/byte)
+#   "base.nf4.scale.q8"   INT8 [nb]   double-quantized per-block scales (0..127)
+#   "base.nf4.scale.sup"  F64  [nsb]  per-superblock scale absmax
+# Adapter layout:
+#   "lora.A"    F64 [C,r]   ·   "lora.B"    F64 [r,V]   ·
+#   "lora.meta" F64 [2] = (s, r)
+
+fn _nfs_shp1(a): i64 { var s = alloc(8); store64(s, a); return s; }
+fn _nfs_shp2(a, b): i64 { var s = alloc(16); store64(s, a); store64(s + 8, b); return s; }
+
+# ---- save the NF4-quantized base as a signed .tula --------------------------
+# Quantizes params(np f64) through the FULL pipeline (tula NF4 pack -> local
+# double-quant) and writes a signed checkpoint. Returns 0, or -1 on any failure.
+fn anuk_nf4_save(path, cfg, params, sk): i64 {
+    var np = ru_params_count(cfg);
+    var bs = NF4_BS();
+    var nb = tula_nf4_blocks(np, bs);
+    var nsb = (nb + NF4_SBS() - 1) / NF4_SBS();
+    var nibbles = mmap_anon(tula_nf4_bytes(np));
+    var scales = mmap_anon(nb * 8);
+    if (nibbles == 0) { return 0 - 1; }
+    if (scales == 0) { return 0 - 1; }
+    tula_nf4_pack(params, np, bs, scales, nibbles);
+    var q8 = mmap_anon(nb);
+    var supers = t_alloc(nsb);
+    if (q8 == 0) { return 0 - 1; }
+    nf4_dq_pack(scales, nb, q8, supers);
+    var cfgv = t_alloc(8);
+    store64(cfgv + 0 * 8, f64_from(_cfg_V(cfg)));
+    store64(cfgv + 1 * 8, f64_from(_cfg_C(cfg)));
+    store64(cfgv + 2 * 8, f64_from(_cfg_T(cfg)));
+    store64(cfgv + 3 * 8, f64_from(_cfg_nh(cfg)));
+    store64(cfgv + 4 * 8, f64_from(_cfg_nkv(cfg)));
+    store64(cfgv + 5 * 8, f64_from(_cfg_NL(cfg)));
+    store64(cfgv + 6 * 8, f64_from(_cfg_F(cfg)));
+    store64(cfgv + 7 * 8, f64_from(1));
+    var b = tula_builder_new();
+    tula_builder_add(b, "cfg", TULA_DT_F64, _nfs_shp1(8), 1, cfgv, 64);
+    tula_builder_add(b, "base.nf4", TULA_DT_NF4, _nfs_shp1(np), 1, nibbles, tula_nf4_bytes(np));
+    tula_builder_add(b, "base.nf4.scale.q8", TULA_DT_INT8, _nfs_shp1(nb), 1, q8, nb);
+    tula_builder_add(b, "base.nf4.scale.sup", TULA_DT_F64, _nfs_shp1(nsb), 1, supers, nsb * 8);
+    var buf = tula_builder_finish_signed(b, sk);
+    if (buf == 0) { return 0 - 1; }
+    var total = tula_total_len(buf);
+    if (tula_write_file(path, buf, total) != total) { return 0 - 1; }
+    return 0;
+}
+
+# ---- load + verify an NF4 checkpoint -----------------------------------------
+# Opens (validated), verifies the Ed25519 signature against pk (REJECTS unsigned
+# or bad — the trust boundary), reconstructs cfg, and dequantizes the base into
+# a fresh mmap_anon f64 buffer. Returns the params ptr, or 0 on any failure.
+fn anuk_nf4_load(path, pk, cfg_out): i64 {
+    var r = tula_open_mmap(path);
+    if (r == 0) { _anuk_sput("nf4-load: open/validate failed\n"); return 0; }
+    if (tula_verify(r, pk) != TULA_SIG_OK) {
+        _anuk_sput("nf4-load: signature REJECTED\n");
+        return 0;
+    }
+    var ec = tula_find(r, "cfg");
+    if (ec == 0) { _anuk_sput("nf4-load: no cfg tensor\n"); return 0; }
+    var cv = tula_entry_data(r, ec);
+    ru_cfg_init(cfg_out, f64_to(load64(cv)), f64_to(load64(cv + 8)), f64_to(load64(cv + 16)),
+    f64_to(load64(cv + 24)), f64_to(load64(cv + 32)), f64_to(load64(cv + 40)),
+    f64_to(load64(cv + 48)), f64_to(load64(cv + 56)));
+    var eb = tula_find(r, "base.nf4");
+    var eq = tula_find(r, "base.nf4.scale.q8");
+    var es = tula_find(r, "base.nf4.scale.sup");
+    if (eb == 0) { _anuk_sput("nf4-load: missing base tensors\n"); return 0; }
+    if (eq == 0) { _anuk_sput("nf4-load: missing base tensors\n"); return 0; }
+    if (es == 0) { _anuk_sput("nf4-load: missing base tensors\n"); return 0; }
+    var np = tula_entry_dim(eb, 0);
+    if (np != ru_params_count(cfg_out)) { _anuk_sput("nf4-load: np/cfg mismatch\n"); return 0; }
+    var nb = tula_entry_dim(eq, 0);
+    if (nb != tula_nf4_blocks(np, NF4_BS())) { _anuk_sput("nf4-load: block-count mismatch\n"); return 0; }
+    var scales = mmap_anon(nb * 8);
+    if (scales == 0) { return 0; }
+    nf4_dq_unpack(tula_entry_data(r, eq), tula_entry_data(r, es), nb, scales);
+    var params = mmap_anon(np * 8);
+    if (params == 0) { return 0; }
+    tula_nf4_unpack(tula_entry_data(r, eb), scales, np, NF4_BS(), params);
+    return params;
+}
+
+# ---- adapter save / load ------------------------------------------------------
+fn anuk_adapter_save(path, A, B, C, r, V, s, sk): i64 {
+    var meta = t_alloc(2);
+    store64(meta, s);
+    store64(meta + 8, f64_from(r));
+    var b = tula_builder_new();
+    tula_builder_add(b, "lora.A", TULA_DT_F64, _nfs_shp2(C, r), 2, A, C * r * 8);
+    tula_builder_add(b, "lora.B", TULA_DT_F64, _nfs_shp2(r, V), 2, B, r * V * 8);
+    tula_builder_add(b, "lora.meta", TULA_DT_F64, _nfs_shp1(2), 1, meta, 16);
+    var buf = tula_builder_finish_signed(b, sk);
+    if (buf == 0) { return 0 - 1; }
+    var total = tula_total_len(buf);
+    if (tula_write_file(path, buf, total) != total) { return 0 - 1; }
+    return 0;
+}
+
+# Loads + verifies an adapter; writes A/B into caller buffers (sized C*r / r*V)
+# and returns the packed (s in out_s[0], r in out_s[1] as f64 bits). 0 = ok, -1 = fail.
+fn anuk_adapter_load(path, pk, A_out, B_out, C, r, V, out_s): i64 {
+    var rd = tula_read_file(path);
+    if (rd == 0) { _anuk_sput("adapter-load: open/validate failed\n"); return 0 - 1; }
+    if (tula_verify(rd, pk) != TULA_SIG_OK) {
+        _anuk_sput("adapter-load: signature REJECTED\n");
+        return 0 - 1;
+    }
+    var ea = tula_find(rd, "lora.A");
+    var eb = tula_find(rd, "lora.B");
+    var em = tula_find(rd, "lora.meta");
+    if (ea == 0) { return 0 - 1; }
+    if (eb == 0) { return 0 - 1; }
+    if (em == 0) { return 0 - 1; }
+    if (tula_entry_dim(ea, 0) != C) { return 0 - 1; }
+    if (tula_entry_dim(ea, 1) != r) { return 0 - 1; }
+    if (tula_entry_dim(eb, 0) != r) { return 0 - 1; }
+    if (tula_entry_dim(eb, 1) != V) { return 0 - 1; }
+    t_copy(A_out, tula_entry_data(rd, ea), C * r);
+    t_copy(B_out, tula_entry_data(rd, eb), r * V);
+    var mv = tula_entry_data(rd, em);
+    store64(out_s, load64(mv));
+    store64(out_s + 8, load64(mv + 8));
+    return 0;
+}
