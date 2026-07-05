@@ -6,6 +6,44 @@ moving, no API freeze until v1.0).
 
 ## [Unreleased]
 
+## [1.0.0] — 2026-07-04
+
+**v1.0 — the Type-3 reference freezes.** The charter (import → run → match →
+adapt → persist) shipped across 0.2.0–0.5.0; this cut closes the remaining v1.0
+criteria and freezes the surface. **GGUF import is the named headline post-1.0
+addition** (the second foreign source — TinyLlama-class models).
+
+### Added
+- **`docs/api.md` + `STABILITY.md`** — the frozen 1.x surface: the five gated
+  CLI commands (primary) + the module functions (`st_*`, `anuk_*`, `lora_*`,
+  `nf4_*`), the checkpoint/adapter tensor names, exit-code convention. Demo
+  hyperparameters and `_`-internals stay out-of-freeze; additions land as 1.x
+  minors.
+- **`tests/tcyr/fuzz.tcyr`** (5, suite 75→**80**) — the parsers-fuzz-clean
+  criterion: deterministic LCG fuzz, 30k byte-mutations + full truncation sweep
+  + 5k garbage buffers over `st_open` (accessor probes on every accepted
+  reader) + 3k mutated/truncated oracle-fixture files. Zero crashes; replayable
+  by construction.
+- **`SECURITY.md`** + **`docs/audit/2026-07-04-audit.md`** — threat model +
+  the v1.0 audit: **PASS after 2 fixes** (below).
+- **`docs/benchmarks.md`** — v1.0 capture (Ryzen 7 5800H): `gpt2` 3.9 s ·
+  `gpt2-oracle` 7.2 s · `gpt2-lora` 13.3 s · `gpt2-qlora` 53.5 s · `gpt2-tula`
+  79.5 s; artifact sizes 63.8 MB ckpt / 3.3 MB adapter; honest framing
+  (correctness-first CPU reference — throughput belongs to rosnet/mabda lanes).
+
+### Fixed (audit findings — both hostile-input DoS class in `st_open`)
+- **Integer-wrap in the header bounds check**: `8 + hlen > len` overflows for
+  `hlen` within 8 of i64-max → replaced with the wrap-safe `hlen > len - 8`.
+- **Unchecked entry-table allocation**: a hostile header declaring millions of
+  tensors drove `alloc(nobj * 112)` past the 256 MB cap to 0 → null-store
+  crash; now rejected cleanly.
+
+### v1.0 criteria — all met
+✅ CLI/API frozen + documented · ✅ HF-fidelity gate · ✅ LoRA FD-gated +
+QLoRA/NF4 working · ✅ parsers hardened + fuzz clean + bench · ✅ audit +
+SECURITY.md · ✅ downstream example green (the five-command gated pipeline on
+the real checkpoint) · ✅ CHANGELOG complete.
+
 ## [0.5.0] — 2026-07-04
 
 **M4 tail — signed NF4 persistence via tula: the Type-3 charter is FULLY built.**

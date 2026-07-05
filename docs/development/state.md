@@ -5,6 +5,14 @@
 
 ## Version
 
+**1.0.0 — RELEASED 2026-07-04 (STABLE — the Type-3 reference, frozen).** API
+frozen (`docs/api.md` + `STABILITY.md`); parsers fuzz-gated
+(`tests/tcyr/fuzz.tcyr`, 38k+ rounds, suite **80**); audit **PASS after 2
+fixes** (both hostile-input DoS in `st_open`: header bounds-check integer-wrap
++ unchecked entry-table alloc — `docs/audit/2026-07-04-audit.md` +
+`SECURITY.md`); benchmarks captured (`docs/benchmarks.md`). All seven v1.0
+criteria met. **Post-1.0 headline: GGUF import.** Same-day prior releases:
+
 **0.5.0 — RELEASED 2026-07-04 (M4 tail: signed NF4 persistence — the charter is
 FULLY built).** `src/nf4.cyr` base codec reconciled to **delegate to tula's
 shipped NF4** (the 0.4.0 hand-roll duplicated tula 1.0.0's frozen surface — the
@@ -41,7 +49,7 @@ exactly).** The M2 arc landed across 0.2.0 + 0.3.0:
   1.05e-6** (fp32-rounding scale); gate frozen at **maxrel ≤ 1e-5** + exact
   argmax + NaN-free. `make fidelity`.
 
-Suite **75**; lint/fmt clean. Released: **0.1.0 · 0.2.0 · 0.3.0 · 0.4.0 · 0.5.0**.
+Suite **80**; lint/fmt clean. Released: **0.1.0 · 0.2.0 · 0.3.0 · 0.4.0 · 0.5.0 · 1.0.0**.
 
 ## Toolchain
 
@@ -79,7 +87,8 @@ scale reported honestly. Findings: plain SGD diverges on real-GPT-2 features
 (massive-activation outliers → Adam required); the NF4 table's largest gap is
 on the NEGATIVE side. **The persistence bite shipped in 0.5.0** (signed NF4
 checkpoint + adapter via tula, bit-identical round-trips, trust boundary
-gated). **The charter is fully built — the repo is 1.0-track**: remaining to
-1.0 = API freeze + docs (`docs/api.md`), benchmarks capture, security audit,
-CHANGELOG completeness (see the roadmap's v1.0 criteria). GGUF as a second
-import source stays an open post-1.0 candidate. See `roadmap.md`.
+gated). **1.0.0 SHIPPED same day** — API frozen, fuzz gate added (2 audit fixes
+in `st_open` folded in), benchmarks + audit + SECURITY.md landed. Post-1.0 =
+maintenance + the roadmapped additive lane, headlined by **GGUF import** (the
+second foreign source; per the audit's standing guidance, its parser lands
+wrap-safe + null-checked + fuzz-gated in the same cut). See `roadmap.md`.

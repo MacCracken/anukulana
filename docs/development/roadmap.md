@@ -136,31 +136,54 @@ M2 when rupantara's forward lands.
   0.4.0 hand-roll duplicated tula 1.0.0's frozen surface); only the
   superblock-256 double-quant stays anukulana-local.
 
-### M5 — hardening + fuzz + bench
-- Harden the **foreign parsers** (safetensors/GGUF are untrusted input — bounds/
-  overflow/lying-header safe, reject malformed). Fuzz them. Bench import + forward
-  → `docs/benchmarks.md`.
+### M5 — hardening + fuzz + bench — ✅ COMPLETE 2026-07-04
+- `tests/tcyr/fuzz.tcyr` (5, suite 75→**80**): deterministic LCG fuzz —
+  30k byte-mutation rounds + full truncation sweep + 5k garbage buffers over
+  `st_open` (accessor probes on every accept) + 3k mutated oracle-fixture
+  files. Zero crashes. Bench captured → [`docs/benchmarks.md`](../benchmarks.md).
 
-### M6 — security audit + SECURITY.md
-- 6-dimension audit (memory safety · integer overflow · untrusted-parser bounds ·
-  LoRA-gradient correctness · resource caps · fail-loud). Report + `SECURITY.md`.
+### M6 — security audit + SECURITY.md — ✅ COMPLETE 2026-07-04
+- [`docs/audit/2026-07-04-audit.md`](../audit/2026-07-04-audit.md) — **PASS
+  after 2 fixes**, both hostile-input DoS class in `st_open`: an integer-wrap
+  in the header bounds check (`8 + hlen` overflow for hlen near i64-max → the
+  wrap-safe `hlen > len - 8` form) and an unchecked `alloc(nobj * 112)` (a
+  hostile huge-entry-count header drove alloc past the cap to 0 → null-store
+  crash; now rejected). `SECURITY.md` written (threat model: foreign files,
+  signed checkpoints, fixture, large-file handling).
 
-### v1.0 — freeze & clean cut
-- CLI + API frozen + `docs/api.md` + `STABILITY.md`; ≥1 downstream consumer/example
-  (e.g. a served model via hoosh, or a documented import→adapt→save flow);
-  maintainer bumps VERSION → 1.0.0 + tags.
+### v1.0 — freeze & clean cut — ✅ 2026-07-04
+- CLI + API frozen (`docs/api.md` + `STABILITY.md`). The downstream example =
+  the documented, gated import→match→adapt→quantize→persist flow (`gpt2` →
+  `gpt2-oracle` → `gpt2-lora` → `gpt2-qlora` → `gpt2-tula`), green end-to-end
+  on the real checkpoint.
 
 ---
 
-## v1.0 criteria
+## v1.0 criteria — ✅ ALL MET (1.0.0 cut 2026-07-04)
 
-- [ ] CLI/API frozen + documented (`docs/api.md` + `STABILITY.md`)
+- [x] CLI/API frozen + documented (`docs/api.md` + `STABILITY.md`)
 - [x] **GPT-2 import logit-fidelity gate** (matches reference) — the headline ✅ 2026-07-04 (`gpt2-oracle`, maxrel ≤ 1e-5 + exact argmax)
-- [ ] LoRA FD-gated; QLoRA/NF4 working
-- [ ] Foreign parsers hardened + fuzz clean; bench (`docs/benchmarks.md`)
-- [ ] Security audit + `SECURITY.md`
-- [ ] ≥1 downstream consumer/example green
-- [ ] CHANGELOG complete; version consistency (CI docs gate)
+- [x] LoRA FD-gated; QLoRA/NF4 working (0.4.0–0.5.0: adapter 8/8 over f64 AND NF4 bases; NF4 codec = tula's, delegated)
+- [x] Foreign parsers hardened + fuzz clean; bench (`docs/benchmarks.md`) — 38k+ fuzz rounds, 2 audit fixes folded in
+- [x] Security audit + `SECURITY.md` (`docs/audit/2026-07-04-audit.md`)
+- [x] ≥1 downstream consumer/example green — the five-command gated pipeline on the real 124M checkpoint
+- [x] CHANGELOG complete from 0.1.0; version consistency
+
+---
+
+## Post-1.0 (additive 1.x minors)
+
+- **GGUF import (the headline v1+ item)** — the second foreign source
+  (llama.cpp's format): own parser (typed-KV metadata + tensor layout, untrusted
+  — per the audit's standing guidance: wrap-safe bounds, null-checked allocs,
+  fuzz rounds land in the same cut) + a name/shape mapping for a GGUF-shipped
+  architecture. Opens the TinyLlama-class import path.
+- Quantized-scale import (keep NF4/quantized tensors packed through the load
+  path instead of widening — pairs with GGUF's quantized payloads).
+- NF4 quantization throughput (branchless codebook search; SIMD when cyrius
+  ships it next arc).
+- Per-layer adapter depth — if ever wanted, the backward chain patches into
+  **attn11** (allowed except SIMD), not here.
 
 ---
 

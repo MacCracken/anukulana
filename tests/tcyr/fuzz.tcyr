@@ -1,0 +1,157 @@
+# tests/tcyr/fuzz.tcyr — v1.0 criterion: foreign parsers fuzz clean.
+#
+# Deterministic bounded fuzz (LCG-driven, no wall-clock/randomness — replayable
+# by construction) over the two untrusted-input readers:
+#   * st_open (foreign safetensors)   — byte mutations of a valid buffer,
+#     random garbage buffers, and a full truncation sweep
+#   * _orc_read_fixture (oracle file) — same treatment via st-style mutation of
+#     a valid fixture image (exercised through a temp file, since the reader
+#     owns its file I/O)
+# The gate: NO crash, ever (a fault kills the test process = red suite); every
+# outcome is "reader" or "clean reject". Accessor calls on accepted readers
+# must stay in-bounds.
+include "src/lib.cyr"
+include "lib/assert.cyr"
+
+var _fz_state = 0;
+fn _fz_seed(s): i64 { _fz_state = s; return 0; }
+fn _fz_next(): i64 {
+    _fz_state = (_fz_state * 6364136223846793005 + 1442695040888963407);
+    var v = (_fz_state >> 33);
+    if (v < 0) { v = 0 - v; }
+    return v;
+}
+
+# a small VALID safetensors image: [u64 hlen][JSON][16 bytes payload]
+fn _fz_valid_st(out_len): i64 {
+    var js = "{\"a\":{\"dtype\":\"F32\",\"shape\":[2],\"data_offsets\":[0,8]},";
+    var js2 = "\"b\":{\"dtype\":\"F64\",\"shape\":[1],\"data_offsets\":[8,16]}}";
+    var hlen = strlen(js) + strlen(js2);
+    var total = 8 + hlen + 16;
+    var buf = alloc(total + 8);
+    store64(buf, hlen);
+    var p = buf + 8;
+    var i = 0;
+    while (i < strlen(js)) { store8(p + i, load8(js + i)); i = i + 1; }
+    p = p + strlen(js);
+    i = 0;
+    while (i < strlen(js2)) { store8(p + i, load8(js2 + i)); i = i + 1; }
+    i = 0;
+    while (i < 16) { store8(buf + 8 + hlen + i, i * 3); i = i + 1; }
+    store64(out_len, total);
+    return buf;
+}
+
+fn _fz_probe_reader(r): i64 {
+    # touch the accessor surface of an ACCEPTED reader — must stay in-bounds
+    var n = st_count(r);
+    var i = 0;
+    while (i < n) {
+        var e = st_entry(r, i);
+        st_entry_dtype(e);
+        st_entry_ndim(e);
+        st_entry_nelems(e);
+        st_entry_data(r, e);
+        i = i + 1;
+    }
+    return n;
+}
+
+fn test_fuzz_safetensors(): i64 {
+    var lenp = alloc(8);
+    var valid = _fz_valid_st(lenp);
+    var vlen = load64(lenp);
+    assert_nonnull(st_open(valid, vlen), "the valid seed buffer opens");
+
+    var work = alloc(vlen + 8);
+    var accepted = 0;
+    var rejected = 0;
+    _fz_seed(20260704);
+
+    # ---- byte-mutation fuzz: 30k rounds, 1-4 mutated bytes each ---------------
+    var round = 0;
+    while (round < 30000) {
+        var i = 0;
+        while (i < vlen) { store8(work + i, load8(valid + i)); i = i + 1; }
+        var nmut = 1 + (_fz_next() % 4);
+        var m = 0;
+        while (m < nmut) {
+            store8(work + (_fz_next() % vlen), _fz_next() & 0xFF);
+            m = m + 1;
+        }
+        var r = st_open(work, vlen);
+        if (r != 0) { _fz_probe_reader(r); accepted = accepted + 1; }
+        else { rejected = rejected + 1; }
+        round = round + 1;
+    }
+
+    # ---- truncation sweep: every prefix length of the valid buffer -------------
+    var L = 0;
+    while (L <= vlen) {
+        var r2 = st_open(valid, L);
+        if (r2 != 0) { _fz_probe_reader(r2); }
+        L = L + 1;
+    }
+
+    # ---- pure-garbage buffers: 5k rounds, random length 0..256 -----------------
+    var g = alloc(256);
+    round = 0;
+    while (round < 5000) {
+        var gl = _fz_next() % 257;
+        var i2 = 0;
+        while (i2 < gl) { store8(g + i2, _fz_next() & 0xFF); i2 = i2 + 1; }
+        var r3 = st_open(g, gl);
+        if (r3 != 0) { _fz_probe_reader(r3); }
+        round = round + 1;
+    }
+
+    # survived = the gate; report the mix so a silent accept-everything bug shows
+    assert_gt(rejected, 0, "mutation fuzz: rejections observed (parser actually validates)");
+    assert_gt(accepted + rejected, 29999, "mutation fuzz: all rounds ran");
+    return 0;
+}
+
+fn test_fuzz_oracle_fixture(): i64 {
+    # valid tiny fixture: magic | n_seqs=1 | T=2 | V=3 | tokens[2] | argmax[2] | logits[3]
+    var vlen = 16 + 16 + 16 + 16 + 24;
+    var buf = alloc(vlen);
+    store64(buf, 0x315849464B554E41);
+    store64(buf + 8, 1);
+    store64(buf + 16, 2);
+    store64(buf + 24, 3);
+    store64(buf + 32, 1); store64(buf + 40, 2);       # tokens
+    store64(buf + 48, 0); store64(buf + 56, 1);       # argmax
+    store64(buf + 64, f64_from(1)); store64(buf + 72, f64_from(2)); store64(buf + 80, f64_from(3));
+    var path = "/tmp/anuk_fuzz_fixture.bin";
+    var nsb = alloc(8); var tb = alloc(8); var vb = alloc(8);
+    file_write_all(path, buf, vlen);
+    assert_nonnull(_orc_read_fixture(path, nsb, tb, vb), "the valid seed fixture reads");
+
+    var work = alloc(vlen);
+    _fz_seed(41);
+    var round = 0;
+    while (round < 3000) {
+        var i = 0;
+        while (i < vlen) { store8(work + i, load8(buf + i)); i = i + 1; }
+        var m = 0;
+        while (m < 3) { store8(work + (_fz_next() % vlen), _fz_next() & 0xFF); m = m + 1; }
+        # random truncation too
+        var wl = vlen;
+        if ((_fz_next() % 4) == 0) { wl = _fz_next() % (vlen + 1); }
+        file_write_all(path, work, wl);
+        _orc_read_fixture(path, nsb, tb, vb);          # must not crash; 0 or reader
+        round = round + 1;
+    }
+    assert(1, "oracle-fixture fuzz: 3k mutated/truncated files survived");
+    return 0;
+}
+
+fn main(): i64 {
+    alloc_init();
+    test_fuzz_safetensors();
+    test_fuzz_oracle_fixture();
+    return assert_summary();
+}
+
+var rc = main();
+syscall(60, rc);

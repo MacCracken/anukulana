@@ -15,8 +15,10 @@ them: the weight **format** is `tula`; the transformer **forward** is `rupantara
 
 ## Status
 
-**0.5.0 — the Type-3 charter is FULLY built (import → run → match → adapt →
-persist).** `gpt2` imports a real **GPT-2-small safetensors** and runs it on
+**1.0.0 — STABLE: the Type-3 reference, frozen** ([`docs/api.md`](docs/api.md) +
+[`STABILITY.md`](STABILITY.md); parsers fuzz-gated, audited —
+[`SECURITY.md`](SECURITY.md); benchmarks captured). The charter (import → run →
+match → adapt → persist), as built across 0.2.0–0.5.0: `gpt2` imports a real **GPT-2-small safetensors** and runs it on
 **rupantara** (batch == KV-decode bit-identical); `gpt2-oracle` gates the
 forward against a **committed HF-reference fixture** (argmax identical ×48,
 maxrel ≤ 1e-5 — torch ran once in a disposable venv, never a dependency;
@@ -26,7 +28,8 @@ Adam — argmax 8/8, base bit-frozen); `gpt2-qlora` runs **QLoRA** (the 124M bas
 NF4-quantized via **tula's codec** + local double-quant, adapter recovers 8/8
 over the 4-bit base); and `gpt2-tula` **persists it all**: a sigil-signed
 63.8 MB NF4 checkpoint + 3.3 MB adapter, both round-tripping **bit-identical**
-with wrong-key/tampered files rejected. See
+with wrong-key/tampered files rejected. **Post-1.0 headline: GGUF import** (the
+second foreign source — TinyLlama-class models); see
 [`docs/development/roadmap.md`](docs/development/roadmap.md). Cyrius pin
 **6.3.31**.
 

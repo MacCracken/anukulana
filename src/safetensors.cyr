@@ -115,7 +115,8 @@ fn st_open(buf, len): i64 {
     if (len < 8) { return 0; }
     var hlen = _st_u64_le(buf);
     if (hlen < 0) { return 0; }
-    if ((8 + hlen) > len) { return 0; }                # header overruns buffer
+    if (hlen > len - 8) { return 0; }                  # header overruns buffer
+    # (form chosen wrap-safe: `8 + hlen > len` overflows for hlen near i64-max)
     var data_start = 8 + hlen;
     var data_len = len - data_start;
     var root = bayan_json_v_parse_str(buf + 8, hlen);
@@ -123,6 +124,7 @@ fn st_open(buf, len): i64 {
     if (bayan_json_v_is_obj(root) == 0) { return 0; }
     var nobj = bayan_json_v_obj_len(root);
     var entries = alloc(nobj * 112);
+    if (entries == 0) { return 0; }                    # hostile huge-entry-count header
     var count = 0;
     var i = 0;
     while (i < nobj) {
