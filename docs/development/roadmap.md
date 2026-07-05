@@ -173,11 +173,16 @@ M2 when rupantara's forward lands.
 
 ## Post-1.0 (additive 1.x minors)
 
-- **GGUF import (the headline v1+ item)** — the second foreign source
-  (llama.cpp's format): own parser (typed-KV metadata + tensor layout, untrusted
-  — per the audit's standing guidance: wrap-safe bounds, null-checked allocs,
-  fuzz rounds land in the same cut) + a name/shape mapping for a GGUF-shipped
-  architecture. Opens the TinyLlama-class import path.
+- [x] **GGUF import (the headline v1+ item)** ✅ 2026-07-05 — the second foreign
+  source (llama.cpp's format): own v2/v3 parser (`src/gguf.cyr` — typed-KV walk,
+  ne-order dims, alignment; wrap-safe bounds + null-checked allocs + 35k fuzz
+  rounds in the same cut per the audit's standing guidance) + the GPT-2 mapping
+  (`src/gpt2_gguf.cyr` — `blk.N.*`, ggml `[out,in]` transposed back, fused-qkv
+  split, KV-driven config). Proof on the real 124M checkpoint: `gpt2-gguf`
+  batch==decode 0 diffs, and **`gpt2-cross` bit-identity across both doors —
+  123,659,520 params / 402,056 logits, 0 diffs**. F32/F16 payloads; quantized
+  GGML block types reject cleanly (next item). TinyLlama-class imports now need
+  only a llama-architecture mapping, not new parsing.
 - Quantized-scale import (keep NF4/quantized tensors packed through the load
   path instead of widening — pairs with GGUF's quantized payloads).
 - NF4 quantization throughput (branchless codebook search; SIMD when cyrius

@@ -65,3 +65,5 @@ include "src/nf4.cyr"           # M4: NF4 4-bit NormalFloat codec (blockwise + d
 include "src/qlora_demo.cyr"    # M4: gpt2-qlora — LoRA head adapter over the NF4-quantized base
 include "src/nf4_store.cyr"     # M4 tail: NF4-checkpoint + adapter persistence via tula (signed)
 include "src/tula_demo.cyr"     # M4 tail: gpt2-tula — the full save/load round-trip demo
+include "src/gguf.cyr"          # post-1.0: sovereign GGUF v2/v3 parser (2nd foreign source)
+include "src/gpt2_gguf.cyr"     # post-1.0: GPT-2-from-GGUF mapping (blk.N.*, transpose-back)

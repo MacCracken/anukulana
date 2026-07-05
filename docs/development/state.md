@@ -1,9 +1,24 @@
 # anukulana — Current State
 
-> **Last refresh**: 2026-07-04 | **Cadence**: every release.
+> **Last refresh**: 2026-07-05 | **Cadence**: every release.
 > `CLAUDE.md` is preferences/process; this file is volatile state.
 
 ## Version
+
+**[Unreleased] — GGUF import LANDED 2026-07-05 (the named post-1.0 headline).**
+`src/gguf.cyr` (sovereign GGUF v2/v3 parser — typed-KV structural skip,
+ne-order dims, alignment handling, F32/F16 widen, quantized GGML rejects
+cleanly; wrap-safe + null-checked per the audit's standing guidance) +
+`src/gpt2_gguf.cyr` (GPT-2 `blk.N.*` mapping — ggml `[out,in]` **transposed
+back** to rosnet's `[in,out]`, fused-qkv split, config from KV metadata) + CLI
+`gpt2-gguf` / `gpt2-cross`. **Proof on the real 124M checkpoint: `gpt2-gguf`
+batch==decode 0 diffs; `gpt2-cross` — both foreign doors BIT-IDENTICAL
+(123,659,520 params / 402,056 logits, 0 diffs).** +38 asserts
+(`tests/tcyr/gguf.tcyr`, in-test GGUF writer over exact-in-f32 seeds) + 35k
+GGUF fuzz rounds (`fuzz.tcyr`); suite **80→121**. GGUF proof file generated
+once by `tests/oracle/gen_gguf.py` (disposable venv: gguf+numpy+safetensors,
+no torch). Next lanes: quantized GGML payloads · llama-arch (TinyLlama)
+mapping. Awaiting cut.
 
 **1.0.0 — RELEASED 2026-07-04 (STABLE — the Type-3 reference, frozen).** API
 frozen (`docs/api.md` + `STABILITY.md`); parsers fuzz-gated
@@ -49,7 +64,7 @@ exactly).** The M2 arc landed across 0.2.0 + 0.3.0:
   1.05e-6** (fp32-rounding scale); gate frozen at **maxrel ≤ 1e-5** + exact
   argmax + NaN-free. `make fidelity`.
 
-Suite **80**; lint/fmt clean. Released: **0.1.0 · 0.2.0 · 0.3.0 · 0.4.0 · 0.5.0 · 1.0.0**.
+Suite **121**; lint/fmt clean. Released: **0.1.0 · 0.2.0 · 0.3.0 · 0.4.0 · 0.5.0 · 1.0.0**.
 
 ## Toolchain
 
@@ -89,6 +104,7 @@ on the NEGATIVE side. **The persistence bite shipped in 0.5.0** (signed NF4
 checkpoint + adapter via tula, bit-identical round-trips, trust boundary
 gated). **1.0.0 SHIPPED same day** — API frozen, fuzz gate added (2 audit fixes
 in `st_open` folded in), benchmarks + audit + SECURITY.md landed. Post-1.0 =
-maintenance + the roadmapped additive lane, headlined by **GGUF import** (the
-second foreign source; per the audit's standing guidance, its parser lands
-wrap-safe + null-checked + fuzz-gated in the same cut). See `roadmap.md`.
+maintenance + the additive lane. **The GGUF headline landed 2026-07-05** (see
+Version above) — remaining additive lanes: quantized GGML payloads,
+llama-architecture (TinyLlama-class) mapping, NF4 throughput (SIMD-gated).
+See `roadmap.md`.

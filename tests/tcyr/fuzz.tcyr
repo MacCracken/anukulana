@@ -146,10 +146,138 @@ fn test_fuzz_oracle_fixture(): i64 {
     return 0;
 }
 
+# ---- GGUF (the second foreign parser — same gate: no crash, ever) ------------
+
+# hand-serialized VALID GGUF v3: arch KV + alignment KV + an array KV (skip
+# path) + one f32 tensor [4]. Little-endian throughout.
+fn _fz_gg_u32(buf, offp, v): i64 {
+    var i = 0;
+    while (i < 4) { store8(buf + load64(offp) + i, (v >> (i * 8)) & 0xFF); i = i + 1; }
+    store64(offp, load64(offp) + 4);
+    return 0;
+}
+fn _fz_gg_u64(buf, offp, v): i64 {
+    _fz_gg_u32(buf, offp, v & 0xFFFFFFFF);
+    _fz_gg_u32(buf, offp, (v >> 32) & 0xFFFFFFFF);
+    return 0;
+}
+fn _fz_gg_str(buf, offp, s): i64 {
+    _fz_gg_u64(buf, offp, strlen(s));
+    var i = 0;
+    while (i < strlen(s)) { store8(buf + load64(offp) + i, load8(s + i)); i = i + 1; }
+    store64(offp, load64(offp) + strlen(s));
+    return 0;
+}
+fn _fz_valid_gguf(out_len): i64 {
+    var buf = alloc(512);
+    var offp = alloc(8);
+    store64(offp, 0);
+    _fz_gg_u32(buf, offp, GGUF_MAGIC());
+    _fz_gg_u32(buf, offp, 3);
+    _fz_gg_u64(buf, offp, 1);                        # n_tensors
+    _fz_gg_u64(buf, offp, 3);                        # n_kv
+    _fz_gg_str(buf, offp, "general.architecture");
+    _fz_gg_u32(buf, offp, 8); _fz_gg_str(buf, offp, "gpt2");
+    _fz_gg_str(buf, offp, "general.alignment");
+    _fz_gg_u32(buf, offp, 4); _fz_gg_u32(buf, offp, 32);
+    _fz_gg_str(buf, offp, "test.arr");
+    _fz_gg_u32(buf, offp, 9);                        # array of u32
+    _fz_gg_u32(buf, offp, 4); _fz_gg_u64(buf, offp, 2);
+    _fz_gg_u32(buf, offp, 7); _fz_gg_u32(buf, offp, 9);
+    _fz_gg_str(buf, offp, "t");                      # tensor info
+    _fz_gg_u32(buf, offp, 1);                        # ndim
+    _fz_gg_u64(buf, offp, 4);                        # ne0
+    _fz_gg_u32(buf, offp, 0);                        # F32
+    _fz_gg_u64(buf, offp, 0);                        # data offset
+    var hend = load64(offp);
+    var dstart = hend + (32 - (hend % 32)) % 32;
+    while (load64(offp) < dstart) { store8(buf + load64(offp), 0); store64(offp, load64(offp) + 1); }
+    var i = 0;
+    while (i < 4) { _fz_gg_u32(buf, offp, 0x3F800000 + i); i = i + 1; }
+    store64(out_len, load64(offp));
+    return buf;
+}
+
+fn _fz_probe_gg(r): i64 {
+    # accessor surface of an ACCEPTED reader — must stay in-bounds. nelems is
+    # bounded by the validated extent (≤ data_len), so the read buffer is safe.
+    var n = gg_count(r);
+    var i = 0;
+    while (i < n) {
+        var e = gg_entry(r, i);
+        gg_entry_ndim(e);
+        gg_entry_gtype(e);
+        var ne = gg_entry_nelems(e);
+        var out = alloc(ne * 8 + 8);
+        if (out != 0) { gg_read_f64(r, e, out); }
+        i = i + 1;
+    }
+    var fnd = alloc(8);
+    gg_kv_int(r, "general.alignment", fnd);
+    var slen = alloc(8);
+    gg_kv_str(r, "general.architecture", slen);
+    gg_find(r, "t");
+    return n;
+}
+
+fn test_fuzz_gguf(): i64 {
+    var lenp = alloc(8);
+    var valid = _fz_valid_gguf(lenp);
+    var vlen = load64(lenp);
+    assert_nonnull(gg_open(valid, vlen), "the valid seed GGUF opens");
+
+    var work = alloc(vlen + 8);
+    var accepted = 0;
+    var rejected = 0;
+    _fz_seed(20260705);
+
+    # byte-mutation fuzz: 30k rounds, 1-4 mutated bytes each
+    var round = 0;
+    while (round < 30000) {
+        var i = 0;
+        while (i < vlen) { store8(work + i, load8(valid + i)); i = i + 1; }
+        var nmut = 1 + (_fz_next() % 4);
+        var m = 0;
+        while (m < nmut) {
+            store8(work + (_fz_next() % vlen), _fz_next() & 0xFF);
+            m = m + 1;
+        }
+        var r = gg_open(work, vlen);
+        if (r != 0) { _fz_probe_gg(r); accepted = accepted + 1; }
+        else { rejected = rejected + 1; }
+        round = round + 1;
+    }
+
+    # truncation sweep: every prefix length of the valid buffer
+    var L = 0;
+    while (L <= vlen) {
+        var r2 = gg_open(valid, L);
+        if (r2 != 0) { _fz_probe_gg(r2); }
+        L = L + 1;
+    }
+
+    # pure-garbage buffers: 5k rounds, random length 0..256
+    var g = alloc(256);
+    round = 0;
+    while (round < 5000) {
+        var gl = _fz_next() % 257;
+        var i2 = 0;
+        while (i2 < gl) { store8(g + i2, _fz_next() & 0xFF); i2 = i2 + 1; }
+        var r3 = gg_open(g, gl);
+        if (r3 != 0) { _fz_probe_gg(r3); }
+        round = round + 1;
+    }
+
+    assert_gt(rejected, 0, "gguf mutation fuzz: rejections observed (parser actually validates)");
+    assert_gt(accepted + rejected, 29999, "gguf mutation fuzz: all rounds ran");
+    return 0;
+}
+
 fn main(): i64 {
     alloc_init();
     test_fuzz_safetensors();
     test_fuzz_oracle_fixture();
+    test_fuzz_gguf();
     return assert_summary();
 }
 

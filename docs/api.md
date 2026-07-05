@@ -18,6 +18,8 @@
 | `gpt2-lora <model.safetensors>` | LoRA head-adapter fine-tune over the frozen base (Adam); gates adaptation 8/8 + base bit-frozen + adapter-off bit-identical |
 | `gpt2-qlora <model.safetensors>` | QLoRA: NF4-quantize the whole base (tula codec + local double-quant), adapter recovers the task over the frozen 4-bit base |
 | `gpt2-tula <model> <ckpt.tula> <adapter.tula>` | signed persistence round-trip: save/load NF4 checkpoint + adapter, everything bit-identical, tamper/wrong-key rejected |
+| `gpt2-gguf <model.gguf>` *(1.x)* | import via the **GGUF door** (llama.cpp format), run the forward, cross-check batch == KV-cache decode (bit-identical) |
+| `gpt2-cross <model.safetensors> <model.gguf>` *(1.x)* | the **cross-format gate**: the same checkpoint through both foreign parsers must produce bit-identical packed params AND logits |
 
 Exit code 0 = all gates PASS; non-0 = a gate failed (each command prints which).
 `make fidelity` wraps `gpt2-oracle` with the committed fixture.
@@ -37,6 +39,23 @@ F64/F32/F16/BF16 per dtype).
 config (heads passed in; NOT in safetensors) → pack onto rupantara's layout
 (fused-QKV column split, **no transpose**). `anuk_gpt2_infer_cfg` /
 `anuk_gpt2_pack` are the two halves.
+
+### Foreign import — `src/gguf.cyr` (untrusted input; added 1.x)
+`gg_open(buf, len)` → reader | 0 (GGUF v2/v3 — typed-KV walk with structural
+skip of unread values, ne-order tensor infos, `general.alignment`, per-tensor
+extent validation; wrap-safe bounds throughout; fuzz-gated in
+`tests/tcyr/fuzz.tcyr`) · `gg_open_mmap(path)` · accessors `gg_count` /
+`gg_entry` / `gg_entry_{name,name_len,ndim,dim,gtype,nelems,data}` / `gg_find`
+· KV lookups `gg_kv_int(r, key, found)` / `gg_kv_str(r, key, out_len)` ·
+`gg_read_f64(r, e, dst)` (widens F32/F16; quantized GGML block types reject).
+
+### GPT-2 mapping (GGUF) — `src/gpt2_gguf.cyr` (added 1.x)
+`anuk_ggpt2_import(path, T_run, cfg)` → params | 0 — one-shot: mmap → infer
+config **from KV metadata** (`general.architecture` must be `gpt2`; heads come
+from `gpt2.attention.head_count` — unlike safetensors, GGUF carries them) →
+pack onto rupantara's layout (ggml `[out, in]` **transposed back** to
+`[in, out]`, fused-`attn_qkv` split by out-range). `anuk_ggpt2_infer_cfg` /
+`anuk_ggpt2_pack` are the two halves.
 
 ### Fidelity — `src/oracle.cyr`
 `anuk_gpt2_oracle(model_path, fix_path)` → 0 | 1. Fixture format v1 documented
@@ -81,5 +100,6 @@ final-LN features, composed from rupantara's public ops (once-per-run).
 - Checkpoint/adapter tensor **names** are frozen (`"cfg"`, `"base.nf4"`,
   `"base.nf4.scale.q8"`, `"base.nf4.scale.sup"`, `"lora.A"/"lora.B"/"lora.meta"`);
   additive tensors may appear in 1.x (readers must tolerate extras).
-- **GGUF import** is the headline post-1.0 addition (a second foreign source —
-  new parser module + mapping; additive).
+- **GGUF import** landed as the first 1.x additive (2026-07-05): `gg_*` +
+  `anuk_ggpt2_*` + the `gpt2-gguf` / `gpt2-cross` commands above are now part
+  of the frozen surface.

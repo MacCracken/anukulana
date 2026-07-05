@@ -16,6 +16,8 @@ fn usage(): i64 {
     var l4d = "  gpt2-lora <model.safetensors>         LoRA head-adapter fine-tune (frozen base)\n";
     var l4e = "  gpt2-qlora <model.safetensors>        QLoRA: adapter over the NF4-quantized base\n";
     var l4f = "  gpt2-tula <model> <ckpt.tula> <adapter.tula>   signed NF4 + adapter round-trip\n";
+    var l4g = "  gpt2-gguf <model.gguf>                import via GGUF + run (batch==decode gate)\n";
+    var l4h = "  gpt2-cross <model.safetensors> <model.gguf>   cross-format bit-identity gate\n";
     var l5 = "  (all Type-3 charter commands built)\n";
     syscall(1, 1, l1, strlen(l1));
     syscall(1, 1, l2, strlen(l2));
@@ -26,6 +28,8 @@ fn usage(): i64 {
     syscall(1, 1, l4d, strlen(l4d));
     syscall(1, 1, l4e, strlen(l4e));
     syscall(1, 1, l4f, strlen(l4f));
+    syscall(1, 1, l4g, strlen(l4g));
+    syscall(1, 1, l4h, strlen(l4h));
     syscall(1, 1, l5, strlen(l5));
     return 0;
 }
@@ -86,6 +90,89 @@ fn _gpt2_run(path): i64 {
     return 1;
 }
 
+# `gpt2-gguf <model.gguf>` — the same no-oracle validation as `gpt2`, through
+# the GGUF door: import (KV-driven config, blk.N.* mapping, transpose-back),
+# then batch forward vs KV-cache decode must be bit-identical.
+fn _ggpt2_run(path): i64 {
+    var cfg = alloc(64);
+    var T_run = 8;
+    var params = anuk_ggpt2_import(path, T_run, cfg);
+    if (params == 0) { _anuk_sput("gpt2-gguf: import failed (open / infer / pack)\n"); return 1; }
+    var V = _cfg_V(cfg);
+    _anuk_sput("imported GPT-2 (GGUF): V="); _anuk_puti(V);
+    _anuk_sput(" C="); _anuk_puti(_cfg_C(cfg));
+    _anuk_sput(" NL="); _anuk_puti(_cfg_NL(cfg));
+    _anuk_sput(" heads="); _anuk_puti(_cfg_nh(cfg));
+    _anuk_sput(" T_run="); _anuk_puti(T_run); _anuk_sput("\n");
+    var tokens = alloc(T_run * 8);
+    var i = 0;
+    while (i < T_run) { store64(tokens + i * 8, (i * 137 + 11) % V); i = i + 1; }
+    var Lb = alloc(T_run * V * 8);
+    ru_model_fwd(cfg, params, tokens, Lb, 0);
+    var Ld = alloc(T_run * V * 8);
+    var kv = alloc(ru_decode_kv_count(cfg) * 8);
+    var row = alloc(V * 8);
+    var pos = 0;
+    while (pos < T_run) {
+        ru_model_fwd_row(cfg, params, load64(tokens + pos * 8), pos, kv, row);
+        var v = 0;
+        while (v < V) { store64(Ld + (pos * V + v) * 8, load64(row + v * 8)); v = v + 1; }
+        pos = pos + 1;
+    }
+    var diffs = 0;
+    i = 0;
+    while (i < T_run * V) { if (load64(Lb + i * 8) != load64(Ld + i * 8)) { diffs = diffs + 1; } i = i + 1; }
+    _anuk_sput("batch forward vs KV-cache decode: logit diffs="); _anuk_puti(diffs); _anuk_sput("\n");
+    var am = ru_argmax(Lb + (T_run - 1) * V * 8, V);
+    _anuk_sput("next-token argmax (last pos): id="); _anuk_puti(am); _anuk_sput("\n");
+    if (diffs == 0) { _anuk_sput("RESULT: GPT-2 imported via GGUF + ran; batch==decode bit-identical\n"); return 0; }
+    _anuk_sput("RESULT: ran, but batch != decode — investigate\n");
+    return 1;
+}
+
+# `gpt2-cross <model.safetensors> <model.gguf>` — THE cross-format gate: the
+# same checkpoint imported through both foreign doors must land on IDENTICAL
+# packed params (both fp32 sources widen deterministically) and hence identical
+# logits. Any orientation/naming/widening slip in either mapping shows here.
+fn _gpt2_cross(st_path, gg_path): i64 {
+    var cfgA = alloc(64);
+    var T_run = 8;
+    var pA = anuk_gpt2_import(st_path, 12, T_run, cfgA);
+    if (pA == 0) { _anuk_sput("gpt2-cross: safetensors import failed\n"); return 1; }
+    var cfgB = alloc(64);
+    var pB = anuk_ggpt2_import(gg_path, T_run, cfgB);
+    if (pB == 0) { _anuk_sput("gpt2-cross: gguf import failed\n"); return 1; }
+    if (_cfg_V(cfgA) != _cfg_V(cfgB)) { _anuk_sput("gpt2-cross: V mismatch\n"); return 1; }
+    if (_cfg_C(cfgA) != _cfg_C(cfgB)) { _anuk_sput("gpt2-cross: C mismatch\n"); return 1; }
+    if (_cfg_NL(cfgA) != _cfg_NL(cfgB)) { _anuk_sput("gpt2-cross: NL mismatch\n"); return 1; }
+    if (_cfg_F(cfgA) != _cfg_F(cfgB)) { _anuk_sput("gpt2-cross: F mismatch\n"); return 1; }
+    var np = ru_params_count(cfgA);
+    var pdiffs = 0;
+    var i = 0;
+    while (i < np) { if (load64(pA + i * 8) != load64(pB + i * 8)) { pdiffs = pdiffs + 1; } i = i + 1; }
+    _anuk_sput("packed params: "); _anuk_puti(np);
+    _anuk_sput(" total, diffs="); _anuk_puti(pdiffs); _anuk_sput("\n");
+    var V = _cfg_V(cfgA);
+    var tokens = alloc(T_run * 8);
+    i = 0;
+    while (i < T_run) { store64(tokens + i * 8, (i * 137 + 11) % V); i = i + 1; }
+    var LA = alloc(T_run * V * 8);
+    var LB = alloc(T_run * V * 8);
+    ru_model_fwd(cfgA, pA, tokens, LA, 0);
+    ru_model_fwd(cfgB, pB, tokens, LB, 0);
+    var ldiffs = 0;
+    i = 0;
+    while (i < T_run * V) { if (load64(LA + i * 8) != load64(LB + i * 8)) { ldiffs = ldiffs + 1; } i = i + 1; }
+    _anuk_sput("logits ("); _anuk_puti(T_run * V);
+    _anuk_sput("): diffs="); _anuk_puti(ldiffs); _anuk_sput("\n");
+    if (pdiffs == 0) { if (ldiffs == 0) {
+            _anuk_sput("RESULT: cross-format BIT-IDENTICAL (safetensors == GGUF)\n");
+            return 0;
+        } }
+    _anuk_sput("RESULT: cross-format mismatch — investigate\n");
+    return 1;
+}
+
 fn main(): i64 {
     alloc_init();
     args_init();
@@ -136,6 +223,22 @@ fn main(): i64 {
             return 1;
         }
         return anuk_gpt2_qlora(argv(2));
+    }
+    if (streq(cmd, "gpt2-gguf") == 1) {
+        if (argc() < 3) {
+            var e = "anukulana: gpt2-gguf needs a <model.gguf>\n";
+            syscall(1, 1, e, strlen(e));
+            return 1;
+        }
+        return _ggpt2_run(argv(2));
+    }
+    if (streq(cmd, "gpt2-cross") == 1) {
+        if (argc() < 4) {
+            var e = "anukulana: gpt2-cross needs <model.safetensors> <model.gguf>\n";
+            syscall(1, 1, e, strlen(e));
+            return 1;
+        }
+        return _gpt2_cross(argv(2), argv(3));
     }
     if (streq(cmd, "gpt2-tula") == 1) {
         if (argc() < 5) {

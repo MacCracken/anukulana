@@ -1,0 +1,162 @@
+# @public — GPT-2 from GGUF: map a llama.cpp-converted GPT-2 checkpoint onto
+# rupantara's packed layout (the GGUF sibling of src/gpt2.cyr).
+#
+# llama.cpp tensor names (gguf-py MODEL_ARCH.GPT2): token_embd, position_embd,
+# output_norm, and per block `blk.N.{attn_norm, attn_qkv, attn_output,
+# ffn_norm, ffn_up, ffn_down}` (.weight/.bias).
+#
+# ORIENTATION (the load-bearing detail): ggml stores 2D weights ROW-MAJOR
+# [out, in] (ne0 = in = innermost) — llama.cpp's converter transposes HF
+# Conv1D's [in, out] on the way in. rosnet's `linear_fwd` is y = x·W with
+# W[in, out], so this mapping TRANSPOSES each 2D weight back. Embeddings
+# (token/position) are (rows, C) row-major on both sides — no transpose —
+# and widen STRAIGHT into the params buffer (token_embd is 309 MB as f64,
+# past the alloc cap; no scratch). Norms/biases are 1D — direct.
+#
+# Config from KV metadata: gpt2.embedding_length (C), gpt2.block_count (NL),
+# gpt2.attention.head_count (nh), gpt2.feed_forward_length (F; absent → 4C);
+# V from token_embd's outer dim. `general.architecture` must be "gpt2".
+
+fn _ggpt2_name(buf, L, suffix): i64 {
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, "blk.");
+    str_builder_add_int(sb, L);
+    str_builder_add_cstr(sb, ".");
+    str_builder_add_cstr(sb, suffix);
+    return str_cstr(str_builder_build(sb));
+}
+
+# read a 1D tensor (norms/biases) of expected length n directly into dst
+fn _ggpt2_vec(r, name, dst, n): i64 {
+    var e = gg_find(r, name);
+    if (e == 0) { return 0 - 1; }
+    if (gg_entry_nelems(e) != n) { return 0 - 1; }
+    if (gg_read_f64(r, e, dst) != n) { return 0 - 1; }
+    return 0;
+}
+
+# read a ggml [out, in] 2D weight and TRANSPOSE into dst[in, out] (row-major),
+# with `osel` selecting an out-range [obase, obase+osz) (the fused-qkv split);
+# scratch holds the widened source (osz*insz f64, caller-sized).
+fn _ggpt2_mat_t(r, name, dst, insz, osz, obase, scratch): i64 {
+    var e = gg_find(r, name);
+    if (e == 0) { return 0 - 1; }
+    if (gg_entry_ndim(e) != 2) { return 0 - 1; }
+    if (gg_entry_dim(e, 0) != insz) { return 0 - 1; }        # ne0 = in (innermost)
+    var outs = gg_entry_dim(e, 1);
+    if (obase + osz > outs) { return 0 - 1; }
+    # widen the whole tensor once (row-major [outs][insz]) — per-block scratch
+    if (gg_read_f64(r, e, scratch) != outs * insz) { return 0 - 1; }
+    var o = 0;
+    while (o < osz) {
+        var i = 0;
+        while (i < insz) {
+            store64(dst + (i * osz + o) * 8, load64(scratch + ((obase + o) * insz + i) * 8));
+            i = i + 1;
+        }
+        o = o + 1;
+    }
+    return 0;
+}
+
+# infer cfg from GGUF KV metadata (mirrors anuk_gpt2_infer_cfg). Returns 0 | -1.
+fn anuk_ggpt2_infer_cfg(r, cfg, T_run): i64 {
+    var lenp = alloc(8);
+    var arch = gg_kv_str(r, "general.architecture", lenp);
+    if (arch == 0) { return 0 - 1; }
+    if (load64(lenp) != 4) { return 0 - 1; }
+    if (load8(arch) != 103) { return 0 - 1; }                # 'g'
+    if (load8(arch + 1) != 112) { return 0 - 1; }            # 'p'
+    if (load8(arch + 2) != 116) { return 0 - 1; }            # 't'
+    if (load8(arch + 3) != 50) { return 0 - 1; }             # '2'
+    var fnd = alloc(8);
+    var C = gg_kv_int(r, "gpt2.embedding_length", fnd);
+    if (load64(fnd) == 0) { return 0 - 1; }
+    var NL = gg_kv_int(r, "gpt2.block_count", fnd);
+    if (load64(fnd) == 0) { return 0 - 1; }
+    var nh = gg_kv_int(r, "gpt2.attention.head_count", fnd);
+    if (load64(fnd) == 0) { return 0 - 1; }
+    var F = gg_kv_int(r, "gpt2.feed_forward_length", fnd);
+    if (load64(fnd) == 0) { F = 4 * C; }
+    var te = gg_find(r, "token_embd.weight");
+    if (te == 0) { return 0 - 1; }
+    if (gg_entry_ndim(te) != 2) { return 0 - 1; }
+    if (gg_entry_dim(te, 0) != C) { return 0 - 1; }
+    var V = gg_entry_dim(te, 1);
+    ru_cfg_init(cfg, V, C, T_run, nh, nh, NL, F, 1);
+    return 0;
+}
+
+# pack the GGUF checkpoint onto rupantara's layout. Returns 0 | -1.
+fn anuk_ggpt2_pack(r, cfg, params): i64 {
+    var V = _cfg_V(cfg);
+    var C = _cfg_C(cfg);
+    var T = _cfg_T(cfg);
+    var NL = _cfg_NL(cfg);
+    var F = _cfg_F(cfg);
+    # embeddings: widen straight into params (no transpose, no scratch)
+    var te = gg_find(r, "token_embd.weight");
+    if (te == 0) { return 0 - 1; }
+    if (gg_entry_nelems(te) != V * C) { return 0 - 1; }
+    if (gg_read_f64(r, te, _p_tokemb(params)) != V * C) { return 0 - 1; }
+    var pe = gg_find(r, "position_embd.weight");
+    if (pe == 0) { return 0 - 1; }
+    if (gg_entry_dim(pe, 0) != C) { return 0 - 1; }
+    if (gg_entry_dim(pe, 1) < T) { return 0 - 1; }
+    # first T rows only: widen row-by-row via a small scratch? — the rows are
+    # contiguous from the start, so widen exactly T*C elements
+    var pesrc = gg_entry_data(r, pe);
+    var gt = gg_entry_gtype(pe);
+    var i = 0;
+    var pdst = _p_posemb(params, cfg);
+    while (i < T * C) {
+        if (gt == 0) { store64(pdst + i * 8, _st_f32_to_f64(load32(pesrc + i * 4) & 0xFFFFFFFF)); }
+        else { store64(pdst + i * 8, _st_f16_to_f64(load8(pesrc + i * 2) | (load8(pesrc + i * 2 + 1) << 8))); }
+        i = i + 1;
+    }
+    var scratch = mmap_anon(F * C * 8 + 8);                  # biggest 2D weight (C*F)
+    if (scratch == 0) { return 0 - 1; }
+    var namebuf = 0;
+    var L = 0;
+    while (L < NL) {
+        var pblk = params + _ru_blk_base(cfg, L) * 8;
+        if (_ggpt2_vec(r, _ggpt2_name(namebuf, L, "attn_norm.weight"), pblk + _ru_o_ln1g(cfg) * 8, C) != 0) { return 0 - 1; }
+        if (_ggpt2_vec(r, _ggpt2_name(namebuf, L, "attn_norm.bias"), pblk + _ru_o_ln1b(cfg) * 8, C) != 0) { return 0 - 1; }
+        # fused qkv [3C, C] -> Wq/Wk/Wv [C, C] (transpose + out-range split)
+        var qkvw = _ggpt2_name(namebuf, L, "attn_qkv.weight");
+        if (_ggpt2_mat_t(r, qkvw, pblk + _ru_o_Wq(cfg) * 8, C, C, 0, scratch) != 0) { return 0 - 1; }
+        if (_ggpt2_mat_t(r, qkvw, pblk + _ru_o_Wk(cfg) * 8, C, C, C, scratch) != 0) { return 0 - 1; }
+        if (_ggpt2_mat_t(r, qkvw, pblk + _ru_o_Wv(cfg) * 8, C, C, 2 * C, scratch) != 0) { return 0 - 1; }
+        # fused qkv bias [3C] -> bq/bk/bv
+        var qkvb = alloc(3 * C * 8);
+        if (_ggpt2_vec(r, _ggpt2_name(namebuf, L, "attn_qkv.bias"), qkvb, 3 * C) != 0) { return 0 - 1; }
+        t_copy(_bq(cfg, pblk), qkvb, C);
+        t_copy(_bk(cfg, pblk), qkvb + C * 8, C);
+        t_copy(_bv(cfg, pblk), qkvb + 2 * C * 8, C);
+        if (_ggpt2_mat_t(r, _ggpt2_name(namebuf, L, "attn_output.weight"), pblk + _ru_o_Wo(cfg) * 8, C, C, 0, scratch) != 0) { return 0 - 1; }
+        if (_ggpt2_vec(r, _ggpt2_name(namebuf, L, "attn_output.bias"), _bo(cfg, pblk), C) != 0) { return 0 - 1; }
+        if (_ggpt2_vec(r, _ggpt2_name(namebuf, L, "ffn_norm.weight"), pblk + _ru_o_ln2g(cfg) * 8, C) != 0) { return 0 - 1; }
+        if (_ggpt2_vec(r, _ggpt2_name(namebuf, L, "ffn_norm.bias"), pblk + _ru_o_ln2b(cfg) * 8, C) != 0) { return 0 - 1; }
+        if (_ggpt2_mat_t(r, _ggpt2_name(namebuf, L, "ffn_up.weight"), pblk + _ru_o_Wfc(cfg) * 8, C, F, 0, scratch) != 0) { return 0 - 1; }
+        if (_ggpt2_vec(r, _ggpt2_name(namebuf, L, "ffn_up.bias"), pblk + _ru_o_bfc(cfg) * 8, F) != 0) { return 0 - 1; }
+        if (_ggpt2_mat_t(r, _ggpt2_name(namebuf, L, "ffn_down.weight"), pblk + _ru_o_Wproj(cfg) * 8, F, C, 0, scratch) != 0) { return 0 - 1; }
+        if (_ggpt2_vec(r, _ggpt2_name(namebuf, L, "ffn_down.bias"), pblk + _ru_o_bproj(cfg) * 8, C) != 0) { return 0 - 1; }
+        L = L + 1;
+    }
+    if (_ggpt2_vec(r, "output_norm.weight", _p_lnfg(params, cfg), C) != 0) { return 0 - 1; }
+    if (_ggpt2_vec(r, "output_norm.bias", _p_lnfb(params, cfg), C) != 0) { return 0 - 1; }
+    return 0;
+}
+
+# One-shot: mmap a GGUF, infer config (context overridden to T_run), pack a
+# fresh params buffer. Returns the params ptr, or 0.
+fn anuk_ggpt2_import(path, T_run, cfg): i64 {
+    var r = gg_open_mmap(path);
+    if (r == 0) { return 0; }
+    if (anuk_ggpt2_infer_cfg(r, cfg, T_run) != 0) { return 0; }
+    var np = ru_params_count(cfg);
+    var params = mmap_anon(np * 8);
+    if (params == 0) { return 0; }
+    if (anuk_ggpt2_pack(r, cfg, params) != 0) { return 0; }
+    return params;
+}

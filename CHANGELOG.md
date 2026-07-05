@@ -6,6 +6,44 @@ moving, no API freeze until v1.0).
 
 ## [Unreleased]
 
+### Added
+- **GGUF import — the named post-1.0 headline lands** (additive 1.x surface).
+  - **`src/gguf.cyr`** — sovereign GGUF v2/v3 parser (llama.cpp's format):
+    typed-KV metadata walk (all 13 value types skipped structurally — unknown
+    *keys* never break the walk; unknown *type ids* hard-reject), ne-order
+    tensor infos (dims[0] innermost), `general.alignment` handling (power-of-two
+    8–65536, default 32), F32/F16 payloads widened through the same IEEE-754
+    wideners the safetensors path uses (quantized GGML block types reject
+    cleanly — a later lane). Untrusted-input rules from the v1.0 audit applied
+    from line one: wrap-safe bounds on every read, null-checked allocs,
+    per-tensor extent validation, sanity caps (64k tensors/KVs, 2^30 per dim,
+    2^29 elems).
+  - **`src/gpt2_gguf.cyr`** — GPT-2-from-GGUF mapping (`token_embd` /
+    `position_embd` / `output_norm` / `blk.N.*`): ggml stores 2D weights
+    `[out, in]` row-major (llama.cpp transposes HF Conv1D on conversion), so
+    the mapping transposes back to rosnet's `[in, out]` and splits the fused
+    `attn_qkv`; config comes from KV metadata (`gpt2.embedding_length` etc.,
+    `general.architecture` must be `gpt2`); embeddings widen straight into the
+    params buffer (token_embd is 309 MB as f64 — past the alloc cap).
+  - **CLI `gpt2-gguf <model.gguf>`** — import via the GGUF door + the no-oracle
+    gate: **PASS on the real 124M checkpoint** (batch forward vs KV-cache
+    decode: 0 logit diffs).
+  - **CLI `gpt2-cross <model.safetensors> <model.gguf>`** — THE cross-format
+    gate: the same checkpoint through both foreign doors must land bit-identical.
+    **PASS: 123,659,520 packed params, 0 diffs; 402,056 logits, 0 diffs.**
+  - **`tests/tcyr/gguf.tcyr`** (38, suite 80→**121** with the fuzz adds) — in-test GGUF writer
+    (ggml orientation, f64→f32/f16 narrowing over exact-representable seeds so
+    the bit-identity gates are legitimate): minimal-file KV/F32/F16/reject
+    coverage + a full GPT-2 export→import round-trip (params + logits
+    bit-identical).
+  - **`tests/tcyr/fuzz.tcyr`** (+3) — same-cut fuzz per the audit's standing
+    rule: 30k byte-mutation rounds + full truncation sweep + 5k garbage buffers
+    over `gg_open`, accessor probes on every accepted reader. Zero crashes.
+  - **`tests/oracle/gen_gguf.py`** — disposable-venv converter (gguf + numpy +
+    safetensors, no torch) reproducing llama.cpp's GPT-2 conversion choices
+    (names, `[out, in]` transposes, F32, v3, alignment 32; tied `output.weight`
+    omitted); Python remains a non-dependency.
+
 ## [1.0.0] — 2026-07-04
 
 **v1.0 — the Type-3 reference freezes.** The charter (import → run → match →
