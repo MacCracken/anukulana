@@ -1,5 +1,5 @@
 # @public — anukulana version.
-# Packed version int: major*10000 + minor*100 + patch (0.3.0 -> 300).
+# Packed version int: major*10000 + minor*100 + patch (0.4.0 -> 400).
 fn anukulana_version(): i64 {
-    return 300;
+    return 400;
 }

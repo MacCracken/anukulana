@@ -6,6 +6,8 @@ moving, no API freeze until v1.0).
 
 ## [Unreleased]
 
+## [0.4.0] — 2026-07-04
+
 **M4 — QLoRA/NF4: the adapter fine-tunes over a 4-bit frozen base.** The
 adaptation arc completes its quantization half: the ENTIRE imported GPT-2
 quantizes to **NF4** (blockwise 4-bit NormalFloat + double-quantized scales) and

@@ -5,6 +5,13 @@
 
 ## Version
 
+**0.4.0 — RELEASED 2026-07-04 (M3 LoRA + M4 QLoRA/NF4 — the adapt arc).**
+`src/lora.cyr` (FD-gated fwd/bwd/merge + xent + SGD/Adam) + `gpt2-lora` (head
+adapter: xent 10.79→0.0000, argmax 8/8, base bit-frozen) + `src/nf4.cyr` (NF4
+codec: blockwise-64, double-quant scales, 8-test exactness gate) + `gpt2-qlora`
+(whole 124M base at 4 bits; adapter recovers 8/8 over it, codes bit-frozen;
+honest 124M-scale drift reported). Suite **62**. Same-day prior releases:
+
 **0.3.0 — RELEASED 2026-07-04 (M2 COMPLETE — the imported model matches HF
 exactly).** The M2 arc landed across 0.2.0 + 0.3.0:
 
@@ -24,7 +31,7 @@ exactly).** The M2 arc landed across 0.2.0 + 0.3.0:
   1.05e-6** (fp32-rounding scale); gate frozen at **maxrel ≤ 1e-5** + exact
   argmax + NaN-free. `make fidelity`.
 
-Suite **49** (+ tula_io); lint/fmt clean. Released: **0.1.0 · 0.2.0 · 0.3.0**.
+Suite **62**; lint/fmt clean. Released: **0.1.0 · 0.2.0 · 0.3.0 · 0.4.0**.
 
 ## Toolchain
 
@@ -50,7 +57,7 @@ the re-folded ganita `f64_tanh` fix). Deps wired: `sigil` + `tula` + `rosnet` +
 
 ## Next
 
-**M3 (LoRA) ✅ CLOSED + M4 (QLoRA/NF4) ✅ CORE COMPLETE — both `[Unreleased]`,
+**M3 (LoRA) ✅ CLOSED + M4 (QLoRA/NF4) ✅ CORE COMPLETE — shipped in 0.4.0,
 2026-07-04.** M3: `src/lora.cyr` (fwd/bwd/merge/xent/SGD/**Adam**, FD-gated
 dA+dB entry-by-entry) + `gpt2-lora` head adapter — xent 10.79→0.0000, argmax
 1/8→8/8, base bit-frozen (head-adapter scope accepted by the user; deeper

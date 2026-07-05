@@ -15,16 +15,19 @@ them: the weight **format** is `tula`; the transformer **forward** is `rupantara
 
 ## Status
 
-**0.3.0 — the imported model matches HF exactly (M2 complete).** `inspect` reads a
-sovereign **tula** checkpoint (M1); `gpt2` imports a real **GPT-2-small safetensors**
-(foreign format, parsed via **bayan**'s JSON DOM + IEEE-754 fp32→f64 widening), maps
-it onto **rupantara**'s layout (fused-QKV split, no transpose), and runs
-`ru_model_fwd` — verified on HF's actual 124M checkpoint: config inferred, 0 NaN
-params, batch forward == KV-cache decode bit-identical. `gpt2-oracle` then gates the
-forward against a **committed HF-reference fixture** (torch ran once in a disposable
-venv — never a dependency): **argmax identical at all 48 positions, last-row maxrel
-1.05e-6** (fp32-rounding scale), gate frozen at 1e-5 (`make fidelity`). LoRA/QLoRA
-land per [`docs/development/roadmap.md`](docs/development/roadmap.md). Cyrius pin
+**0.4.0 — the full adapt arc: LoRA + QLoRA over the frozen import (M3 + M4).**
+The whole Type-3 charter is now built: `gpt2` imports a real **GPT-2-small
+safetensors** and runs it on **rupantara** (batch == KV-decode bit-identical);
+`gpt2-oracle` gates the forward against a **committed HF-reference fixture**
+(argmax identical ×48, maxrel ≤ 1e-5 — torch ran once in a disposable venv,
+never a dependency; `make fidelity`); `gpt2-lora` fine-tunes a **LoRA head
+adapter** over the frozen base (FD-gated dA/dB via two rosnet `linear_bwd`
+passes + hand-derived Adam — xent 10.79→0.0000, argmax 8/8, base bit-frozen);
+and `gpt2-qlora` runs **QLoRA end-to-end**: the 124M base NF4-quantized
+(blockwise-64 + double-quant scales, 989 MB → ~62 MB codes) with the same
+adapter recovering the task 8/8 over the frozen 4-bit base. Remaining: NF4
+checkpoints via tula's `nf4` dtype + adapter save/load — see
+[`docs/development/roadmap.md`](docs/development/roadmap.md). Cyrius pin
 **6.3.31**.
 
 ## Build & test

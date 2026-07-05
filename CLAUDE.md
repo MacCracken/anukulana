@@ -22,7 +22,8 @@ rosnet via rupantara, and adapt it (LoRA → QLoRA/NF4). GPL-3.0-only.
   are wired in `cyrius.cyml [deps.*]` + included in `src/lib.cyr` at their milestone.
 - **Never `cat | cycc`** — always `cyrius build`. `lib/` is a `cyrius deps`
   artifact (gitignored). `cyrius.lock` gitignored.
-- Cyrius pin `cyrius = "6.3.27"` (`cyrius.cyml`, single source of truth).
+- Cyrius pin: the `cyrius = "X.Y.Z"` field in `cyrius.cyml` is the single source
+  of truth — do not inline the number here (it drifts; check the manifest).
 - **Do not bump VERSION; do not run git** — maintainer cuts releases; work
   accretes under CHANGELOG `[Unreleased]`.
 - Lint gate: keep lines ≤120 chars (split long strings across multiple writes).
