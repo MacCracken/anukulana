@@ -120,8 +120,10 @@ fn anuk_ggpt2_pack(r, cfg, params): i64 {
     var L = 0;
     while (L < NL) {
         var pblk = params + _ru_blk_base(cfg, L) * 8;
-        if (_ggpt2_vec(r, _ggpt2_name(namebuf, L, "attn_norm.weight"), pblk + _ru_o_ln1g(cfg) * 8, C) != 0) { return 0 - 1; }
-        if (_ggpt2_vec(r, _ggpt2_name(namebuf, L, "attn_norm.bias"), pblk + _ru_o_ln1b(cfg) * 8, C) != 0) { return 0 - 1; }
+        var ln1g = _ggpt2_name(namebuf, L, "attn_norm.weight");
+        if (_ggpt2_vec(r, ln1g, pblk + _ru_o_ln1g(cfg) * 8, C) != 0) { return 0 - 1; }
+        var ln1b = _ggpt2_name(namebuf, L, "attn_norm.bias");
+        if (_ggpt2_vec(r, ln1b, pblk + _ru_o_ln1b(cfg) * 8, C) != 0) { return 0 - 1; }
         # fused qkv [3C, C] -> Wq/Wk/Wv [C, C] (transpose + out-range split)
         var qkvw = _ggpt2_name(namebuf, L, "attn_qkv.weight");
         if (_ggpt2_mat_t(r, qkvw, pblk + _ru_o_Wq(cfg) * 8, C, C, 0, scratch) != 0) { return 0 - 1; }
@@ -133,14 +135,22 @@ fn anuk_ggpt2_pack(r, cfg, params): i64 {
         t_copy(_bq(cfg, pblk), qkvb, C);
         t_copy(_bk(cfg, pblk), qkvb + C * 8, C);
         t_copy(_bv(cfg, pblk), qkvb + 2 * C * 8, C);
-        if (_ggpt2_mat_t(r, _ggpt2_name(namebuf, L, "attn_output.weight"), pblk + _ru_o_Wo(cfg) * 8, C, C, 0, scratch) != 0) { return 0 - 1; }
-        if (_ggpt2_vec(r, _ggpt2_name(namebuf, L, "attn_output.bias"), _bo(cfg, pblk), C) != 0) { return 0 - 1; }
-        if (_ggpt2_vec(r, _ggpt2_name(namebuf, L, "ffn_norm.weight"), pblk + _ru_o_ln2g(cfg) * 8, C) != 0) { return 0 - 1; }
-        if (_ggpt2_vec(r, _ggpt2_name(namebuf, L, "ffn_norm.bias"), pblk + _ru_o_ln2b(cfg) * 8, C) != 0) { return 0 - 1; }
-        if (_ggpt2_mat_t(r, _ggpt2_name(namebuf, L, "ffn_up.weight"), pblk + _ru_o_Wfc(cfg) * 8, C, F, 0, scratch) != 0) { return 0 - 1; }
-        if (_ggpt2_vec(r, _ggpt2_name(namebuf, L, "ffn_up.bias"), pblk + _ru_o_bfc(cfg) * 8, F) != 0) { return 0 - 1; }
-        if (_ggpt2_mat_t(r, _ggpt2_name(namebuf, L, "ffn_down.weight"), pblk + _ru_o_Wproj(cfg) * 8, F, C, 0, scratch) != 0) { return 0 - 1; }
-        if (_ggpt2_vec(r, _ggpt2_name(namebuf, L, "ffn_down.bias"), pblk + _ru_o_bproj(cfg) * 8, C) != 0) { return 0 - 1; }
+        var wo = _ggpt2_name(namebuf, L, "attn_output.weight");
+        if (_ggpt2_mat_t(r, wo, pblk + _ru_o_Wo(cfg) * 8, C, C, 0, scratch) != 0) { return 0 - 1; }
+        var bo = _ggpt2_name(namebuf, L, "attn_output.bias");
+        if (_ggpt2_vec(r, bo, _bo(cfg, pblk), C) != 0) { return 0 - 1; }
+        var ln2g = _ggpt2_name(namebuf, L, "ffn_norm.weight");
+        if (_ggpt2_vec(r, ln2g, pblk + _ru_o_ln2g(cfg) * 8, C) != 0) { return 0 - 1; }
+        var ln2b = _ggpt2_name(namebuf, L, "ffn_norm.bias");
+        if (_ggpt2_vec(r, ln2b, pblk + _ru_o_ln2b(cfg) * 8, C) != 0) { return 0 - 1; }
+        var wfc = _ggpt2_name(namebuf, L, "ffn_up.weight");
+        if (_ggpt2_mat_t(r, wfc, pblk + _ru_o_Wfc(cfg) * 8, C, F, 0, scratch) != 0) { return 0 - 1; }
+        var bfc = _ggpt2_name(namebuf, L, "ffn_up.bias");
+        if (_ggpt2_vec(r, bfc, pblk + _ru_o_bfc(cfg) * 8, F) != 0) { return 0 - 1; }
+        var wpr = _ggpt2_name(namebuf, L, "ffn_down.weight");
+        if (_ggpt2_mat_t(r, wpr, pblk + _ru_o_Wproj(cfg) * 8, F, C, 0, scratch) != 0) { return 0 - 1; }
+        var bpr = _ggpt2_name(namebuf, L, "ffn_down.bias");
+        if (_ggpt2_vec(r, bpr, pblk + _ru_o_bproj(cfg) * 8, C) != 0) { return 0 - 1; }
         L = L + 1;
     }
     if (_ggpt2_vec(r, "output_norm.weight", _p_lnfg(params, cfg), C) != 0) { return 0 - 1; }
