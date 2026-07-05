@@ -1,46 +1,56 @@
 # anukulana — Current State
 
-> **Last refresh**: 2026-07-01 | **Cadence**: every release.
+> **Last refresh**: 2026-07-04 | **Cadence**: every release.
 > `CLAUDE.md` is preferences/process; this file is volatile state.
 
 ## Version
 
-**0.1.0 — RELEASED 2026-07-02** (M0 scaffold + M1 consume-tula). **M2 in progress
-(`[Unreleased]`):** **bite 1 — the foreign safetensors parser DONE** — `st_open`
-parses `[u64 len][JSON header][data]` (header via **bayan**'s sovereign JSON DOM,
-not hand-rolled) into a bounds-checked tensor directory; IEEE-754 f32/f16/bf16→f64
-wideners; `st_read_f64`. `tests/tcyr/safetensors.tcyr` **30** green (wideners
-bit-exact + parse round-trip + untrusted-buffer rejection). **Bite 2 — GPT-2→rupantara
-mapping DONE** (`src/gpt2.cyr`; fused-QKV split, NO transpose [rosnet `linear_fwd`
-is Conv1D `[in,out]`, verified vs source]; packs via rupantara's own offset
-helpers). `tests/tcyr/gpt2.tcyr` (10) — export→import round-trip with packed params
-**and** forward logits both **bit-identical**; suite **49**. Forward stack wired
-(rupantara 0.4.0 + rosnet 0.2.0). Next: **bite 3** — real HF GPT-2-small (fp32) +
-reference-logit fidelity gate (needs the external checkpoint).
+**0.3.0 — RELEASED 2026-07-04 (M2 COMPLETE — the imported model matches HF
+exactly).** The M2 arc landed across 0.2.0 + 0.3.0:
 
-Released: **0.1.0**.
+- **0.2.0 (2026-07-02)** — the foreign importer works on a real model: `st_open`
+  safetensors parser (bayan JSON DOM, bounds-checked, untrusted-input safe) +
+  IEEE-754 f32/f16/bf16→f64 wideners + the GPT-2→rupantara mapping (fused-QKV
+  split, NO transpose — rosnet `linear_fwd` is Conv1D `[in,out]`) + mmap past the
+  256 MB alloc cap. Real 124M checkpoint: config inferred (V=50257/C=768/NL=12),
+  0 NaN in 123.6 M widened params, batch fwd == KV-cache decode bit-identical.
+  Surfaced + fixed `ganita_f64_tanh` NaN-overflow (ganita 1.0.2 → cyrius 6.3.31
+  re-fold → pin bump).
+- **0.3.0 (2026-07-04)** — the exact HF-fidelity gate: `gpt2-oracle` +
+  `src/oracle.cyr` vs a **committed HF-logits fixture**
+  (`tests/fixtures/gpt2_oracle_v1.bin`; generated once by
+  `tests/oracle/gen_fixture.py` in a disposable torch venv — Python/torch never a
+  dependency). Result: **argmax exact at all 48 positions; last-row maxrel
+  1.05e-6** (fp32-rounding scale); gate frozen at **maxrel ≤ 1e-5** + exact
+  argmax + NaN-free. `make fidelity`.
+
+Suite **49** (+ tula_io); lint/fmt clean. Released: **0.1.0 · 0.2.0 · 0.3.0**.
 
 ## Toolchain
 
-Cyrius pin **6.3.27** (`cyrius.cyml`). Deps: **stdlib-only** at M0. M1 wires
-`tula`; M2 wires `rupantara` + `rosnet` + `akshara` + `math` (see the commented
-block in `cyrius.cyml`).
+Cyrius pin **6.3.31** (`cyrius.cyml`; bumped 6.3.27→6.3.31 at 0.2.0 to pick up
+the re-folded ganita `f64_tanh` fix). Deps wired: `sigil` + `tula` + `rosnet` +
+`rupantara` (+ stdlib bayan/math/ganita).
 
 ## Build artifacts
 
 - `src/main.cyr` → `build/anukulana` (the reference binary; no distlib).
 - CI + release workflows in `.github/workflows/`. `cyrius.lock` gitignored.
+- `tests/fixtures/gpt2_oracle_v1.bin` (1.2 MB) — committed HF-oracle fixture
+  (test data; regenerate only on format/sequence-set change).
 
 ## Cross-repo status
 
 - **tula** — released 1.0.0 (format frozen). anukulana **M1 DONE** (consumed).
 - **rupantara** — released 0.4.0 (forward + KV-cache decode, parity-proven).
-  anukulana **M2 UNBLOCKED**.
-- **rosnet / akshara** — exist (M2 wires them).
+  Consumed by the import path; **M2 DONE** on it.
+- **rosnet 0.2.0 / sigil 3.9.9+** — consumed (tensors / signature verify).
+- **akshara** — not yet wired (the oracle uses integer token patterns; a real
+  tokenizer enters with the LoRA fine-tune data path if needed).
 
 ## Next
 
-**M2 — import + run (the headline):** parse a foreign **GPT-2-small safetensors**
-(own parser, no libs) → map foreign tensor names/shapes onto rupantara's packed
-layout (fp16/bf16 → f64) → run `ru_model_fwd` → logit-fidelity gate vs a reference.
-Untrusted-parser hardening pulled forward. See `roadmap.md`.
+**M3 — LoRA:** `W' = W + (α/r)·B·A` over the imported base; gradients only into
+A,B via two `rosnet.linear_bwd` passes (no new gradient op); **FD-gate the A,B
+path**; a fine-tune measurably adapts. Then **M4 — QLoRA/NF4** (user-confirmed
+additive step). See `roadmap.md`.

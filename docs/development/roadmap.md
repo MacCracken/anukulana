@@ -61,7 +61,7 @@ M2 when rupantara's forward lands.
   green. CLI `anukulana inspect <file>` verified end-to-end; missing/malformed file
   fails cleanly (rc=1, no crash).
 
-### M2 — import + run (THE headline) — UNBLOCKED (rupantara 0.4.0 released)
+### M2 — import + run (THE headline) — ✅ COMPLETE 2026-07-04 (incl. the fidelity gate)
 - **✅ Bite 1 — safetensors parser DONE (2026-07-02):** `src/safetensors.cyr`
   parses `[u64 len][JSON header][data]` → bounds-checked tensor directory. **The
   JSON header uses `bayan`** (the sovereign JSON DOM — the ecosystem lib, NOT a
@@ -83,12 +83,21 @@ M2 when rupantara's forward lands.
   (V=50257 C=768 NL=12), 0 NaN in 123.6 M widened params, batch fwd == KV-decode
   bit-identical, logits finite, ~3.7 s. First surfaced + fixed the `ganita_f64_tanh`
   NaN-overflow bug (ganita 1.0.2; cyrius 6.3.31 re-fold; pin bumped 6.3.27→6.3.31).
-- **Remaining (M2): exact fidelity gate** — real GPT-2 logits vs HF
-  `from_pretrained` on a fixed input (needs a torch oracle staged). Import + forward
-  proven; this is the last correctness check before LoRA (M3).
-- **Acceptance (fidelity gate):** logits match the reference (HF / nanoGPT
-  `from_pretrained`) on a fixed input within tolerance — the B-series fairness
-  shape. `tests/tcyr/import.tcyr` + a recorded number in `docs/benchmarks.md`.
+- **✅ Bite 4 — exact HF-fidelity gate (2026-07-04): M2 COMPLETE.** `gpt2-oracle`
+  CLI + `src/oracle.cyr` gate the forward against a **committed HF-reference
+  fixture** (`tests/fixtures/gpt2_oracle_v1.bin` — 3 deterministic 16-token
+  sequences, per-position argmax + last-position logits, generated ONCE by
+  `tests/oracle/gen_fixture.py` in a disposable torch venv; Python/torch is never
+  a build/run/test dependency — the fixture is data). Result on the real
+  checkpoint: **argmax exact at all 48 positions; last-row maxrel 1.05e-6 worst**
+  (fp32-rounding scale — HF computes fp32, we compute f64 over the same widened
+  weights, so bit-exact is impossible by construction and ~1e-6 is the expected
+  gap). Gate frozen at **maxrel ≤ 1e-5** (10× above measured) + exact argmax +
+  NaN-free. `make fidelity` runs it.
+- **Acceptance (fidelity gate): ✅ MET** — logits match HF `from_pretrained` on
+  fixed inputs within fp32-rounding tolerance, greedy stream identical. (The
+  `docs/benchmarks.md` number lands with the M5 bench pass; the gate itself is
+  the recorded artifact until then.)
 
 ### M3 — LoRA
 - `W' = W + (α/r)·B·A`; A gaussian, B zero; gradients route **only** into A,B via
@@ -121,7 +130,7 @@ M2 when rupantara's forward lands.
 ## v1.0 criteria
 
 - [ ] CLI/API frozen + documented (`docs/api.md` + `STABILITY.md`)
-- [ ] **GPT-2 import logit-fidelity gate** (matches reference) — the headline
+- [x] **GPT-2 import logit-fidelity gate** (matches reference) — the headline ✅ 2026-07-04 (`gpt2-oracle`, maxrel ≤ 1e-5 + exact argmax)
 - [ ] LoRA FD-gated; QLoRA/NF4 working
 - [ ] Foreign parsers hardened + fuzz clean; bench (`docs/benchmarks.md`)
 - [ ] Security audit + `SECURITY.md`

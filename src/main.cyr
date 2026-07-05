@@ -11,7 +11,9 @@ fn usage(): i64 {
     var l2 = "usage: anukulana <command> [args]\n";
     var l3 = "  inspect <file.tula>   open a tula checkpoint: list tensors + signature\n";
     var l4 = "  version               print the packed version int\n";
-    var l5 = "  (import / run / lora / qlora land per the roadmap)\n";
+    var l4b = "  gpt2 <model.safetensors>              import + run (no-oracle validation)\n";
+    var l4c = "  gpt2-oracle <model.safetensors> <fixture.bin>   HF-fidelity gate\n";
+    var l5 = "  (lora / qlora land per the roadmap)\n";
     syscall(1, 1, l1, strlen(l1));
     syscall(1, 1, l2, strlen(l2));
     syscall(1, 1, l3, strlen(l3));
@@ -102,6 +104,14 @@ fn main(): i64 {
             return 1;
         }
         return _gpt2_run(argv(2));
+    }
+    if (streq(cmd, "gpt2-oracle") == 1) {
+        if (argc() < 4) {
+            var e = "anukulana: gpt2-oracle needs <model.safetensors> <fixture.bin>\n";
+            syscall(1, 1, e, strlen(e));
+            return 1;
+        }
+        return anuk_gpt2_oracle(argv(2), argv(3));
     }
     usage();
     return 0;

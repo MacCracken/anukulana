@@ -24,6 +24,13 @@ build: check-lib-wiring
 test: check-lib-wiring
 	@for f in tests/tcyr/*.tcyr; do $(CYRIUS) test "$$f" || exit 1; done
 
+# HF-fidelity gate (M2): imported GPT-2 forward vs the committed HF-logits fixture.
+# Needs the real checkpoint staged (default ~/models/gpt2/model.safetensors).
+GPT2_MODEL ?= $(HOME)/models/gpt2/model.safetensors
+.PHONY: fidelity
+fidelity: build
+	./build/anukulana gpt2-oracle $(GPT2_MODEL) tests/fixtures/gpt2_oracle_v1.bin
+
 .PHONY: lint
 lint:
 	@fail=0; \

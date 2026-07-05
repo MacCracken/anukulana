@@ -6,6 +6,38 @@ moving, no API freeze until v1.0).
 
 ## [Unreleased]
 
+## [0.3.0] — 2026-07-04
+
+**M2 fidelity gate — the imported GPT-2 forward matches HF exactly (M2 COMPLETE).**
+The last M2 correctness check lands: `gpt2-oracle` gates the sovereign forward
+against a **committed HF-reference fixture**, closing the "needs a torch oracle
+staged" gap without ever making Python/torch a dependency — the oracle ran ONCE in
+a disposable venv and its output is committed as test data.
+
+### Added
+- **`src/oracle.cyr`** — `anuk_gpt2_oracle(model, fixture)`: reads the fixture
+  (bounds-checked: magic / n_seqs / uniform-T / payload-overrun rejected), imports
+  the checkpoint once, and for each sequence gates (a) **per-position argmax ==
+  HF's exactly** (the greedy stream is identical), (b) **last-position logits
+  maxrel ≤ 1e-5** (denominator floored at 1.0), (c) NaN-free. HF computes fp32,
+  we compute f64 over the same f32-widened weights, so the measured diff is HF's
+  own fp32 rounding — bit-exact is impossible by construction.
+- **`gpt2-oracle <model.safetensors> <fixture.bin>`** CLI command + usage lines;
+  `make fidelity` target (`GPT2_MODEL` overridable).
+- **`tests/fixtures/gpt2_oracle_v1.bin`** (1.2 MB, committed) — 3 deterministic
+  16-token sequences (no tokenizer — integer patterns; seq 0 = the `gpt2`
+  command's existing pattern): per-position HF argmax + last-position HF logits
+  (fp32→f64). Format v1 documented in `src/oracle.cyr` + the generator.
+- **`tests/oracle/gen_fixture.py`** — the one-shot generator (committed for
+  reproducibility only; disposable-venv instructions in its docstring).
+
+### Result (real 124M checkpoint, 2026-07-04)
+- **argmax exact at all 48 positions** (3 seqs × 16); NaN 0.
+- last-row **maxabs ≤ 1.03e-4** on logits O(100); **maxrel ≤ 1.05e-6** —
+  fp32-rounding scale, as predicted. Gate frozen at maxrel ≤ **1e-5** (10× above
+  measured). Suite unchanged (39/39 + tula_io); lint/fmt clean.
+- M2 is **fully complete**; next is **M3 — LoRA** (FD-gate the A,B path).
+
 ## [0.2.0] — 2026-07-02
 
 **M2 — the foreign importer works on a real model.** anukulana imports a real

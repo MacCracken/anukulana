@@ -15,13 +15,17 @@ them: the weight **format** is `tula`; the transformer **forward** is `rupantara
 
 ## Status
 
-**0.2.0 — the importer works on a real model.** `inspect` reads a sovereign **tula**
-checkpoint (M1); `gpt2` imports a real **GPT-2-small safetensors** (foreign format,
-parsed via **bayan**'s JSON DOM + IEEE-754 fp32→f64 widening), maps it onto
-**rupantara**'s layout (fused-QKV split, no transpose), and runs `ru_model_fwd` —
-verified on HF's actual 124M checkpoint: config inferred, 0 NaN params, batch
-forward == KV-cache decode bit-identical, logits finite. LoRA/QLoRA land per
-[`docs/development/roadmap.md`](docs/development/roadmap.md). Cyrius pin **6.3.31**.
+**0.3.0 — the imported model matches HF exactly (M2 complete).** `inspect` reads a
+sovereign **tula** checkpoint (M1); `gpt2` imports a real **GPT-2-small safetensors**
+(foreign format, parsed via **bayan**'s JSON DOM + IEEE-754 fp32→f64 widening), maps
+it onto **rupantara**'s layout (fused-QKV split, no transpose), and runs
+`ru_model_fwd` — verified on HF's actual 124M checkpoint: config inferred, 0 NaN
+params, batch forward == KV-cache decode bit-identical. `gpt2-oracle` then gates the
+forward against a **committed HF-reference fixture** (torch ran once in a disposable
+venv — never a dependency): **argmax identical at all 48 positions, last-row maxrel
+1.05e-6** (fp32-rounding scale), gate frozen at 1e-5 (`make fidelity`). LoRA/QLoRA
+land per [`docs/development/roadmap.md`](docs/development/roadmap.md). Cyrius pin
+**6.3.31**.
 
 ## Build & test
 
@@ -31,11 +35,12 @@ make test    # tests/tcyr/*.tcyr
 ./build/anukulana        # prints usage
 ```
 
-## The headline (M2)
+## The headline (M2) — ✅ DONE (0.3.0)
 
 Import a GPT-2-small checkpoint → map onto rupantara's layout → **produce correct
 logits on rosnet**, matched against the reference implementation. That moment is
-the "sovereign AND interoperable" proof. See the roadmap.
+the "sovereign AND interoperable" proof — **landed**: HF's greedy stream reproduced
+exactly, logits within fp32 rounding. See the roadmap.
 
 ## Ecosystem
 

@@ -1,0 +1,151 @@
+# @public — M2 HF-fidelity gate: compare the imported GPT-2 forward against a
+# committed HF-reference logits fixture (`tests/fixtures/gpt2_oracle_v1.bin`,
+# generated ONCE by `tests/oracle/gen_fixture.py` in a disposable torch venv —
+# Python/torch is never a build, run, or test dependency; the fixture is data).
+#
+# Fixture v1 (little-endian):
+#   u64 magic "ANUKFIX1" | u64 n_seqs | per seq:
+#     u64 T | u64 V | u64 tokens[T] | u64 hf_argmax[T] | f64 last_logits[V]
+# All sequences share one T (enforced) so the checkpoint imports once (cfg T is
+# fixed at import).
+#
+# Gate semantics:
+#   (a) per-position ARGMAX equals HF's exactly — every position, every sequence
+#       ("runs the same model": the greedy next-token stream is identical);
+#   (b) last-position logits MAXREL <= ORACLE_GATE_MAXREL, denominator floored at
+#       1.0 (GPT-2 logits are O(100), so the floor never binds in practice).
+#   HF computes the forward in fp32; we compute in f64 over the SAME f32-widened
+#   weights — so the measured diff is HF's own fp32 rounding, not model error.
+#   Bit-exact is therefore impossible by construction; the gate bounds the gap
+#   and pins the argmax stream. Threshold set empirically with margin (see
+#   docs/development/roadmap.md M2).
+
+fn _orc_magic(): i64 { return 0x315849464B554E41; }   # bytes "ANUKFIX1" as LE u64
+
+# Measured on the real checkpoint (2026-07-04): maxrel 1.05e-6 worst-of-3-seqs
+# (fp32-rounding scale, as predicted). Gate = 1e-5 — 10x above measured.
+fn ORACLE_GATE_MAXREL(): i64 { return f64_div(f64_from(1), f64_from(100000)); }   # 1e-5
+
+fn _orc_abs(x): i64 {
+    if (f64_lt(x, f64_from(0)) == 1) { return f64_neg(x); }
+    return x;
+}
+
+# Read + validate the fixture into (n_seqs, uniform T, V, payload base). Returns
+# the heap buffer or 0 on any structural problem (short read / magic / bounds /
+# non-uniform T). Layout offsets are re-derived by the caller per sequence.
+fn _orc_read_fixture(path, out_ns, out_t, out_v): i64 {
+    var cap = 4 * 1024 * 1024;
+    var fb = alloc(cap);
+    var n = file_read_all(path, fb, cap);
+    if (n < 16) { _anuk_sput("oracle: fixture missing or short\n"); return 0; }
+    if (load64(fb) != _orc_magic()) { _anuk_sput("oracle: bad fixture magic\n"); return 0; }
+    var ns = load64(fb + 8);
+    if (ns < 1) { _anuk_sput("oracle: empty fixture\n"); return 0; }
+    if (ns > 64) { _anuk_sput("oracle: implausible n_seqs\n"); return 0; }
+    var off = 16;
+    var T0 = 0;
+    var V0 = 0;
+    var s = 0;
+    while (s < ns) {
+        if (off + 16 > n) { _anuk_sput("oracle: truncated seq header\n"); return 0; }
+        var T = load64(fb + off);
+        var V = load64(fb + off + 8);
+        if (T < 1) { _anuk_sput("oracle: bad T\n"); return 0; }
+        if (T > 1024) { _anuk_sput("oracle: bad T\n"); return 0; }
+        if (V < 2) { _anuk_sput("oracle: bad V\n"); return 0; }
+        if (T0 == 0) { T0 = T; V0 = V; }
+        if (T != T0) { _anuk_sput("oracle: non-uniform T across seqs (v1 requires uniform)\n"); return 0; }
+        if (V != V0) { _anuk_sput("oracle: non-uniform V across seqs\n"); return 0; }
+        off = off + 16 + T * 16 + V * 8;
+        if (off > n) { _anuk_sput("oracle: seq payload overruns file\n"); return 0; }
+        s = s + 1;
+    }
+    store64(out_ns, ns);
+    store64(out_t, T0);
+    store64(out_v, V0);
+    return fb;
+}
+
+# `gpt2-oracle <model.safetensors> <fixture.bin>` — the M2 exact-fidelity gate.
+# Returns 0 iff every sequence passes both checks.
+fn anuk_gpt2_oracle(model_path, fix_path): i64 {
+    var nsb = alloc(8);
+    var tb = alloc(8);
+    var vb = alloc(8);
+    var fb = _orc_read_fixture(fix_path, nsb, tb, vb);
+    if (fb == 0) { return 1; }
+    var ns = load64(nsb);
+    var T = load64(tb);
+    var Vf = load64(vb);
+    var cfg = alloc(64);
+    var params = anuk_gpt2_import(model_path, 12, T, cfg);
+    if (params == 0) { _anuk_sput("oracle: import failed (open / infer / pack)\n"); return 1; }
+    var V = _cfg_V(cfg);
+    if (V != Vf) {
+        _anuk_sput("oracle: vocab mismatch — model V="); _anuk_puti(V);
+        _anuk_sput(" fixture V="); _anuk_puti(Vf); _anuk_sput("\n");
+        return 1;
+    }
+    _anuk_sput("oracle: model V="); _anuk_puti(V);
+    _anuk_sput(" C="); _anuk_puti(_cfg_C(cfg));
+    _anuk_sput(" NL="); _anuk_puti(_cfg_NL(cfg));
+    _anuk_sput(" | fixture seqs="); _anuk_puti(ns);
+    _anuk_sput(" T="); _anuk_puti(T); _anuk_sput("\n");
+    var Lb = alloc(T * V * 8);
+    var gate = ORACLE_GATE_MAXREL();
+    var fails = 0;
+    var off = 16;
+    var s = 0;
+    while (s < ns) {
+        var toks = fb + off + 16;
+        var hfam = toks + T * 8;
+        var ref = hfam + T * 8;
+        ru_model_fwd(cfg, params, toks, Lb, 0);
+        var amfail = 0;
+        var p = 0;
+        while (p < T) {
+            if (ru_argmax(Lb + p * V * 8, V) != load64(hfam + p * 8)) { amfail = amfail + 1; }
+            p = p + 1;
+        }
+        var last = Lb + (T - 1) * V * 8;
+        var maxabs = f64_from(0);
+        var maxrel = f64_from(0);
+        var nans = 0;
+        var v = 0;
+        while (v < V) {
+            var ours = load64(last + v * 8);
+            if (f64_eq(ours, ours) == 0) { nans = nans + 1; }
+            var d = _orc_abs(f64_sub(ours, load64(ref + v * 8)));
+            if (f64_gt(d, maxabs) == 1) { maxabs = d; }
+            var den = _orc_abs(load64(ref + v * 8));
+            if (f64_lt(den, f64_from(1)) == 1) { den = f64_from(1); }
+            var r = f64_div(d, den);
+            if (f64_gt(r, maxrel) == 1) { maxrel = r; }
+            v = v + 1;
+        }
+        _anuk_sput("seq "); _anuk_puti(s);
+        _anuk_sput(": argmax mismatches "); _anuk_puti(amfail);
+        _anuk_sput("/"); _anuk_puti(T);
+        _anuk_sput("  NaN "); _anuk_puti(nans);
+        _anuk_sput("  last-row maxabs "); fmt_float(maxabs, 9);
+        _anuk_sput("  maxrel "); fmt_float(maxrel, 9);
+        var ok = 1;
+        if (amfail != 0) { ok = 0; }
+        if (nans != 0) { ok = 0; }
+        if (f64_le(maxrel, gate) == 0) { ok = 0; }
+        if (ok == 1) { _anuk_sput("  PASS\n"); }
+        if (ok == 0) { _anuk_sput("  FAIL\n"); fails = fails + 1; }
+        off = off + 16 + T * 16 + V * 8;
+        s = s + 1;
+    }
+    if (fails == 0) {
+        _anuk_sput("RESULT: HF-fidelity gate PASS (argmax exact at every position; maxrel <= ");
+        fmt_float(gate, 6);
+        _anuk_sput(")\n");
+        return 0;
+    }
+    _anuk_sput("RESULT: HF-fidelity gate FAIL — "); _anuk_puti(fails);
+    _anuk_sput("/"); _anuk_puti(ns); _anuk_sput(" seqs\n");
+    return 1;
+}
