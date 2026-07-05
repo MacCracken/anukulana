@@ -99,7 +99,7 @@ M2 when rupantara's forward lands.
   `docs/benchmarks.md` number lands with the M5 bench pass; the gate itself is
   the recorded artifact until then.)
 
-### M3 — LoRA — ▶ bite 1 LANDED 2026-07-04 (head adapter; `[Unreleased]`)
+### M3 — LoRA — ✅ COMPLETE 2026-07-04 (head adapter accepted as the proof; `[Unreleased]`)
 - `W' = W + (α/r)·B·A`; A gaussian, B zero; gradients route **only** into A,B via
   two `rosnet.linear_bwd` passes (no new gradient op). ⚠ the naive
   `dL/dA = Bᵀ·dL/dZ` is wrong (omits the activation `Xᵀ`) — let `linear_bwd`
@@ -111,20 +111,27 @@ M2 when rupantara's forward lands.
   Finding: plain SGD diverges on real-GPT-2 features (massive-activation
   outlier dims → `dA` explodes at any flat lr) — Adam is required, as in the
   LoRA paper. Head adapter stays UNMERGED (tied tok_emb).
-- **Open scope question (bite 2?):** per-layer adapters (the paper's q/v
-  placement) need a **backward chain** through the network tail (head → final
-  LN → block internals) — machinery that lives in **attn11** (the training
-  reference), not here. Options: (a) accept head-adapter as M3's
-  measurable-adaptation proof and move to M4 QLoRA (quantization thesis,
-  reuses this exact machinery), (b) hand-derive a minimal tail-chain
-  (ln_bwd + head_bwd) for last-block adapters, (c) defer depth to attn11.
-  **User call.**
+- **✅ Scope RESOLVED (user, 2026-07-04): option (a)** — the head adapter IS
+  M3's measurable-adaptation proof; **M3 CLOSED**, proceed to **M4 QLoRA/NF4**
+  (which reuses this exact adapter machinery over an NF4 base). Standing
+  guidance recorded with the decision: **attn11 may be patched for arc needs**
+  (e.g. if adapter depth is ever wanted, the backward chain lands there), with
+  ONE exception — **no SIMD work in attn11**: cyrius delivers SIMD in its next
+  arc cycle; SIMD-shaped needs wait for the toolchain.
 
-### M4 — QLoRA / NF4
+### M4 — QLoRA / NF4 — ✅ CORE COMPLETE 2026-07-04 (user-confirmed at the M3 close; `[Unreleased]`)
 - 4-bit blockwise **NormalFloat** (block 64) + per-block absmax scale +
   **double-quant**; LoRA over the frozen NF4 base; dequant-on-the-fly. Store via
   tula's `nf4` dtype helpers (tula M2). **User-confirmed additive step.**
-- **Acceptance:** NF4 pack→dequant error bounded; LoRA-over-NF4 fine-tune works.
+- **Acceptance: ✅ MET** — NF4 pack→dequant error bounded (tests/tcyr/nf4.tcyr:
+  round-trip ≤ max-half-gap × absmax every element, requant idempotent,
+  double-quant ≤ 1/250 relative); **LoRA-over-NF4 fine-tune works** on the real
+  checkpoint (`gpt2-qlora`: xent 15.62 → 0.0000, argmax 0/8 → 8/8, codes
+  bit-frozen; the 4-bit base's raw drift at 124M scale reported honestly in the
+  CHANGELOG).
+- **Follow-on (open):** store/load NF4 checkpoints via **tula's `nf4` dtype**
+  (the manifest already reserves it) — the "quantize once, ship the 62 MB
+  artifact" step; natural next bite alongside a LoRA-adapter save/load format.
 
 ### M5 — hardening + fuzz + bench
 - Harden the **foreign parsers** (safetensors/GGUF are untrusted input — bounds/

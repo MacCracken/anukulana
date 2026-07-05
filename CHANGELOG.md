@@ -6,6 +6,42 @@ moving, no API freeze until v1.0).
 
 ## [Unreleased]
 
+**M4 — QLoRA/NF4: the adapter fine-tunes over a 4-bit frozen base.** The
+adaptation arc completes its quantization half: the ENTIRE imported GPT-2
+quantizes to **NF4** (blockwise 4-bit NormalFloat + double-quantized scales) and
+the SAME LoRA head adapter (unchanged `src/lora.cyr`) fine-tunes over it —
+989 MB of f64 base → **~62 MB codes + ~15.5 MB scale bytes**, trainable.
+
+### Added (M4)
+- **`src/nf4.cyr`** — the sovereign NF4 codec: the 16 NormalFloat quantiles
+  (bitsandbytes `create_normal_map` constants, cited), blockwise absmax
+  quantization (block 64, codes packed 2-per-byte), dequant, and
+  **double-quantization** of the per-block scales (symmetric-u8 per superblock
+  of 256 — a documented simplification of the paper's FP8+offset; same idea,
+  error ≤ 1/254 relative per scale).
+- **`tests/tcyr/nf4.tcyr`** (8, suite 54→**62**) — the forward-only-codec gate:
+  known-answer codes (0 / ±absmax exact), all 16 quantiles snap to themselves,
+  round-trip error ≤ max-half-gap × absmax on EVERY element (the largest gap is
+  the **negative** side's −1.0→−0.696 — caught by the suite when the bound was
+  first written off the positive side), requant idempotence (codes + scales),
+  double-quant reconstruction bound.
+- **`gpt2-qlora <model.safetensors>`** CLI + `src/qlora_demo.cyr` — QLoRA
+  end-to-end on the real 124M checkpoint through the FULL pipeline (quant →
+  double-quant → unpack → dequant → forward → adapt): **0 NaN** anywhere;
+  weight error mean 0.0098 / max 0.656; **xent over the NF4 base 15.62 →
+  0.0000 (800 Adam steps); greedy argmax 0/8 → 8/8; NF4 codes checksum
+  unchanged.** `anuk_frozen_features` extracted from the LoRA demo (shared).
+
+### Findings (M4)
+- **4-bit honesty at 124M scale:** the NF4 base's raw forward drifts
+  substantially on the arbitrary-token probes (logits maxabs 22.7 vs f64;
+  base argmax agreement 0/8; initial xent 15.6 vs the f64 base's 10.8 — a
+  *peaked-but-wrong* distribution, i.e. a functioning network, not a destroyed
+  one). GPT-2-small is far below the scale where the paper's near-lossless
+  claims live — reported as a measured property, NOT gated; the recipe's
+  actual thesis (**trainability at 4-bit memory**) is what's gated, and it
+  holds: the adapter recovers the task to 8/8 over the frozen 4-bit base.
+
 **M3 bite 1 — LoRA over the frozen imported base (head adapter).** The adaptation
 milestone opens: a low-rank pair fine-tunes the real imported GPT-2 while the
 124M base params stay bit-frozen — gradients route ONLY into A,B via **two

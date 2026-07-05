@@ -14,7 +14,8 @@ fn usage(): i64 {
     var l4b = "  gpt2 <model.safetensors>              import + run (no-oracle validation)\n";
     var l4c = "  gpt2-oracle <model.safetensors> <fixture.bin>   HF-fidelity gate\n";
     var l4d = "  gpt2-lora <model.safetensors>         LoRA head-adapter fine-tune (frozen base)\n";
-    var l5 = "  (qlora / nf4 land per the roadmap)\n";
+    var l4e = "  gpt2-qlora <model.safetensors>        QLoRA: adapter over the NF4-quantized base\n";
+    var l5 = "  (nf4 tula-export lands per the roadmap)\n";
     syscall(1, 1, l1, strlen(l1));
     syscall(1, 1, l2, strlen(l2));
     syscall(1, 1, l3, strlen(l3));
@@ -22,6 +23,7 @@ fn usage(): i64 {
     syscall(1, 1, l4b, strlen(l4b));
     syscall(1, 1, l4c, strlen(l4c));
     syscall(1, 1, l4d, strlen(l4d));
+    syscall(1, 1, l4e, strlen(l4e));
     syscall(1, 1, l5, strlen(l5));
     return 0;
 }
@@ -124,6 +126,14 @@ fn main(): i64 {
             return 1;
         }
         return anuk_gpt2_lora(argv(2));
+    }
+    if (streq(cmd, "gpt2-qlora") == 1) {
+        if (argc() < 3) {
+            var e = "anukulana: gpt2-qlora needs a <model.safetensors>\n";
+            syscall(1, 1, e, strlen(e));
+            return 1;
+        }
+        return anuk_gpt2_qlora(argv(2));
     }
     usage();
     return 0;

@@ -50,12 +50,16 @@ the re-folded ganita `f64_tanh` fix). Deps wired: `sigil` + `tula` + `rosnet` +
 
 ## Next
 
-**M3 — LoRA: bite 1 LANDED (`[Unreleased]`, 2026-07-04).** `src/lora.cyr`
-(fwd/bwd/merge/xent/SGD/Adam, FD-gated dA+dB entry-by-entry; suite 49→**54**) +
-`gpt2-lora`: head adapter over the frozen import — **xent 10.79 → 0.0000,
-argmax 1/8 → 8/8, base bit-frozen, adapter-off bit-identical**. Finding: plain
-SGD diverges on real-GPT-2 features (massive-activation outliers → Adam
-required). Open scope question (roadmap M3): deeper per-layer adapters need a
-backward chain (attn11's territory) — accept head-scope + go to **M4
-QLoRA/NF4** (user-confirmed additive step), or hand-derive a minimal
-tail-chain. See `roadmap.md`.
+**M3 (LoRA) ✅ CLOSED + M4 (QLoRA/NF4) ✅ CORE COMPLETE — both `[Unreleased]`,
+2026-07-04.** M3: `src/lora.cyr` (fwd/bwd/merge/xent/SGD/**Adam**, FD-gated
+dA+dB entry-by-entry) + `gpt2-lora` head adapter — xent 10.79→0.0000, argmax
+1/8→8/8, base bit-frozen (head-adapter scope accepted by the user; deeper
+adapters would patch **attn11** if ever wanted — allowed except SIMD, which
+cyrius delivers next arc). M4: `src/nf4.cyr` (NF4 codec + double-quant, 8-test
+exactness gate) + `gpt2-qlora` — the whole 124M base at 4 bits (codes 62 MB),
+adapter recovers the task 8/8 over it, codes bit-frozen; 4-bit drift at 124M
+scale reported honestly. Suite **62**. Findings: plain SGD diverges on
+real-GPT-2 features (massive-activation outliers → Adam required); the NF4
+table's largest gap is on the NEGATIVE side. **Next bite: NF4 checkpoints via
+tula's `nf4` dtype** (+ adapter save/load) — then the repo is 1.0-track. See
+`roadmap.md`.

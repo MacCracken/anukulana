@@ -61,3 +61,5 @@ include "src/gpt2.cyr"          # M2: GPT-2 -> rupantara packed-layout mapping
 include "src/oracle.cyr"        # M2: HF-fidelity gate vs the committed logits fixture
 include "src/lora.cyr"          # M3: LoRA fwd/bwd/merge + softmax-xent (two rosnet linear_bwd passes)
 include "src/lora_demo.cyr"     # M3: gpt2-lora — head-adapter fine-tune over the frozen import
+include "src/nf4.cyr"           # M4: NF4 4-bit NormalFloat codec (blockwise + double-quant)
+include "src/qlora_demo.cyr"    # M4: gpt2-qlora — LoRA head adapter over the NF4-quantized base

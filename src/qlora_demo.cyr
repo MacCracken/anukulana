@@ -1,0 +1,184 @@
+# @public — M4 demo: `gpt2-qlora <model.safetensors>` — QLoRA over the real
+# imported GPT-2: quantize the ENTIRE frozen base to NF4 (blockwise + double-
+# quantized scales), dequantize, run the forward on the 4-bit base, and
+# fine-tune the SAME LoRA head adapter (src/lora.cyr, unchanged) over it.
+#
+# This is the QLoRA thesis end-to-end (Dettmers et al. 2023): a 4-bit frozen
+# base + higher-precision adapters = fine-tuning at a fraction of the memory
+# (here: 124M params -> ~62 MB of NF4 codes + ~15.5 MB scales-as-u8+supers vs
+# 989 MB f64). The quantization-fidelity numbers (weight error, logit drift,
+# argmax agreement vs the f64 base) are REPORTED honestly — 4-bit noise is a
+# measured property, not a pass/fail; the GATES are: NaN-free quantized
+# forward, and the adapter measurably adapts over the NF4 base with the codes
+# bit-frozen.
+
+fn anuk_gpt2_qlora(path): i64 {
+    var cfg = alloc(64);
+    var T = 8;
+    var params = anuk_gpt2_import(path, 12, T, cfg);
+    if (params == 0) { _anuk_sput("qlora: import failed (open / infer / pack)\n"); return 1; }
+    var V = _cfg_V(cfg);
+    var C = _cfg_C(cfg);
+    var np = ru_params_count(cfg);
+    _anuk_sput("qlora: model V="); _anuk_puti(V);
+    _anuk_sput(" C="); _anuk_puti(C);
+    _anuk_sput(" params="); _anuk_puti(np); _anuk_sput("\n");
+
+    # ---- NF4-quantize the whole base (codes + double-quantized scales) --------
+    var bs = NF4_BS();
+    var nb = (np + bs - 1) / bs;
+    var codes = mmap_anon(np / 2 + 1);
+    var scales = mmap_anon(nb * 8);
+    if (codes == 0) { _anuk_sput("qlora: mmap codes failed\n"); return 1; }
+    if (scales == 0) { _anuk_sput("qlora: mmap scales failed\n"); return 1; }
+    nf4_quant(params, np, codes, scales);
+    var q8 = mmap_anon(nb);
+    var supers = t_alloc((nb + NF4_SBS() - 1) / NF4_SBS());
+    nf4_dq_pack(scales, nb, q8, supers);
+    # from here on use ONLY the double-quantized pipeline (the full recipe)
+    var scales_r = mmap_anon(nb * 8);
+    nf4_dq_unpack(q8, supers, nb, scales_r);
+    var params_q = mmap_anon(np * 8);
+    if (params_q == 0) { _anuk_sput("qlora: mmap params_q failed\n"); return 1; }
+    nf4_dequant(codes, scales_r, np, params_q);
+    var ck_codes0 = 0;
+    var i = 0;
+    while (i < np / 2) { ck_codes0 = ck_codes0 ^ (load8(codes + i) << ((i % 8) * 8)); i = i + 1; }
+
+    # ---- weight-space fidelity (reported) --------------------------------------
+    var wmax = f64_from(0);
+    var wsum = f64_from(0);
+    var qnan = 0;
+    i = 0;
+    while (i < np) {
+        var wq = load64(params_q + i * 8);
+        if (f64_eq(wq, wq) == 0) { qnan = qnan + 1; }
+        var d = f64_sub(load64(params + i * 8), wq);
+        if (f64_lt(d, f64_from(0)) == 1) { d = f64_neg(d); }
+        if (f64_gt(d, wmax) == 1) { wmax = d; }
+        wsum = f64_add(wsum, d);
+        i = i + 1;
+    }
+    _anuk_sput("weight |W - nf4(W)|: max "); fmt_float(wmax, 6);
+    _anuk_sput("  mean "); fmt_float(f64_div(wsum, f64_from(np)), 6);
+    _anuk_sput("  NaN "); _anuk_puti(qnan); _anuk_sput("\n");
+
+    # ---- forward fidelity: f64 base vs NF4 base (reported) ---------------------
+    var tokens = alloc(T * 8);
+    i = 0;
+    while (i < T) { store64(tokens + i * 8, (i * 137 + 11) % V); i = i + 1; }
+    var f64f = anuk_frozen_features(cfg, params, tokens, T);
+    var qf = anuk_frozen_features(cfg, params_q, tokens, T);
+    var lg = t_alloc(T * V);
+    var lgq = t_alloc(T * V);
+    ru_head_fwd(f64f, _p_tokemb(params), lg, T, C, V);
+    ru_head_fwd(qf, _p_tokemb(params_q), lgq, T, C, V);
+    var lmax = f64_from(0);
+    var lnan = 0;
+    i = 0;
+    while (i < T * V) {
+        var lq = load64(lgq + i * 8);
+        if (f64_eq(lq, lq) == 0) { lnan = lnan + 1; }
+        var d2 = f64_sub(load64(lg + i * 8), lq);
+        if (f64_lt(d2, f64_from(0)) == 1) { d2 = f64_neg(d2); }
+        if (f64_gt(d2, lmax) == 1) { lmax = d2; }
+        i = i + 1;
+    }
+    var agree = 0;
+    i = 0;
+    while (i < T) {
+        if (ru_argmax(lg + i * V * 8, V) == ru_argmax(lgq + i * V * 8, V)) { agree = agree + 1; }
+        i = i + 1;
+    }
+    _anuk_sput("logits f64-vs-nf4: maxabs "); fmt_float(lmax, 4);
+    _anuk_sput("  NaN "); _anuk_puti(lnan);
+    _anuk_sput("  argmax agreement "); _anuk_puti(agree);
+    _anuk_sput("/"); _anuk_puti(T); _anuk_sput("\n");
+
+    # ---- QLoRA: the LoRA head adapter over the NF4 base ------------------------
+    var targets = alloc(T * 8);
+    i = 0;
+    while (i < T - 1) { store64(targets + i * 8, load64(tokens + (i + 1) * 8)); i = i + 1; }
+    store64(targets + (T - 1) * 8, load64(tokens));
+    var match0 = 0;
+    i = 0;
+    while (i < T) {
+        if (ru_argmax(lgq + i * V * 8, V) == load64(targets + i * 8)) { match0 = match0 + 1; }
+        i = i + 1;
+    }
+    var r = 8;
+    var s = f64_from(2);
+    rng_seed(20260704);
+    var A = t_alloc(C * r);
+    var B = t_alloc(r * V);
+    lora_init(A, B, C, r, V, f64_div(f64_from(2), f64_from(100)));
+    var u = t_alloc(T * r);
+    var t = t_alloc(T * V);
+    var y = t_alloc(T * V);
+    var probs = t_alloc(T * V);
+    var dy = t_alloc(T * V);
+    var dA = t_alloc(C * r);
+    var dB = t_alloc(r * V);
+    var dys = t_alloc(T * V);
+    var du = t_alloc(T * r);
+    var dxs = t_alloc(T * C);
+    var mA = t_alloc(C * r); var vA = t_alloc(C * r);
+    var mB = t_alloc(r * V); var vB = t_alloc(r * V);
+    var steps = 800;
+    var lr = f64_div(f64_from(1), f64_from(100));
+    var loss0 = f64_from(0);
+    var loss = f64_from(0);
+    var step = 0;
+    while (step < steps) {
+        t_copy(y, lgq, T * V);
+        lora_fwd(qf, A, B, u, t, y, T, C, r, V, s);
+        loss = lora_xent_loss(y, probs, targets, T, V);
+        if (step == 0) { loss0 = loss; }
+        if ((step % 200) == 0) {
+            _anuk_sput("  step "); _anuk_puti(step);
+            _anuk_sput(" loss "); fmt_float(loss, 4); _anuk_sput("\n");
+        }
+        lora_xent_bwd(probs, targets, dy, T, V);
+        t_zero(dA, C * r);
+        t_zero(dB, r * V);
+        lora_bwd(qf, u, A, B, dy, dA, dB, dys, du, dxs, T, C, r, V, s);
+        lora_adam(A, dA, mA, vA, C * r, lr, step + 1);
+        lora_adam(B, dB, mB, vB, r * V, lr, step + 1);
+        step = step + 1;
+    }
+    _anuk_sput("xent loss over NF4 base: step0 "); fmt_float(loss0, 4);
+    _anuk_sput(" -> step"); _anuk_puti(steps);
+    _anuk_sput(" "); fmt_float(loss, 4); _anuk_sput("\n");
+    t_copy(y, lgq, T * V);
+    lora_fwd(qf, A, B, u, t, y, T, C, r, V, s);
+    var match1 = 0;
+    i = 0;
+    while (i < T) {
+        if (ru_argmax(y + i * V * 8, V) == load64(targets + i * 8)) { match1 = match1 + 1; }
+        i = i + 1;
+    }
+    var ck_codes1 = 0;
+    i = 0;
+    while (i < np / 2) { ck_codes1 = ck_codes1 ^ (load8(codes + i) << ((i % 8) * 8)); i = i + 1; }
+    _anuk_sput("greedy argmax == target: nf4-base "); _anuk_puti(match0);
+    _anuk_sput("/"); _anuk_puti(T);
+    _anuk_sput(" -> qlora-adapted "); _anuk_puti(match1);
+    _anuk_sput("/"); _anuk_puti(T); _anuk_sput("\n");
+    _anuk_sput("nf4 codes checksum unchanged: ");
+    if (ck_codes0 == ck_codes1) { _anuk_sput("yes\n"); } else { _anuk_sput("NO\n"); }
+
+    var ok = 1;
+    if (qnan != 0) { ok = 0; }
+    if (lnan != 0) { ok = 0; }
+    if (f64_lt(loss, loss0) == 0) { ok = 0; }
+    if (match1 < T) { ok = 0; }
+    if (ck_codes0 != ck_codes1) { ok = 0; }
+    if (ok == 1) {
+        _anuk_sput("RESULT: QLoRA over the NF4 base PASS (adapts to ");
+        _anuk_puti(match1); _anuk_sput("/"); _anuk_puti(T);
+        _anuk_sput("; 4-bit base frozen)\n");
+        return 0;
+    }
+    _anuk_sput("RESULT: QLoRA FAIL\n");
+    return 1;
+}

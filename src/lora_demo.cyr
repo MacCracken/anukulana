@@ -27,6 +27,38 @@ fn _lora_xor_checksum(p, n): i64 {
     return h;
 }
 
+# Frozen forward, once: run embed -> NL blocks -> final LN over `tokens` and
+# return f(T,C) — the features the head adapter trains over. Pure composition of
+# rupantara's public ops (allocates its own scratch; fine for a once-per-run
+# call). Shared by gpt2-lora and gpt2-qlora.
+fn anuk_frozen_features(cfg, params, tokens, T): i64 {
+    var C = _cfg_C(cfg);
+    var NL = _cfg_NL(cfg);
+    var TC = T * C;
+    var TF = T * _cfg_F(cfg);
+    var xb = t_alloc(TC);
+    var a = t_alloc(TC);
+    var attn_out = t_alloc(TC);
+    var bsc = t_alloc(TC);
+    var mlp_out = t_alloc(TC);
+    var fc = t_alloc(TF);
+    var gg = t_alloc(TF);
+    var m1 = t_alloc(T); var r1 = t_alloc(T);
+    var m2 = t_alloc(T); var r2 = t_alloc(T);
+    var arena = t_alloc(ru_attn_arena_size(T, C, _cfg_nh(cfg), _cfg_nkv(cfg)));
+    var f = t_alloc(TC);
+    var meanf = t_alloc(T); var rstdf = t_alloc(T);
+    ru_embed_fwd(tokens, _p_tokemb(params), _p_posemb(params, cfg), xb, T, C);
+    var L = 0;
+    while (L < NL) {
+        var pblk = params + _ru_blk_base(cfg, L) * 8;
+        ru_block_fwd(cfg, pblk, xb, xb, a, attn_out, bsc, mlp_out, fc, gg, m1, r1, m2, r2, arena);
+        L = L + 1;
+    }
+    ru_ln_fwd(xb, _p_lnfg(params, cfg), _p_lnfb(params, cfg), f, meanf, rstdf, T, C);
+    return f;
+}
+
 fn anuk_gpt2_lora(path): i64 {
     var cfg = alloc(64);
     var T = 8;
@@ -53,27 +85,7 @@ fn anuk_gpt2_lora(path): i64 {
 
     # ---- frozen forward, ONCE: f = final-LN output; base logits = head(f) ----
     var TC = T * C;
-    var TF = T * _cfg_F(cfg);
-    var xb = t_alloc(TC);
-    var a = t_alloc(TC);
-    var attn_out = t_alloc(TC);
-    var bsc = t_alloc(TC);
-    var mlp_out = t_alloc(TC);
-    var fc = t_alloc(TF);
-    var gg = t_alloc(TF);
-    var m1 = t_alloc(T); var r1 = t_alloc(T);
-    var m2 = t_alloc(T); var r2 = t_alloc(T);
-    var arena = t_alloc(ru_attn_arena_size(T, C, _cfg_nh(cfg), _cfg_nkv(cfg)));
-    var f = t_alloc(TC);
-    var meanf = t_alloc(T); var rstdf = t_alloc(T);
-    ru_embed_fwd(tokens, _p_tokemb(params), _p_posemb(params, cfg), xb, T, C);
-    var L = 0;
-    while (L < NL) {
-        var pblk = params + _ru_blk_base(cfg, L) * 8;
-        ru_block_fwd(cfg, pblk, xb, xb, a, attn_out, bsc, mlp_out, fc, gg, m1, r1, m2, r2, arena);
-        L = L + 1;
-    }
-    ru_ln_fwd(xb, _p_lnfg(params, cfg), _p_lnfb(params, cfg), f, meanf, rstdf, T, C);
+    var f = anuk_frozen_features(cfg, params, tokens, T);
     var base_logits = t_alloc(T * V);
     ru_head_fwd(f, _p_tokemb(params), base_logits, T, C, V);
 
