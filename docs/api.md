@@ -17,7 +17,7 @@
 | `gpt2-oracle <model.safetensors> <fixture.bin>` | the **HF-fidelity gate**: per-position argmax must equal HF's exactly, last-row maxrel ≤ 1e-5 vs the committed reference fixture |
 | `gpt2-lora <model.safetensors>` | LoRA head-adapter fine-tune over the frozen base (Adam); gates adaptation 8/8 + base bit-frozen + adapter-off bit-identical |
 | `gpt2-qlora <model.safetensors>` | QLoRA: NF4-quantize the whole base (tula codec + local double-quant), adapter recovers the task over the frozen 4-bit base |
-| `gpt2-tula <model> <ckpt.tula> <adapter.tula>` | signed persistence round-trip: save/load NF4 checkpoint + adapter, everything bit-identical, tamper/wrong-key rejected |
+| `gpt2-tula <model> <ckpt.tula> <adapter.tula> [--sk <operator.sk>]` | signed persistence round-trip: save/load NF4 checkpoint + adapter, everything bit-identical, tamper/wrong-key rejected. `--sk` *(1.1.1)*: sign with a real 64 B seed\|\|pk operator key file (ifran's `keys init` layout) instead of the ephemeral demo key — a control plane's `store add` then records `verified` |
 | `gpt2-gguf <model.gguf>` *(1.1.0)* | import via the **GGUF door** (llama.cpp format), run the forward, cross-check batch == KV-cache decode (bit-identical) |
 | `gpt2-cross <model.safetensors> <model.gguf>` *(1.1.0)* | the **cross-format gate**: the same checkpoint through both foreign parsers must produce bit-identical packed params AND logits |
 
@@ -86,7 +86,10 @@ signed NF4 checkpoint (`"cfg"` + `TULA_DT_NF4` codes + INT8 scale codes + F64
 superblock maxes); **load verifies Ed25519 and returns 0 on unsigned / wrong
 key / tamper**. `anuk_adapter_save(path, A, B, C, r, V, s, sk)` /
 `anuk_adapter_load(path, pk, A_out, B_out, C, r, V, out_s)`. Round-trips are
-bit-identical by contract (quantized data is discrete).
+bit-identical by contract (quantized data is discrete). `anuk_sk_load(path)`
+*(1.1.1)* — load a 64 B seed||pk secret-key file (sigil's `ed25519_keypair` sk
+layout = ifran's `operator.sk`); pk is the trailing 32 bytes (`sk + 32`);
+returns 0 on absent/short files.
 
 ### Demo helpers — `src/lora_demo.cyr`
 `anuk_frozen_features(cfg, params, tokens, T)` → f(T,C) — the frozen forward's

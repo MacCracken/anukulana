@@ -6,6 +6,33 @@ moving, no API freeze until v1.0).
 
 ## [Unreleased]
 
+## [1.1.1] — 2026-07-05
+
+**Operator-key signing (`--sk`) — ifran Lane 2 closes.** The persistence path
+can now sign as a REAL operator instead of the ephemeral demo key, closing the
+control-plane trust chain end-to-end.
+
+### Added
+- **`gpt2-tula … [--sk <operator.sk>]`** — optional flag: sign the NF4
+  checkpoint + adapter with a 64 B seed||pk secret-key file (exactly ifran's
+  `keys init` layout at `~/.ifran/operator.sk`); verification inside the
+  round-trip uses the embedded public key (`sk+32`). Default (no flag) stays
+  the ephemeral demo keypair — behavior unchanged.
+- **`anuk_sk_load(path)`** (`src/nf4_store.cyr`) — the key-file loader:
+  returns the 64 B sk, or 0 on absent/short files. Key management stays the
+  caller's per tula's charter — this just lets the caller BE the operator.
+- **Tests** (`tests/tcyr/nf4_store.tcyr` 13→21, suite 121→**129**) — keyfile
+  round-trip bit-identity, embedded-pk consistency vs `ed25519_keypair`,
+  absent/short-file rejects, sign-with-loaded-key + verify via `sk+32`,
+  different-key still rejected.
+
+### Proof (end-to-end with ifran 2.0.0)
+`ifran keys init` (fresh operator key) → `gpt2-tula --sk .ifran/operator.sk`
+on the real 124M checkpoint (round-trip PASS, task 8/8) → `ifran store add`
+records **`verified`** for both artifacts (63.8 MB ckpt + 3.3 MB adapter;
+previously `signed-unknown-key`) → `ifran store verify` — hash ok, structure
+ok, **sig verified**.
+
 ## [1.1.0] — 2026-07-05
 
 **GGUF import — the named post-1.0 headline lands** (additive 1.x minor).

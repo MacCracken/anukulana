@@ -10,10 +10,11 @@
 #
 # Nothing here may drift: quantized data is discrete, adapters are raw f64 —
 # disk round-trips are exact or broken. Signing uses an ephemeral demo keypair
-# (key management is the caller's per tula's charter; the control plane owns
-# real keys later).
+# by default; pass `--sk <operator.sk>` (1.1.1, ifran Lane 2) to sign with a
+# real operator key (64 B seed||pk file — ifran's `keys init` layout) so a
+# control plane's `store add` verifies the artifacts `verified` end-to-end.
 
-fn anuk_gpt2_tula(model_path, ckpt_path, adapter_path): i64 {
+fn anuk_gpt2_tula(model_path, ckpt_path, adapter_path, sk_path): i64 {
     var cfg = alloc(64);
     var T = 8;
     var params = anuk_gpt2_import(model_path, 12, T, cfg);
@@ -22,13 +23,27 @@ fn anuk_gpt2_tula(model_path, ckpt_path, adapter_path): i64 {
     var C = _cfg_C(cfg);
     var np = ru_params_count(cfg);
 
-    # ephemeral demo keypair
-    var seed = alloc(32);
+    var sk = 0;
+    var pk = 0;
     var i = 0;
-    while (i < 32) { store8(seed + i, (i * 7 + 41) & 0xFF); i = i + 1; }
-    var sk = alloc(64);
-    var pk = alloc(32);
-    ed25519_keypair(seed, sk, pk);
+    if (sk_path != 0) {
+        # operator key from file (ifran Lane 2): sk64 = seed||pk, pk = sk+32
+        sk = anuk_sk_load(sk_path);
+        if (sk == 0) {
+            _anuk_sput("tula-demo: cannot read operator key (need 64 B): ");
+            _anuk_sput(sk_path); _anuk_sput("\n");
+            return 1;
+        }
+        pk = sk + 32;
+        _anuk_sput("signing with operator key: "); _anuk_sput(sk_path); _anuk_sput("\n");
+    } else {
+        # ephemeral demo keypair (the pre-1.1.1 default, unchanged)
+        var seed = alloc(32);
+        while (i < 32) { store8(seed + i, (i * 7 + 41) & 0xFF); i = i + 1; }
+        sk = alloc(64);
+        pk = alloc(32);
+        ed25519_keypair(seed, sk, pk);
+    }
 
     # ---- 1. quantize + save the signed checkpoint -----------------------------
     if (anuk_nf4_save(ckpt_path, cfg, params, sk) != 0) {

@@ -28,7 +28,8 @@ Adam — argmax 8/8, base bit-frozen); `gpt2-qlora` runs **QLoRA** (the 124M bas
 NF4-quantized via **tula's codec** + local double-quant, adapter recovers 8/8
 over the 4-bit base); and `gpt2-tula` **persists it all**: a sigil-signed
 63.8 MB NF4 checkpoint + 3.3 MB adapter, both round-tripping **bit-identical**
-with wrong-key/tampered files rejected. **The post-1.0 headline shipped as
+with wrong-key/tampered files rejected (1.1.1: `--sk <operator.sk>` signs with
+a real operator key — ifran's `store add` records **`verified`** end-to-end). **The post-1.0 headline shipped as
 1.1.0 (2026-07-05): GGUF import** — a sovereign GGUF v2/v3 parser (llama.cpp's format)
 plus the `blk.N.*` GPT-2 mapping; `gpt2-gguf` runs the real checkpoint through
 the second foreign door, and `gpt2-cross` proves **both doors bit-identical**

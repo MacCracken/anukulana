@@ -183,6 +183,9 @@ M2 when rupantara's forward lands.
   123,659,520 params / 402,056 logits, 0 diffs**. F32/F16 payloads; quantized
   GGML block types reject cleanly (next item). TinyLlama-class imports now need
   only a llama-architecture mapping, not new parsing.
+- [x] **`--sk` operator-key signing (ifran Lane 2)** ✅ 2026-07-05 (1.1.1) —
+  `gpt2-tula --sk <operator.sk>` + `anuk_sk_load` (64 B seed||pk, ifran's
+  `keys init` layout); ifran `store add` records `verified` end-to-end.
 - Quantized-scale import (keep NF4/quantized tensors packed through the load
   path instead of widening — pairs with GGUF's quantized payloads).
 - NF4 quantization throughput (branchless codebook search; SIMD when cyrius

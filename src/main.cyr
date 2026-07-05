@@ -15,7 +15,10 @@ fn usage(): i64 {
     var l4c = "  gpt2-oracle <model.safetensors> <fixture.bin>   HF-fidelity gate\n";
     var l4d = "  gpt2-lora <model.safetensors>         LoRA head-adapter fine-tune (frozen base)\n";
     var l4e = "  gpt2-qlora <model.safetensors>        QLoRA: adapter over the NF4-quantized base\n";
-    var l4f = "  gpt2-tula <model> <ckpt.tula> <adapter.tula>   signed NF4 + adapter round-trip\n";
+    var l4f = "  gpt2-tula <model> <ckpt.tula> <adapter.tula> [--sk <operator.sk>]\n";
+    var l4f2 = "                                        signed NF4 + adapter round-trip\n";
+    var l4f3 = "                                        (--sk: sign with a real 64B operator key\n";
+    var l4f4 = "                                         — e.g. ifran's ~/.ifran/operator.sk)\n";
     var l4g = "  gpt2-gguf <model.gguf>                import via GGUF + run (batch==decode gate)\n";
     var l4h = "  gpt2-cross <model.safetensors> <model.gguf>   cross-format bit-identity gate\n";
     var l5 = "  (all Type-3 charter commands built)\n";
@@ -28,6 +31,9 @@ fn usage(): i64 {
     syscall(1, 1, l4d, strlen(l4d));
     syscall(1, 1, l4e, strlen(l4e));
     syscall(1, 1, l4f, strlen(l4f));
+    syscall(1, 1, l4f2, strlen(l4f2));
+    syscall(1, 1, l4f3, strlen(l4f3));
+    syscall(1, 1, l4f4, strlen(l4f4));
     syscall(1, 1, l4g, strlen(l4g));
     syscall(1, 1, l4h, strlen(l4h));
     syscall(1, 1, l5, strlen(l5));
@@ -242,11 +248,22 @@ fn main(): i64 {
     }
     if (streq(cmd, "gpt2-tula") == 1) {
         if (argc() < 5) {
-            var e = "anukulana: gpt2-tula needs <model.safetensors> <ckpt.tula> <adapter.tula>\n";
+            var e = "anukulana: gpt2-tula needs <model.safetensors> <ckpt.tula> <adapter.tula> [--sk <key>]\n";
             syscall(1, 1, e, strlen(e));
             return 1;
         }
-        return anuk_gpt2_tula(argv(2), argv(3), argv(4));
+        var sk_path = 0;
+        if (argc() >= 6) {
+            if (streq(argv(5), "--sk") == 1) {
+                if (argc() < 7) {
+                    var e2 = "anukulana: --sk needs a <operator.sk> path\n";
+                    syscall(1, 1, e2, strlen(e2));
+                    return 1;
+                }
+                sk_path = argv(6);
+            }
+        }
+        return anuk_gpt2_tula(argv(2), argv(3), argv(4), sk_path);
     }
     usage();
     return 0;

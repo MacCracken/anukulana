@@ -104,9 +104,59 @@ fn test_store(): i64 {
     return 0;
 }
 
+# ---- operator-key file loading (1.1.1, ifran Lane 2) --------------------------
+# anuk_sk_load reads a 64 B seed||pk secret-key file (ifran's operator.sk
+# layout); signing with the LOADED key must verify against its embedded pk
+# (sk+32), and a different key must still be rejected.
+fn test_sk_load(): i64 {
+    var seed = alloc(32);
+    var k = 0;
+    while (k < 32) { store8(seed + k, (k * 11 + 3) & 0xFF); k = k + 1; }
+    var sk = alloc(64);
+    var pk = alloc(32);
+    ed25519_keypair(seed, sk, pk);
+    var kpath = "/tmp/anuk_operator_test.sk";
+    file_write_all(kpath, sk, 64);
+
+    var lsk = anuk_sk_load(kpath);
+    assert_nonnull(lsk, "operator key file loads");
+    var diffs = 0;
+    var i = 0;
+    while (i < 64) { if (load8(lsk + i) != load8(sk + i)) { diffs = diffs + 1; } i = i + 1; }
+    assert_eq(diffs, 0, "loaded sk bit-identical to the written one");
+    i = 0;
+    while (i < 32) { if (load8(lsk + 32 + i) != load8(pk + i)) { diffs = diffs + 1; } i = i + 1; }
+    assert_eq(diffs, 0, "embedded pk (sk+32) matches ed25519_keypair's pk");
+
+    assert_eq(anuk_sk_load("/tmp/anuk_no_such_key.sk"), 0, "absent key file -> 0");
+    var shortp = "/tmp/anuk_short_key.sk";
+    file_write_all(shortp, sk, 32);
+    assert_eq(anuk_sk_load(shortp), 0, "short (32 B) key file -> 0");
+
+    # sign a toy checkpoint with the LOADED key; verify via its embedded pk
+    var cfg = alloc(64);
+    ru_cfg_init(cfg, 11, 4, 2, 1, 1, 1, 16, 1);
+    var np = ru_params_count(cfg);
+    var params = t_alloc(np);
+    _fillp(params, np);
+    var path = "/tmp/anuk_nf4_opkey_test.tula";
+    assert_eq(anuk_nf4_save(path, cfg, params, lsk), 0, "checkpoint saved with loaded operator key");
+    var cfg2 = alloc(64);
+    assert_nonnull(anuk_nf4_load(path, lsk + 32, cfg2), "load verifies against embedded pk (sk+32)");
+    var seed2 = alloc(32);
+    k = 0;
+    while (k < 32) { store8(seed2 + k, (k * 13 + 9) & 0xFF); k = k + 1; }
+    var sk2 = alloc(64);
+    var pk2 = alloc(32);
+    ed25519_keypair(seed2, sk2, pk2);
+    assert_eq(anuk_nf4_load(path, pk2, cfg2), 0, "different operator key still REJECTED");
+    return 0;
+}
+
 fn main(): i64 {
     alloc_init();
     test_store();
+    test_sk_load();
     return assert_summary();
 }
 

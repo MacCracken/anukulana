@@ -5,6 +5,15 @@
 
 ## Version
 
+**1.1.1 — RELEASED 2026-07-05 (`--sk` operator-key signing — ifran Lane 2
+closes).** `gpt2-tula … --sk <operator.sk>` signs the NF4 checkpoint + adapter
+with a real 64 B seed||pk key file (ifran's `keys init` layout) instead of the
+ephemeral demo key; `anuk_sk_load` is the loader (pk = sk+32). **End-to-end
+proof with ifran 2.0.0**: fresh `keys init` → `gpt2-tula --sk` on the real
+124M checkpoint → `ifran store add` records **`verified`** for both artifacts
+(was `signed-unknown-key`) → `store verify` sig-verified. Suite **121→129**
+(nf4_store 13→21). Behavior without the flag unchanged.
+
 **1.1.0 — RELEASED 2026-07-05 (GGUF import — the named post-1.0 headline).**
 `src/gguf.cyr` (sovereign GGUF v2/v3 parser — typed-KV structural skip,
 ne-order dims, alignment handling, F32/F16 widen, quantized GGML rejects
@@ -64,7 +73,7 @@ exactly).** The M2 arc landed across 0.2.0 + 0.3.0:
   1.05e-6** (fp32-rounding scale); gate frozen at **maxrel ≤ 1e-5** + exact
   argmax + NaN-free. `make fidelity`.
 
-Suite **121**; lint/fmt clean. Released: **0.1.0 · 0.2.0 · 0.3.0 · 0.4.0 · 0.5.0 · 1.0.0 · 1.1.0**.
+Suite **129**; lint/fmt clean. Released: **0.1.0 · 0.2.0 · 0.3.0 · 0.4.0 · 0.5.0 · 1.0.0 · 1.1.0 · 1.1.1**.
 
 ## Toolchain
 

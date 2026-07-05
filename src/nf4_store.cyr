@@ -136,3 +136,15 @@ fn anuk_adapter_load(path, pk, A_out, B_out, C, r, V, out_s): i64 {
     store64(out_s + 8, load64(mv + 8));
     return 0;
 }
+
+# ---- operator-key loading (ifran Lane 2) --------------------------------------
+# Load a 64 B Ed25519 secret key file — sigil's `ed25519_keypair` sk layout
+# (seed||pk), which is exactly what ifran writes as `~/.ifran/operator.sk`.
+# The public key is the trailing 32 bytes (`sk + 32`). Returns sk ptr | 0
+# (absent / short file). Key management stays the caller's per tula's charter —
+# this just lets the caller BE the operator instead of an ephemeral demo key.
+fn anuk_sk_load(path): i64 {
+    var sk = alloc(64);
+    if (file_read_all(path, sk, 64) != 64) { return 0; }
+    return sk;
+}
