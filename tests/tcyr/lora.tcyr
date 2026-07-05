@@ -1,0 +1,178 @@
+# tests/tcyr/lora.tcyr — M3 LoRA: the FD gate + invariants.
+#
+# The family discipline: a hand-derived backward is only as trustworthy as its
+# grad-check. dA and dB are validated against CENTRAL finite differences of the
+# full forward (base linear + adapter + softmax-xent), the same shape as
+# rosnet's linear_bwd gate. Plus the two structural invariants:
+#   * B = 0  =>  the adapter contributes EXACTLY zero (base logits bit-identical)
+#   * merged forward (W + s·A·B)  ==  base + adapter forward (within fp rounding)
+include "src/lib.cyr"
+include "lib/assert.cyr"
+
+# toy dims — big enough to exercise SIMD lanes + tails (N=5 not %4)
+fn TM(): i64 { return 3; }
+fn TK(): i64 { return 4; }
+fn TR(): i64 { return 2; }
+fn TN(): i64 { return 5; }
+
+fn _eps(): i64 { return f64_div(f64_from(1), f64_from(10000)); }      # 1e-4
+fn _tol(): i64 { return f64_div(f64_from(1), f64_from(100000)); }     # 1e-5 rel
+fn _s(): i64 { return f64_from(2); }                                  # alpha/r = 8/4-ish
+
+fn _absf(x): i64 { if (f64_lt(x, f64_from(0)) == 1) { return f64_neg(x); } return x; }
+
+# deterministic pseudo-data fill: p[i] = sin-free pattern ((i*a+b) mod m)/m − 0.5
+fn _dfill(p, n, a, b): i64 {
+    var i = 0;
+    while (i < n) {
+        var q = ((i * a + b) % 17);
+        store64(p + i * 8, f64_sub(f64_div(f64_from(q), f64_from(17)), f64_div(f64_from(1), f64_from(2))));
+        i = i + 1;
+    }
+    return 0;
+}
+
+# full forward -> scalar loss: y = x·W + s·(x·A)·B ; xent(y, targets)
+fn _fwd_loss(x, W, A, B, targets, M, K, r, N, s): i64 {
+    var y = t_alloc(M * N);
+    var u = t_alloc(M * r);
+    var t = t_alloc(M * N);
+    var probs = t_alloc(M * N);
+    linear_fwd(x, W, 0, y, M, K, N);
+    lora_fwd(x, A, B, u, t, y, M, K, r, N, s);
+    return lora_xent_loss(y, probs, targets, M, N);
+}
+
+# central-difference dL/dP[i] for a parameter tensor P inside the forward
+fn _fd_grad(x, W, A, B, P, i, targets, M, K, r, N, s): i64 {
+    var save = load64(P + i * 8);
+    store64(P + i * 8, f64_add(save, _eps()));
+    var lp = _fwd_loss(x, W, A, B, targets, M, K, r, N, s);
+    store64(P + i * 8, f64_sub(save, _eps()));
+    var lm = _fwd_loss(x, W, A, B, targets, M, K, r, N, s);
+    store64(P + i * 8, save);
+    return f64_div(f64_sub(lp, lm), f64_mul(f64_from(2), _eps()));
+}
+
+fn test_lora(): i64 {
+    var M = TM(); var K = TK(); var r = TR(); var N = TN();
+    var s = _s();
+    var x = t_alloc(M * K);
+    var W = t_alloc(K * N);
+    var A = t_alloc(K * r);
+    var B = t_alloc(r * N);
+    _dfill(x, M * K, 7, 3);
+    _dfill(W, K * N, 5, 1);
+    _dfill(A, K * r, 11, 2);
+    var targets = alloc(M * 8);
+    var m = 0;
+    while (m < M) { store64(targets + m * 8, (m * 2 + 1) % N); m = m + 1; }
+
+    # ---- invariant: B = 0 => adapter adds exactly zero -----------------------
+    t_zero(B, r * N);
+    var y0 = t_alloc(M * N);
+    var y1 = t_alloc(M * N);
+    var u = t_alloc(M * r);
+    var t = t_alloc(M * N);
+    linear_fwd(x, W, 0, y0, M, K, N);
+    t_copy(y1, y0, M * N);
+    lora_fwd(x, A, B, u, t, y1, M, K, r, N, s);
+    var diffs = 0;
+    var i = 0;
+    while (i < M * N) { if (load64(y0 + i * 8) != load64(y1 + i * 8)) { diffs = diffs + 1; } i = i + 1; }
+    assert_eq(diffs, 0, "B=0: adapter output bit-identical to base");
+
+    # ---- make B nonzero for the gradient + merge checks ----------------------
+    _dfill(B, r * N, 13, 5);
+
+    # ---- analytic grads via lora_bwd (two linear_bwd passes) ------------------
+    var y = t_alloc(M * N);
+    var probs = t_alloc(M * N);
+    linear_fwd(x, W, 0, y, M, K, N);
+    lora_fwd(x, A, B, u, t, y, M, K, r, N, s);
+    lora_xent_loss(y, probs, targets, M, N);
+    var dy = t_alloc(M * N);
+    lora_xent_bwd(probs, targets, dy, M, N);
+    var dA = t_alloc(K * r);
+    var dB = t_alloc(r * N);
+    var dys = t_alloc(M * N);
+    var du = t_alloc(M * r);
+    var dxs = t_alloc(M * K);
+    t_zero(dA, K * r);
+    t_zero(dB, r * N);
+    lora_bwd(x, u, A, B, dy, dA, dB, dys, du, dxs, M, K, r, N, s);
+
+    # ---- FD gate: every entry of dA and dB ------------------------------------
+    var bad = 0;
+    i = 0;
+    while (i < K * r) {
+        var fd = _fd_grad(x, W, A, B, A, i, targets, M, K, r, N, s);
+        var an = load64(dA + i * 8);
+        var d = _absf(f64_sub(fd, an));
+        var den = _absf(fd);
+        if (f64_lt(den, _eps()) == 1) { den = _eps(); }
+        if (f64_gt(f64_div(d, den), _tol()) == 1) { bad = bad + 1; }
+        i = i + 1;
+    }
+    assert_eq(bad, 0, "FD gate: dA matches central differences (rel < 1e-5)");
+    bad = 0;
+    i = 0;
+    while (i < r * N) {
+        var fd = _fd_grad(x, W, A, B, B, i, targets, M, K, r, N, s);
+        var an = load64(dB + i * 8);
+        var d = _absf(f64_sub(fd, an));
+        var den = _absf(fd);
+        if (f64_lt(den, _eps()) == 1) { den = _eps(); }
+        if (f64_gt(f64_div(d, den), _tol()) == 1) { bad = bad + 1; }
+        i = i + 1;
+    }
+    assert_eq(bad, 0, "FD gate: dB matches central differences (rel < 1e-5)");
+
+    # ---- merge parity: (W + s·A·B) forward == base + adapter forward ---------
+    var Wm = t_alloc(K * N);
+    var tmp = t_alloc(K * N);
+    t_copy(Wm, W, K * N);
+    lora_merge(Wm, A, B, tmp, K, r, N, s);
+    var ym = t_alloc(M * N);
+    linear_fwd(x, Wm, 0, ym, M, K, N);
+    var yb = t_alloc(M * N);
+    t_copy(yb, y0, M * N);
+    lora_fwd(x, A, B, u, t, yb, M, K, r, N, s);
+    var mx = f64_from(0);
+    i = 0;
+    while (i < M * N) {
+        var d2 = _absf(f64_sub(load64(ym + i * 8), load64(yb + i * 8)));
+        if (f64_gt(d2, mx) == 1) { mx = d2; }
+        i = i + 1;
+    }
+    assert(f64_lt(mx, f64_div(f64_from(1), f64_from(1000000000000))) , "merge parity: maxabs < 1e-12");
+
+    # ---- training smoke: 50 SGD steps on the toy problem descend the loss -----
+    t_zero(B, r * N);                       # standard init: B=0
+    var l0 = _fwd_loss(x, W, A, B, targets, M, K, r, N, s);
+    var step = 0;
+    while (step < 50) {
+        linear_fwd(x, W, 0, y, M, K, N);
+        lora_fwd(x, A, B, u, t, y, M, K, r, N, s);
+        lora_xent_loss(y, probs, targets, M, N);
+        lora_xent_bwd(probs, targets, dy, M, N);
+        t_zero(dA, K * r);
+        t_zero(dB, r * N);
+        lora_bwd(x, u, A, B, dy, dA, dB, dys, du, dxs, M, K, r, N, s);
+        lora_sgd(A, dA, K * r, f64_from(1));
+        lora_sgd(B, dB, r * N, f64_from(1));
+        step = step + 1;
+    }
+    var l1 = _fwd_loss(x, W, A, B, targets, M, K, r, N, s);
+    assert(f64_lt(l1, l0), "training smoke: 50 SGD steps descend the xent loss");
+    return 0;
+}
+
+fn main(): i64 {
+    alloc_init();
+    test_lora();
+    return assert_summary();
+}
+
+var rc = main();
+syscall(60, rc);

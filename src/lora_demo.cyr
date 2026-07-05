@@ -1,0 +1,176 @@
+# @public — M3 demo: `gpt2-lora <model.safetensors>` — LoRA head-adapter
+# fine-tune over the FROZEN imported GPT-2.
+#
+# Bite-1 scope (the shallowest honest gradient path): the adapter sits on the
+# LM HEAD — logits = f·tok_embᵀ + s·(f·A)·B — where f is the final-LN output of
+# the frozen forward. dL/dlogits comes straight from softmax-xent, so the
+# gradient path into A,B is EXACTLY the plan's "two rosnet.linear_bwd passes,
+# no new gradient op": no transformer backward chain is needed (per-layer
+# adapters need one — that chain is attn11's territory, flagged in the roadmap).
+# Because ONLY the adapter trains, f and the base logits are computed ONCE and
+# every step is head-sized (fast), while the 124M base params stay bit-frozen.
+#
+# The head is weight-tied (tok_emb) — the adapter therefore stays UNMERGED
+# (merging would also rewrite the input embedding; lora_merge is for untied
+# matrices, proven in tests/tcyr/lora.tcyr).
+#
+# Objective: memorize the next-token map of the fixed input sequence
+# (targets[t] = tokens[t+1], wrap at the end) — a mapping base GPT-2 does NOT
+# predict, so adaptation is measurable: xent descends and the greedy argmax
+# flips to the targets, while (a) the base params' checksum is unchanged and
+# (b) adapter-off logits stay bit-identical (the fidelity gate still holds).
+
+fn _lora_xor_checksum(p, n): i64 {
+    var h = 0;
+    var i = 0;
+    while (i < n) { h = h ^ load64(p + i * 8); i = i + 1; }
+    return h;
+}
+
+fn anuk_gpt2_lora(path): i64 {
+    var cfg = alloc(64);
+    var T = 8;
+    var params = anuk_gpt2_import(path, 12, T, cfg);
+    if (params == 0) { _anuk_sput("lora: import failed (open / infer / pack)\n"); return 1; }
+    var V = _cfg_V(cfg);
+    var C = _cfg_C(cfg);
+    var NL = _cfg_NL(cfg);
+    var np = ru_params_count(cfg);
+    var ck0 = _lora_xor_checksum(params, np);
+    _anuk_sput("lora: model V="); _anuk_puti(V);
+    _anuk_sput(" C="); _anuk_puti(C);
+    _anuk_sput(" NL="); _anuk_puti(NL);
+    _anuk_sput(" T="); _anuk_puti(T); _anuk_sput("\n");
+
+    # fixed input (the gpt2 command's pattern) + next-token targets
+    var tokens = alloc(T * 8);
+    var i = 0;
+    while (i < T) { store64(tokens + i * 8, (i * 137 + 11) % V); i = i + 1; }
+    var targets = alloc(T * 8);
+    i = 0;
+    while (i < T - 1) { store64(targets + i * 8, load64(tokens + (i + 1) * 8)); i = i + 1; }
+    store64(targets + (T - 1) * 8, load64(tokens));
+
+    # ---- frozen forward, ONCE: f = final-LN output; base logits = head(f) ----
+    var TC = T * C;
+    var TF = T * _cfg_F(cfg);
+    var xb = t_alloc(TC);
+    var a = t_alloc(TC);
+    var attn_out = t_alloc(TC);
+    var bsc = t_alloc(TC);
+    var mlp_out = t_alloc(TC);
+    var fc = t_alloc(TF);
+    var gg = t_alloc(TF);
+    var m1 = t_alloc(T); var r1 = t_alloc(T);
+    var m2 = t_alloc(T); var r2 = t_alloc(T);
+    var arena = t_alloc(ru_attn_arena_size(T, C, _cfg_nh(cfg), _cfg_nkv(cfg)));
+    var f = t_alloc(TC);
+    var meanf = t_alloc(T); var rstdf = t_alloc(T);
+    ru_embed_fwd(tokens, _p_tokemb(params), _p_posemb(params, cfg), xb, T, C);
+    var L = 0;
+    while (L < NL) {
+        var pblk = params + _ru_blk_base(cfg, L) * 8;
+        ru_block_fwd(cfg, pblk, xb, xb, a, attn_out, bsc, mlp_out, fc, gg, m1, r1, m2, r2, arena);
+        L = L + 1;
+    }
+    ru_ln_fwd(xb, _p_lnfg(params, cfg), _p_lnfb(params, cfg), f, meanf, rstdf, T, C);
+    var base_logits = t_alloc(T * V);
+    ru_head_fwd(f, _p_tokemb(params), base_logits, T, C, V);
+
+    # baseline: how many positions does the FROZEN model already predict?
+    var match0 = 0;
+    i = 0;
+    while (i < T) {
+        if (ru_argmax(base_logits + i * V * 8, V) == load64(targets + i * 8)) { match0 = match0 + 1; }
+        i = i + 1;
+    }
+
+    # ---- the adapter: A(C,r) gaussian, B(r,V) zero; s = alpha/r ---------------
+    var r = 8;
+    var s = f64_from(2);                                  # alpha = 16, r = 8
+    rng_seed(20260704);
+    var A = t_alloc(C * r);
+    var B = t_alloc(r * V);
+    lora_init(A, B, C, r, V, f64_div(f64_from(2), f64_from(100)));   # std 0.02
+    var u = t_alloc(T * r);
+    var t = t_alloc(T * V);
+    var y = t_alloc(T * V);
+    var probs = t_alloc(T * V);
+    var dy = t_alloc(T * V);
+    var dA = t_alloc(C * r);
+    var dB = t_alloc(r * V);
+    var dys = t_alloc(T * V);
+    var du = t_alloc(T * r);
+    var dxs = t_alloc(TC);
+
+    # adapter-off sanity: B=0 => logits bit-identical to base
+    t_copy(y, base_logits, T * V);
+    lora_fwd(f, A, B, u, t, y, T, C, r, V, s);
+    var offdiffs = 0;
+    i = 0;
+    while (i < T * V) { if (load64(y + i * 8) != load64(base_logits + i * 8)) { offdiffs = offdiffs + 1; } i = i + 1; }
+    _anuk_sput("adapter-off logits vs base: diffs="); _anuk_puti(offdiffs); _anuk_sput("\n");
+
+    # ---- train: SGD on A,B only (f + base logits are fixed) -------------------
+    # Adam state (plain SGD diverges here — the real f carries massive-activation
+    # outlier dims; see lora_adam's header)
+    var mA = t_alloc(C * r); var vA = t_alloc(C * r);
+    var mB = t_alloc(r * V); var vB = t_alloc(r * V);
+    var steps = 800;
+    var lr = f64_div(f64_from(1), f64_from(100));         # 1e-2 (Adam)
+    var loss0 = f64_from(0);
+    var loss = f64_from(0);
+    var step = 0;
+    while (step < steps) {
+        t_copy(y, base_logits, T * V);
+        lora_fwd(f, A, B, u, t, y, T, C, r, V, s);
+        loss = lora_xent_loss(y, probs, targets, T, V);
+        if (step == 0) { loss0 = loss; }
+        if ((step % 200) == 0) {
+            _anuk_sput("  step "); _anuk_puti(step);
+            _anuk_sput(" loss "); fmt_float(loss, 4); _anuk_sput("\n");
+        }
+        lora_xent_bwd(probs, targets, dy, T, V);
+        t_zero(dA, C * r);
+        t_zero(dB, r * V);
+        lora_bwd(f, u, A, B, dy, dA, dB, dys, du, dxs, T, C, r, V, s);
+        lora_adam(A, dA, mA, vA, C * r, lr, step + 1);
+        lora_adam(B, dB, mB, vB, r * V, lr, step + 1);
+        step = step + 1;
+    }
+    _anuk_sput("xent loss: step0 "); fmt_float(loss0, 4);
+    _anuk_sput(" -> step"); _anuk_puti(steps);
+    _anuk_sput(" "); fmt_float(loss, 4); _anuk_sput("\n");
+
+    # ---- after: greedy argmax vs targets --------------------------------------
+    t_copy(y, base_logits, T * V);
+    lora_fwd(f, A, B, u, t, y, T, C, r, V, s);
+    var match1 = 0;
+    i = 0;
+    while (i < T) {
+        if (ru_argmax(y + i * V * 8, V) == load64(targets + i * 8)) { match1 = match1 + 1; }
+        i = i + 1;
+    }
+    var ck1 = _lora_xor_checksum(params, np);
+    _anuk_sput("greedy argmax == target: base "); _anuk_puti(match0);
+    _anuk_sput("/"); _anuk_puti(T);
+    _anuk_sput(" -> adapted "); _anuk_puti(match1);
+    _anuk_sput("/"); _anuk_puti(T); _anuk_sput("\n");
+    _anuk_sput("base params xor-checksum unchanged: ");
+    if (ck0 == ck1) { _anuk_sput("yes\n"); } else { _anuk_sput("NO\n"); }
+
+    var ok = 1;
+    if (offdiffs != 0) { ok = 0; }
+    if (f64_lt(loss, loss0) == 0) { ok = 0; }
+    if (match1 <= match0) { ok = 0; }
+    if (match1 < T) { ok = 0; }
+    if (ck0 != ck1) { ok = 0; }
+    if (ok == 1) {
+        _anuk_sput("RESULT: LoRA head-adapter fine-tune PASS (adapts to ");
+        _anuk_puti(match1); _anuk_sput("/"); _anuk_puti(T);
+        _anuk_sput("; base frozen bit-identical)\n");
+        return 0;
+    }
+    _anuk_sput("RESULT: LoRA fine-tune FAIL\n");
+    return 1;
+}

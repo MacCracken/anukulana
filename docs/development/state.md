@@ -50,7 +50,12 @@ the re-folded ganita `f64_tanh` fix). Deps wired: `sigil` + `tula` + `rosnet` +
 
 ## Next
 
-**M3 — LoRA:** `W' = W + (α/r)·B·A` over the imported base; gradients only into
-A,B via two `rosnet.linear_bwd` passes (no new gradient op); **FD-gate the A,B
-path**; a fine-tune measurably adapts. Then **M4 — QLoRA/NF4** (user-confirmed
-additive step). See `roadmap.md`.
+**M3 — LoRA: bite 1 LANDED (`[Unreleased]`, 2026-07-04).** `src/lora.cyr`
+(fwd/bwd/merge/xent/SGD/Adam, FD-gated dA+dB entry-by-entry; suite 49→**54**) +
+`gpt2-lora`: head adapter over the frozen import — **xent 10.79 → 0.0000,
+argmax 1/8 → 8/8, base bit-frozen, adapter-off bit-identical**. Finding: plain
+SGD diverges on real-GPT-2 features (massive-activation outliers → Adam
+required). Open scope question (roadmap M3): deeper per-layer adapters need a
+backward chain (attn11's territory) — accept head-scope + go to **M4
+QLoRA/NF4** (user-confirmed additive step), or hand-derive a minimal
+tail-chain. See `roadmap.md`.

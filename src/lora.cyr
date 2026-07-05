@@ -1,0 +1,133 @@
+# @public — M3 LoRA: low-rank adaptation over the frozen imported base.
+#
+#   W' = W + s·(A·B)      s = alpha/r;  A(K,r) gaussian-init, B(r,N) zero-init
+#
+# so at init the adapter contributes EXACTLY zero (B=0) and the base model is
+# untouched. Per the plan (docs/development/roadmap.md M3 + agnosticos
+# type3-weight-import.md): gradients route ONLY into A,B, computed by two
+# ordinary `rosnet.linear_bwd` passes — NO new gradient op. The naive
+# `dL/dA = Bᵀ·dL/dZ` one-liner is wrong (it omits the activation Xᵀ term);
+# letting linear_bwd supply both halves is the whole point:
+#
+#   u = x·A            (linear 1)          y += s·(u·B)      (linear 2)
+#   dys = s·dy
+#   linear_bwd(u, B, dys, du, dB, 0, M, r, N)   # dB += uᵀ·dys ; du = dys·Bᵀ
+#   linear_bwd(x, A, du, dxs, dA, 0, M, K, r)   # dA += xᵀ·du  ; dxs unused when
+#                                               # the base below is frozen
+#
+# Conventions follow rosnet (row-major f64; forward writes, backward accumulates
+# into dA/dB and writes du/dxs fresh — zero dA/dB once per step). All scratch is
+# caller-provided (no hidden allocation in the hot path). FD-gated in
+# tests/tcyr/lora.tcyr.
+
+# ---- init -------------------------------------------------------------------
+# A(K,r) ~ N(0, std²) via tyche (rng_seed upstream for reproducibility);
+# B(r,N) = 0. Standard LoRA init: ΔW = A·B = 0 at step 0.
+fn lora_init(A, B, K, r, N, std): i64 {
+    t_randn(A, K * r, std);
+    t_zero(B, r * N);
+    return 0;
+}
+
+# ---- forward ----------------------------------------------------------------
+# y(M,N) += s · (x(M,K)·A(K,r))·B(r,N). Caches u(M,r) for the backward;
+# t(M,N) is scratch. y must already hold the base output (e.g. x·W [+ b]).
+fn lora_fwd(x, A, B, u, t, y, M, K, r, N, s): i64 {
+    linear_fwd(x, A, 0, u, M, K, r);
+    linear_fwd(u, B, 0, t, M, r, N);
+    t_axpy(y, t, s, M * N);
+    return 0;
+}
+
+# ---- backward ---------------------------------------------------------------
+# Given dy(M,N) = dL/dy: accumulate dA(K,r), dB(r,N). u is the forward's cache;
+# dys(M,N) / du(M,r) / dxs(M,K) are scratch (dxs = the adapter's dL/dx — unused
+# when the base below the adapted layer is frozen, but written for callers that
+# do need it). Two linear_bwd passes, nothing else.
+fn lora_bwd(x, u, A, B, dy, dA, dB, dys, du, dxs, M, K, r, N, s): i64 {
+    t_copy(dys, dy, M * N);
+    t_scale(dys, M * N, s);
+    linear_bwd(u, B, dys, du, dB, 0, M, r, N);
+    linear_bwd(x, A, du, dxs, dA, 0, M, K, r);
+    return 0;
+}
+
+# ---- merge ------------------------------------------------------------------
+# W(K,N) += s·(A·B) — materialize the adapter into the base weight (the
+# deployment path for UNTIED matrices). tmp(K,N) is scratch. NOTE: do NOT merge
+# a head adapter into weight-tied tok_emb — that would also change the input
+# embedding; tied heads keep the adapter unmerged (see the gpt2-lora demo).
+fn lora_merge(W, A, B, tmp, K, r, N, s): i64 {
+    linear_fwd(A, B, 0, tmp, K, r, N);
+    t_axpy(W, tmp, s, K * N);
+    return 0;
+}
+
+# ---- softmax cross-entropy (the training objective) --------------------------
+# loss = (1/M)·Σ_m −ln p[m, tgt_m], probs(M,V) written via rupantara's softmax.
+fn lora_xent_loss(logits, probs, targets, M, V): i64 {
+    ru_softmax_fwd(logits, probs, M, V);
+    var loss = f64_from(0);
+    var m = 0;
+    while (m < M) {
+        var p = load64(probs + (m * V + load64(targets + m * 8)) * 8);
+        loss = f64_sub(loss, f64_ln(p));
+        m = m + 1;
+    }
+    return f64_div(loss, f64_from(M));
+}
+
+# dlogits(M,V) = (probs − onehot(targets)) / M — the standard softmax-xent
+# gradient (writes fresh).
+fn lora_xent_bwd(probs, targets, dlogits, M, V): i64 {
+    var inv = f64_div(f64_from(1), f64_from(M));
+    var m = 0;
+    while (m < M) {
+        var tgt = load64(targets + m * 8);
+        var v = 0;
+        while (v < V) {
+            var g = load64(probs + (m * V + v) * 8);
+            if (v == tgt) { g = f64_sub(g, f64_from(1)); }
+            store64(dlogits + (m * V + v) * 8, f64_mul(g, inv));
+            v = v + 1;
+        }
+        m = m + 1;
+    }
+    return 0;
+}
+
+# ---- SGD step (reuses rosnet's axpy; no optimizer machinery) -----------------
+fn lora_sgd(P, dP, n, lr): i64 {
+    t_axpy(P, dP, f64_neg(lr), n);
+    return 0;
+}
+
+# ---- Adam step (the optimizer LoRA is actually trained with) -----------------
+# Plain SGD diverges on the real checkpoint: GPT-2's final-LN features carry
+# massive-activation outlier dims (the same phenomenon that exposed the ganita
+# f64_tanh overflow), so dA = xᵀ·du is orders hotter on those dims than
+# elsewhere — no single flat lr is stable. Adam's per-parameter scaling is the
+# standard remedy (Hu et al. train LoRA with AdamW). Hand-derived, bias-
+# corrected; m/v are caller-held state (zero-init), step is 1-based.
+fn lora_adam(P, dP, m, v, n, lr, step): i64 {
+    var b1 = f64_div(f64_from(9), f64_from(10));            # 0.9
+    var b2 = f64_div(f64_from(999), f64_from(1000));        # 0.999
+    var one = f64_from(1);
+    var eps = f64_div(one, f64_from(100000000));            # 1e-8
+    var c1 = f64_sub(one, f64_pow(b1, f64_from(step)));     # 1 − β1^t
+    var c2 = f64_sub(one, f64_pow(b2, f64_from(step)));     # 1 − β2^t
+    var i = 0;
+    while (i < n) {
+        var g = load64(dP + i * 8);
+        var mi = f64_add(f64_mul(b1, load64(m + i * 8)), f64_mul(f64_sub(one, b1), g));
+        var vi = f64_add(f64_mul(b2, load64(v + i * 8)), f64_mul(f64_sub(one, b2), f64_mul(g, g)));
+        store64(m + i * 8, mi);
+        store64(v + i * 8, vi);
+        var mh = f64_div(mi, c1);
+        var vh = f64_div(vi, c2);
+        var upd = f64_div(mh, f64_add(f64_sqrt(vh), eps));
+        store64(P + i * 8, f64_sub(load64(P + i * 8), f64_mul(lr, upd)));
+        i = i + 1;
+    }
+    return 0;
+}

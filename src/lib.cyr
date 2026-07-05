@@ -47,6 +47,7 @@ include "lib/ganita.cyr"
 # ================================================================
 include "lib/sigil.cyr"
 include "lib/tula.cyr"
+include "lib/tyche.cyr"      # transitive rosnet dep, resolved in lib/ — rng_normal for t_randn (LoRA A-init)
 include "lib/rosnet.cyr"
 include "lib/rupantara.cyr"
 
@@ -58,3 +59,5 @@ include "src/inspect.cyr"       # M1: consume tula (open / enumerate / verify)
 include "src/safetensors.cyr"   # M2: foreign safetensors parser (bayan JSON DOM)
 include "src/gpt2.cyr"          # M2: GPT-2 -> rupantara packed-layout mapping
 include "src/oracle.cyr"        # M2: HF-fidelity gate vs the committed logits fixture
+include "src/lora.cyr"          # M3: LoRA fwd/bwd/merge + softmax-xent (two rosnet linear_bwd passes)
+include "src/lora_demo.cyr"     # M3: gpt2-lora — head-adapter fine-tune over the frozen import

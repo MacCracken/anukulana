@@ -6,6 +6,44 @@ moving, no API freeze until v1.0).
 
 ## [Unreleased]
 
+**M3 bite 1 — LoRA over the frozen imported base (head adapter).** The adaptation
+milestone opens: a low-rank pair fine-tunes the real imported GPT-2 while the
+124M base params stay bit-frozen — gradients route ONLY into A,B via **two
+ordinary `rosnet.linear_bwd` passes, no new gradient op** (the plan's exact
+letter; the naive `dL/dA = Bᵀ·dL/dZ` trap avoided by construction).
+
+### Added
+- **`src/lora.cyr`** — the M3 primitive set: `lora_init` (A gaussian / B zero →
+  ΔW = 0 at step 0) · `lora_fwd` (`y += s·(x·A)·B`, caches `u`) · `lora_bwd`
+  (two `linear_bwd` passes → dA/dB accumulate) · `lora_merge` (`W += s·A·B`,
+  untied matrices only) · softmax-xent loss/grad (`lora_xent_loss`/`_bwd`) ·
+  `lora_sgd` + **`lora_adam`** (hand-derived, bias-corrected).
+- **`tests/tcyr/lora.tcyr`** (5, suite 49→**54**) — the **FD gate**: every entry
+  of dA AND dB vs central finite differences through the full
+  base+adapter+xent forward (rel < 1e-5); B=0 ⇒ adapter output bit-identical;
+  merge parity < 1e-12; a 50-step SGD training smoke descends.
+- **`gpt2-lora <model.safetensors>`** CLI + `src/lora_demo.cyr` — the
+  measurable-adaptation proof on the real checkpoint: head adapter
+  (logits += s·(f·A)·B over the frozen forward's final-LN features f, computed
+  ONCE — every step is head-sized), next-token-memorization objective. Result:
+  **xent 10.79 → 0.0000 (800 Adam steps, r=8, lr=1e-2); greedy argmax 1/8 →
+  8/8; base params xor-checksum unchanged; adapter-off logits bit-identical**
+  (the fidelity gate still holds with the adapter off).
+
+### Findings
+- **Plain SGD diverges on the real checkpoint at ANY flat lr** — GPT-2's
+  final-LN features carry massive-activation outlier dims (the same phenomenon
+  behind the ganita `f64_tanh` overflow), making `dA = fᵀ·du` orders hotter on
+  those dims. **Adam's per-parameter scaling is the remedy** (and what LoRA is
+  actually trained with) — hence `lora_adam`. The toy-scale tcyr trains fine on
+  SGD; the divergence is a real-data phenomenon.
+- **Head-adapter scope is deliberate (bite 1):** on the weight-tied head the
+  gradient path needs NO transformer backward chain (dL/dlogits is direct), so
+  the "two linear_bwd passes" claim holds exactly. The adapter stays UNMERGED
+  (merging into tied tok_emb would also rewrite the input embedding). Deeper
+  per-layer adapters need a backward chain through the tail of the network —
+  scope question flagged in the roadmap (that chain is attn11's territory).
+
 ## [0.3.0] — 2026-07-04
 
 **M2 fidelity gate — the imported GPT-2 forward matches HF exactly (M2 COMPLETE).**
