@@ -6,8 +6,12 @@ moving, no API freeze until v1.0).
 
 ## [Unreleased]
 
+## [1.1.0] — 2026-07-05
+
+**GGUF import — the named post-1.0 headline lands** (additive 1.x minor).
+
 ### Added
-- **GGUF import — the named post-1.0 headline lands** (additive 1.x surface).
+- **GGUF import** (the second foreign source).
   - **`src/gguf.cyr`** — sovereign GGUF v2/v3 parser (llama.cpp's format):
     typed-KV metadata walk (all 13 value types skipped structurally — unknown
     *keys* never break the walk; unknown *type ids* hard-reject), ne-order

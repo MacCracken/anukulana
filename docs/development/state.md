@@ -5,7 +5,7 @@
 
 ## Version
 
-**[Unreleased] — GGUF import LANDED 2026-07-05 (the named post-1.0 headline).**
+**1.1.0 — RELEASED 2026-07-05 (GGUF import — the named post-1.0 headline).**
 `src/gguf.cyr` (sovereign GGUF v2/v3 parser — typed-KV structural skip,
 ne-order dims, alignment handling, F32/F16 widen, quantized GGML rejects
 cleanly; wrap-safe + null-checked per the audit's standing guidance) +
@@ -18,7 +18,7 @@ batch==decode 0 diffs; `gpt2-cross` — both foreign doors BIT-IDENTICAL
 GGUF fuzz rounds (`fuzz.tcyr`); suite **80→121**. GGUF proof file generated
 once by `tests/oracle/gen_gguf.py` (disposable venv: gguf+numpy+safetensors,
 no torch). Next lanes: quantized GGML payloads · llama-arch (TinyLlama)
-mapping. Awaiting cut.
+mapping.
 
 **1.0.0 — RELEASED 2026-07-04 (STABLE — the Type-3 reference, frozen).** API
 frozen (`docs/api.md` + `STABILITY.md`); parsers fuzz-gated
@@ -64,7 +64,7 @@ exactly).** The M2 arc landed across 0.2.0 + 0.3.0:
   1.05e-6** (fp32-rounding scale); gate frozen at **maxrel ≤ 1e-5** + exact
   argmax + NaN-free. `make fidelity`.
 
-Suite **121**; lint/fmt clean. Released: **0.1.0 · 0.2.0 · 0.3.0 · 0.4.0 · 0.5.0 · 1.0.0**.
+Suite **121**; lint/fmt clean. Released: **0.1.0 · 0.2.0 · 0.3.0 · 0.4.0 · 0.5.0 · 1.0.0 · 1.1.0**.
 
 ## Toolchain
 

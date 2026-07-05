@@ -15,7 +15,7 @@ them: the weight **format** is `tula`; the transformer **forward** is `rupantara
 
 ## Status
 
-**1.0.0 — STABLE: the Type-3 reference, frozen** ([`docs/api.md`](docs/api.md) +
+**1.1.0 — STABLE: the Type-3 reference, frozen at 1.0.0 + the GGUF door** ([`docs/api.md`](docs/api.md) +
 [`STABILITY.md`](STABILITY.md); parsers fuzz-gated, audited —
 [`SECURITY.md`](SECURITY.md); benchmarks captured). The charter (import → run →
 match → adapt → persist), as built across 0.2.0–0.5.0: `gpt2` imports a real **GPT-2-small safetensors** and runs it on
@@ -28,8 +28,8 @@ Adam — argmax 8/8, base bit-frozen); `gpt2-qlora` runs **QLoRA** (the 124M bas
 NF4-quantized via **tula's codec** + local double-quant, adapter recovers 8/8
 over the 4-bit base); and `gpt2-tula` **persists it all**: a sigil-signed
 63.8 MB NF4 checkpoint + 3.3 MB adapter, both round-tripping **bit-identical**
-with wrong-key/tampered files rejected. **The post-1.0 headline landed
-2026-07-05: GGUF import** — a sovereign GGUF v2/v3 parser (llama.cpp's format)
+with wrong-key/tampered files rejected. **The post-1.0 headline shipped as
+1.1.0 (2026-07-05): GGUF import** — a sovereign GGUF v2/v3 parser (llama.cpp's format)
 plus the `blk.N.*` GPT-2 mapping; `gpt2-gguf` runs the real checkpoint through
 the second foreign door, and `gpt2-cross` proves **both doors bit-identical**
 (123.6M packed params / 402k logits, 0 diffs). Quantized GGML payloads and the
