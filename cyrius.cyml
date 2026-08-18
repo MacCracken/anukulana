@@ -5,7 +5,7 @@ description = "anukulana (अनुकूलन — adaptation) — sovereign Ty
 license = "GPL-3.0-only"
 repository = "https://github.com/MacCracken/anukulana"
 language = "cyrius"
-cyrius = "6.3.31"
+cyrius = "6.5.27"
 
 # anukulana is a reference BINARY (like attn11 / tarka) — no [lib]/distlib.
 [build]
@@ -59,7 +59,7 @@ stdlib = [
 [deps.sigil]
 git = "https://github.com/MacCracken/sigil.git"
 path = "../sigil"
-tag = "3.9.9"
+tag = "3.12.9"
 modules = ["dist/sigil.cyr"]
 
 # tula — the sovereign weight-file format (read/write/verify). M1 consumes it to
@@ -67,7 +67,7 @@ modules = ["dist/sigil.cyr"]
 [deps.tula]
 git = "https://github.com/MacCracken/tula.git"
 path = "../tula"
-tag = "1.0.0"
+tag = "1.0.1"
 modules = ["dist/tula.cyr"]
 
 # rosnet — f64 tensors + BLAS-1 + matmul (linear_fwd/linear_bwd, t_alloc/…). M2
@@ -75,7 +75,7 @@ modules = ["dist/tula.cyr"]
 [deps.rosnet]
 git = "https://github.com/MacCracken/rosnet.git"
 path = "../rosnet"
-tag = "0.2.0"
+tag = "1.1.1"
 modules = ["dist/rosnet.cyr"]
 
 # rupantara — the sovereign transformer FORWARD (ru_model_fwd). M2 maps an
@@ -84,5 +84,5 @@ modules = ["dist/rosnet.cyr"]
 [deps.rupantara]
 git = "https://github.com/MacCracken/rupantara.git"
 path = "../rupantara"
-tag = "0.4.0"
+tag = "0.4.2"
 modules = ["dist/rupantara.cyr"]

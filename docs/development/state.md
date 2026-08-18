@@ -77,8 +77,18 @@ Suite **129**; lint/fmt clean. Released: **0.1.0 · 0.2.0 · 0.3.0 · 0.4.0 · 0
 
 ## Toolchain
 
-Cyrius pin **6.3.31** (`cyrius.cyml`; bumped 6.3.27→6.3.31 at 0.2.0 to pick up
-the re-folded ganita `f64_tanh` fix). Deps wired: `sigil` + `tula` + `rosnet` +
+Cyrius pin **6.5.27** (`cyrius.cyml`; **bumped 6.3.31 -> 6.5.27 on 2026-08-17**,
+ML/AI-arc realign; previously 6.3.27→6.3.31 at 0.2.0 to pick up the re-folded
+ganita `f64_tanh` fix). ⚠ The bump was **not** cosmetic — at 6.3.31 the whole
+suite was **0 passed / 9 failed**, every file a compile error, and the bump plus
+one source rename is what made it green again (9/9, 129 assertions):
+`lib sync --full` supplied `thread_local_alloc` (stdlib v6.4.65, which the
+vendored `sigil` already called), and bayan 1.4.1's rename forced
+`src/safetensors.cyr` off `bayan_json_v_parse_str` onto **`bayan_json_v_parse_buf`**
+— the same (buf, len) signature. That rename is deliberate upstream: while the
+cstr+len form held the `_str` name, Cyrius's `X(a, ...)` -> `X_str` overload
+dispatch silently rewrote every `bayan_json_v_parse(someStr)` in the ecosystem
+into a 1-arg call that returned 0 for valid JSON. Deps wired: `sigil` + `tula` + `rosnet` +
 `rupantara` (+ stdlib bayan/math/ganita).
 
 ## Build artifacts

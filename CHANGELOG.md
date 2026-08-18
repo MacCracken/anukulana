@@ -6,6 +6,43 @@ moving, no API freeze until v1.0).
 
 ## [Unreleased]
 
+## [1.1.2] — 2026-08-18
+
+### Changed
+
+- **Cyrius pin `6.3.31` -> `6.5.27`** (2026-08-17, ecosystem-wide ML/AI-arc realign ahead of
+  the arc reopening). `cyrius lib sync --full` re-vendored the whole version-matched stdlib
+  snapshot.
+- **`src/safetensors.cyr`: `bayan_json_v_parse_str` -> `bayan_json_v_parse_buf`** (same
+  `(buf, len)` signature; the header comment updated to match). The rename is deliberate
+  upstream in bayan 1.3.0: while the cstr+len form held the `_str` name, Cyrius's
+  `X(a, ...)` -> `X_str` overload dispatch silently rewrote every
+  `bayan_json_v_parse(someStr)` in the ecosystem into a 1-arg call to a 2-arg function, which
+  returned 0 for valid JSON. anukūlana's call site passes a raw `buf + 8`, so it was never hit
+  by that bug — but the symbol it named is gone.
+
+### Fixed
+
+- **The suite was `0 passed / 9 failed` at the old pin — every file a compile error — and the
+  bump plus the one rename above is what made it green (9/9, 129 assertions).** Two distinct
+  stale-vendored-stdlib faults were stacked: `thread_local_alloc` (stdlib v6.4.65, already
+  called by the vendored `sigil`) was missing outright, and once `lib sync --full` supplied it
+  the newly-vendored bayan 1.4.1 exposed the `_str` -> `_buf` rename. Nothing else in
+  anukūlana's source moved; the GPT-2 safetensors import path — which could not be built at
+  all in this state — is compiling and green again.
+
+### Changed
+
+- **Dependency set brought current: `sigil` 3.9.9 -> 3.12.9, `tula` 1.0.0 -> 1.0.1,
+  `rosnet` 0.2.0 -> 1.1.1, `rupantara` 0.4.0 -> 0.4.2.** All four were pinned behind releases that
+  had already shipped, and all four are declared with a `path` override — so local dev and the
+  129-assertion suite had been resolving the *working copies* while the declared tags went
+  untested, and CI would have been the first thing to ever build the declared graph
+  ([[reference_path_override_disables_the_tag_as_a_test]]). anukūlana sits last in the release
+  order (it consumes tula, rosnet and rupantara), so this could only be done once those three were
+  published. Verified each bump took rather than merely built — every vendored `lib/<dep>.cyr`
+  header confirmed at the new version.
+
 ## [1.1.1] — 2026-07-05
 
 **Operator-key signing (`--sk`) — ifran Lane 2 closes.** The persistence path

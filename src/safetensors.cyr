@@ -4,7 +4,7 @@
 # The JSON header maps tensor name -> {"dtype","shape":[..],"data_offsets":[a,b]},
 # offsets relative to the start of the data section. Ref: huggingface/safetensors.
 #
-# The JSON is parsed by **bayan** (the sovereign JSON DOM — bayan_json_v_parse_str
+# The JSON is parsed by **bayan** (the sovereign JSON DOM — bayan_json_v_parse_buf
 # + bayan_json_v_obj_* / _arr_* / _str / _int); we never hand-roll JSON. Only the
 # byte-level bits are ours: little-endian integer reads + IEEE-754 f32/f16/bf16 ->
 # f64 widening (no sovereign widener exists — candidate to promote into rosnet).
@@ -119,7 +119,7 @@ fn st_open(buf, len): i64 {
     # (form chosen wrap-safe: `8 + hlen > len` overflows for hlen near i64-max)
     var data_start = 8 + hlen;
     var data_len = len - data_start;
-    var root = bayan_json_v_parse_str(buf + 8, hlen);
+    var root = bayan_json_v_parse_buf(buf + 8, hlen);
     if (root == 0) { return 0; }                        # malformed JSON
     if (bayan_json_v_is_obj(root) == 0) { return 0; }
     var nobj = bayan_json_v_obj_len(root);
