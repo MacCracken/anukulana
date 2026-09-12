@@ -73,8 +73,8 @@ fn anuk_nf4_load(path, pk, cfg_out): i64 {
     if (ec == 0) { _anuk_sput("nf4-load: no cfg tensor\n"); return 0; }
     var cv = tula_entry_data(r, ec);
     ru_cfg_init(cfg_out, f64_to(load64(cv)), f64_to(load64(cv + 8)), f64_to(load64(cv + 16)),
-    f64_to(load64(cv + 24)), f64_to(load64(cv + 32)), f64_to(load64(cv + 40)),
-    f64_to(load64(cv + 48)), f64_to(load64(cv + 56)));
+      f64_to(load64(cv + 24)), f64_to(load64(cv + 32)), f64_to(load64(cv + 40)),
+      f64_to(load64(cv + 48)), f64_to(load64(cv + 56)));
     var eb = tula_find(r, "base.nf4");
     var eq = tula_find(r, "base.nf4.scale.q8");
     var es = tula_find(r, "base.nf4.scale.sup");

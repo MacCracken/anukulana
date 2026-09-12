@@ -5,7 +5,7 @@ description = "anukulana (अनुकूलन — adaptation) — sovereign Ty
 license = "GPL-3.0-only"
 repository = "https://github.com/MacCracken/anukulana"
 language = "cyrius"
-cyrius = "6.5.27"
+cyrius = "6.6.2"
 
 # anukulana is a reference BINARY (like attn11 / tarka) — no [lib]/distlib.
 [build]
@@ -56,10 +56,15 @@ stdlib = [
 # sigil — the sovereign crypto boundary; supplies the ed25519_* that tula's
 # dist/tula.cyr leaves unresolved (the standard consumer-bundle pattern). Local
 # dev resolves via path=../sigil; CI via git+tag.
+# ⚠ `path` SHADOWS `tag` locally, so a stale `tag` is invisible to every local
+# build and test — CI is the only place the pinned code is compiled. 3.12.9
+# (the pin that stood when cyrius moved 6.5.27 -> 6.6.2) still calls `payload()`,
+# deleted at cyrius 6.6.0, so CI failed `undefined function 'payload'` on every
+# job while the local tree was green. 3.12.16 is the 6.6 value-form migration.
 [deps.sigil]
 git = "https://github.com/MacCracken/sigil.git"
 path = "../sigil"
-tag = "3.12.9"
+tag = "3.12.16"
 modules = ["dist/sigil.cyr"]
 
 # tula — the sovereign weight-file format (read/write/verify). M1 consumes it to
