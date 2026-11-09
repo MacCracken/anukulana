@@ -195,6 +195,12 @@ fn test_gpt2_roundtrip(): i64 {
     i = 0;
     while (i < T * V) { if (load64(L1 + i * 8) != load64(L2 + i * 8)) { ldiff = ldiff + 1; } i = i + 1; }
     assert_eq(ldiff, 0, "imported model logits bit-identical to the direct forward");
+
+    # (c) 1.2.1: a config rupantara's ru_cfg_check rejects is refused at inference,
+    # before ru_params_count (now -1 for it) sizes anything. C = 4 here.
+    var cfg3 = alloc(64);
+    assert_eq(anuk_gpt2_infer_cfg(r, cfg3, 3), 0 - 1, "nh not dividing C rejected");
+    assert_eq(anuk_gpt2_infer_cfg(r, cfg3, 0), 0 - 1, "nh = 0 rejected");
     return 0;
 }
 

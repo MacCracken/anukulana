@@ -58,7 +58,8 @@ fn _gpt2_copy_prefix(r, name, dst, n): i64 {
 }
 
 # Infer V,C,T,NL from tensor shapes (nh is NOT in safetensors -> caller supplies).
-# Fills cfg via ru_cfg_init(V,C,T,nh,nh,NL,4C,1). Returns 0 | -1 (missing shapes).
+# Fills cfg via ru_cfg_init(V,C,T,nh,nh,NL,4C,1). Returns 0 | -1 (missing shapes,
+# or a config rupantara's ru_cfg_check rejects: C % nh != 0, a size that wraps, …).
 fn anuk_gpt2_infer_cfg(r, cfg, nh): i64 {
     var ew = st_find(r, "wte.weight");
     var ep = st_find(r, "wpe.weight");
@@ -77,6 +78,7 @@ fn anuk_gpt2_infer_cfg(r, cfg, nh): i64 {
         else { NL = NL + 1; }
     }
     ru_cfg_init(cfg, V, C, T, nh, nh, NL, 4 * C, 1);
+    if (ru_cfg_check(cfg) != RU_OK()) { return 0 - 1; }   # shapes come from the file
     return 0;
 }
 
@@ -170,6 +172,7 @@ fn anuk_gpt2_import(path, nh, T_run, cfg): i64 {
     if (r == 0) { return 0; }
     if (anuk_gpt2_infer_cfg(r, cfg, nh) != 0) { return 0; }
     ru_cfg_init(cfg, _cfg_V(cfg), _cfg_C(cfg), T_run, nh, nh, _cfg_NL(cfg), _cfg_F(cfg), 1);
+    if (ru_cfg_check(cfg) != RU_OK()) { return 0; }       # T_run re-checked
     var np = ru_params_count(cfg);
     var params = mmap_anon(np * 8);          # ~1 GB for GPT-2-small -> bypass ALLOC_MAX
     if (params == 0) { return 0; }

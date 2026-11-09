@@ -37,6 +37,15 @@ their defenses:
 5. **Large-file handling.** >256 MB inputs are mmap'd read-only (`st_open_mmap`,
    `gg_open_mmap`) — no unbounded heap reads; `tula_read_file` carries tula's
    bomb-guard.
+6. **The model config built from a file** (added 1.2.1). Every config that comes
+   from file contents passes rupantara's `ru_cfg_check` before anything is sized
+   from it. That covers GGUF KV metadata (`head_count`, `block_count`,
+   `feed_forward_length`), safetensors tensor shapes and the signed checkpoint's
+   `cfg` tensor. The check refuses zero or negative dims, `C % nh != 0`,
+   `nh % nkv != 0` and any size that would wrap an i64. Through 1.2.0 nothing
+   checked: `head_count = 0`, or `nh = 0` in a correctly signed checkpoint,
+   divided by zero inside `ru_params_count` (SIGFPE). Gated in
+   `tests/tcyr/gguf.tcyr`, `gpt2.tcyr` and `nf4_store.tcyr`.
 
 Out of scope: the underlying crypto (sigil's audit surface), the tula format
 internals (tula's), memory-safety of the caller-guarantees tensor substrate

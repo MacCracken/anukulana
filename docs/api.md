@@ -38,7 +38,9 @@ F64/F32/F16/BF16 per dtype).
 `anuk_gpt2_import(path, nh, T_run, cfg)` → params | 0 — one-shot: mmap → infer
 config (heads passed in; NOT in safetensors) → pack onto rupantara's layout
 (fused-QKV column split, **no transpose**). `anuk_gpt2_infer_cfg` /
-`anuk_gpt2_pack` are the two halves.
+`anuk_gpt2_pack` are the two halves. *(1.2.1)* The inferred config, and again the
+config with `T_run` applied, must pass rupantara's `ru_cfg_check`, or import
+returns 0 and `anuk_gpt2_infer_cfg` returns -1.
 
 ### Foreign import — `src/gguf.cyr` (untrusted input; added 1.1.0)
 `gg_open(buf, len)` → reader | 0 (GGUF v2/v3 — typed-KV walk with structural
@@ -55,7 +57,9 @@ config **from KV metadata** (`general.architecture` must be `gpt2`; heads come
 from `gpt2.attention.head_count` — unlike safetensors, GGUF carries them) →
 pack onto rupantara's layout (ggml `[out, in]` **transposed back** to
 `[in, out]`, fused-`attn_qkv` split by out-range). `anuk_ggpt2_infer_cfg` /
-`anuk_ggpt2_pack` are the two halves.
+`anuk_ggpt2_pack` are the two halves. *(1.2.1)* `anuk_ggpt2_infer_cfg` returns -1
+for a config `ru_cfg_check` rejects (e.g. `head_count = 0`, or one not dividing
+`embedding_length`).
 
 ### Fidelity — `src/oracle.cyr`
 `anuk_gpt2_oracle(model_path, fix_path)` → 0 | 1. Fixture format v1 documented
@@ -84,7 +88,8 @@ error ≤ 1/254 relative per scale).
 `anuk_nf4_save(path, cfg, params, sk)` / `anuk_nf4_load(path, pk, cfg_out)` —
 signed NF4 checkpoint (`"cfg"` + `TULA_DT_NF4` codes + INT8 scale codes + F64
 superblock maxes); **load verifies Ed25519 and returns 0 on unsigned / wrong
-key / tamper**. `anuk_adapter_save(path, A, B, C, r, V, s, sk)` /
+key / tamper**, and *(1.2.1)* on a `cfg` tensor `ru_cfg_check` rejects.
+`anuk_adapter_save(path, A, B, C, r, V, s, sk)` /
 `anuk_adapter_load(path, pk, A_out, B_out, C, r, V, out_s)`. Round-trips are
 bit-identical by contract (quantized data is discrete). `anuk_sk_load(path)`
 *(1.1.1)* — load a 64 B seed||pk secret-key file (sigil's `ed25519_keypair` sk

@@ -153,10 +153,50 @@ fn test_sk_load(): i64 {
     return 0;
 }
 
+# 1.2.1: a correctly signed checkpoint whose cfg tensor rupantara rejects (nh = 0)
+# is refused, not crashed. It carries well-formed base tensors, so without the
+# ru_cfg_check guard the load still reaches ru_params_count(cfg): through
+# rupantara 0.5.1 that divided by zero (C / nh); from 0.5.2 it returns -1.
+fn test_bad_cfg_rejected(): i64 {
+    var seed = alloc(32);
+    var k = 0;
+    while (k < 32) { store8(seed + k, (k * 3 + 2) & 0xFF); k = k + 1; }
+    var sk = alloc(64);
+    var pk = alloc(32);
+    ed25519_keypair(seed, sk, pk);
+    var cfgv = t_alloc(8);
+    store64(cfgv + 0 * 8, f64_from(11));   # V
+    store64(cfgv + 1 * 8, f64_from(4));    # C
+    store64(cfgv + 2 * 8, f64_from(2));    # T
+    store64(cfgv + 3 * 8, f64_from(0));    # nh = 0
+    store64(cfgv + 4 * 8, f64_from(0));    # nkv = 0
+    store64(cfgv + 5 * 8, f64_from(1));    # NL
+    store64(cfgv + 6 * 8, f64_from(16));   # F
+    store64(cfgv + 7 * 8, f64_from(1));    # attn bias
+    var np = 100;                          # zeroed base tensors of consistent sizes
+    var nb = tula_nf4_blocks(np, NF4_BS());
+    var nsb = (nb + NF4_SBS() - 1) / NF4_SBS();
+    var b = tula_builder_new();
+    tula_builder_add(b, "cfg", TULA_DT_F64, _nfs_shp1(8), 1, cfgv, 64);
+    tula_builder_add(b, "base.nf4", TULA_DT_NF4, _nfs_shp1(np), 1, alloc(tula_nf4_bytes(np)),
+      tula_nf4_bytes(np));
+    tula_builder_add(b, "base.nf4.scale.q8", TULA_DT_INT8, _nfs_shp1(nb), 1, alloc(nb), nb);
+    tula_builder_add(b, "base.nf4.scale.sup", TULA_DT_F64, _nfs_shp1(nsb), 1, t_alloc(nsb), nsb * 8);
+    var buf = tula_builder_finish_signed(b, sk);
+    assert_nonnull(buf, "bad-cfg checkpoint built and signed");
+    var path = "/tmp/anuk_nf4_store_badcfg.tula";
+    var total = tula_total_len(buf);
+    assert_eq(tula_write_file(path, buf, total), total, "bad-cfg checkpoint written");
+    var cfg2 = alloc(64);
+    assert_eq(anuk_nf4_load(path, pk, cfg2), 0, "signed checkpoint with nh = 0 REJECTED");
+    return 0;
+}
+
 fn main(): i64 {
     alloc_init();
     test_store();
     test_sk_load();
+    test_bad_cfg_rejected();
     return assert_summary();
 }
 

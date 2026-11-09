@@ -346,10 +346,51 @@ fn test_gguf_gpt2_roundtrip(): i64 {
     return 0;
 }
 
+# overwrite the u32 value of KV `key` in a serialized GGUF: the key is written as
+# u64 len + bytes, then a u32 vtype, then the u32 value. Returns 0 | -1 (absent).
+fn _patch_kv_u32(buf, len, key, v): i64 {
+    var kl = strlen(key);
+    var p = 0;
+    while (p + kl + 8 <= len) {
+        if (memeq(buf + p, key, kl) == 1) {
+            var offp = alloc(8);
+            store64(offp, p + kl + 4);
+            _ggw_u32(buf, offp, v);
+            return 0;
+        }
+        p = p + 1;
+    }
+    return 0 - 1;
+}
+
+# 1.2.1: head_count is a raw KV value from the file. 0 used to reach C / nh inside
+# ru_params_count (a divide by zero); now ru_cfg_check refuses it at inference.
+fn test_gguf_hostile_head_count(): i64 {
+    var V = 13; var C = 8; var T = 6; var nh = 2; var NL = 2;
+    var cfg = alloc(64);
+    ru_cfg_init(cfg, V, C, T, nh, nh, NL, 4 * C, 1);
+    var np = ru_params_count(cfg);
+    var P = t_alloc(np);
+    _fill32(P, np, 5);
+    var lenp = alloc(8);
+    var buf = _export_gguf(cfg, P, lenp);
+    var len = load64(lenp);
+    var cfg2 = alloc(64);
+    assert_eq(_patch_kv_u32(buf, len, "gpt2.attention.head_count", 0), 0, "head_count patched to 0");
+    var r = gg_open(buf, len);
+    assert_nonnull(r, "gg_open still parses (head_count is just a KV)");
+    assert_eq(anuk_ggpt2_infer_cfg(r, cfg2, T), 0 - 1, "head_count = 0 rejected");
+    assert_eq(_patch_kv_u32(buf, len, "gpt2.attention.head_count", 3), 0, "head_count patched to 3");
+    r = gg_open(buf, len);
+    assert_eq(anuk_ggpt2_infer_cfg(r, cfg2, T), 0 - 1, "head_count not dividing C rejected");
+    return 0;
+}
+
 fn main(): i64 {
     alloc_init();
     test_gguf_minimal();
     test_gguf_gpt2_roundtrip();
+    test_gguf_hostile_head_count();
     return assert_summary();
 }
 

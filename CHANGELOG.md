@@ -6,6 +6,87 @@ moving, no API freeze until v1.0).
 
 ## [Unreleased]
 
+## [1.2.1] - 2026-11-09
+
+Moves anukulana to cyrius 6.7.18 and every dependency to its latest release. It also adopts
+rupantara's new config check at the three places a model config is built from file contents,
+which closes a hostile-input crash present through 1.2.0.
+
+### Changed
+
+- **Toolchain `6.7.9` → `6.7.18`** (through 6.7.10–6.7.17). rupantara 0.5.1 sums up the
+  6.7.10–6.7.18 behaviour changes: almost all are new compile-time refusals (generics, struct
+  and pointer shapes, enums), plus runtime changes in net, TLS, thread-local slots and pam.
+  anukulana builds with no warning, uses none of net, TLS or pam itself, and lint stays at 0
+  warnings under 6.7.11's and 6.7.12's new rules.
+- **Dependencies moved to their latest tags** (checked against GitHub on 2026-11-09). rosnet
+  1.4.1 and rupantara 0.5.3 are newer than the sibling checkouts on the verification host.
+  - `sigil` stays at `3.13.15`. It is still sigil's latest tag, and now also the copy cyrius 6.7.18
+    bundles, so 1.2.0's `./lib/ shadows … sigil` build warning is gone.
+  - `tula` `1.1.0` → `1.6.1`: five additive minors (1.2.0 checked builders and error codes, 1.3.0
+    long names and F32/F16/BF16, 1.4.0 big files, 1.5.0 lookup at scale, 1.6.0 signed file
+    metadata) and two patches (1.1.2's hardening pass, 1.6.1). There is no format change. Every
+    tula function anukulana calls keeps its signature, and tula reports their outputs unchanged.
+  - `rosnet` `1.2.0` → `1.4.1`. No API change, and every CPU result is byte-identical per rosnet's
+    15,302-line golden dump. 1.2.2 rewrote `linear_fwd` (about 2.7× faster at 64×768×768) and kept
+    each output's rounding sequence. rupantara 0.5.1 checked that independently against its
+    forward. 1.2.2 also makes `t_alloc(0)` return an empty tensor (it used to exit), and makes a
+    negative or wrapping size exit with "invalid size". anukulana sizes its tensors from a checked
+    config, so neither case is reached. tyche comes in transitively at `1.2.2` (was `1.2.0`), with
+    the same bits for every state its API can reach.
+  - `rupantara` `0.5.0` → `0.5.3`. No API change, and output is bit-identical for valid input.
+    0.5.2 makes the model entries and the sizing functions validate the config (see Fixed). The
+    private layout helpers anukulana calls (`_bq`, `_cfg_C`, `_ru_o_Wq`, …) are byte-identical to
+    0.5.0's.
+- **bayan in the 6.7.18 snapshot is `1.11.1`** (was `1.5.13`). Of the 18 `bayan_json_v_*`
+  functions anukulana's source and tests call, only `_is_obj` and `_is_arr` changed signature:
+  they now return `bool`. The existing `== 0` comparisons compile unchanged.
+- **DCE binary 454,448 → 814,120 B, all of it data.** bayan 1.9.0 (folded into cyrius 6.7.13)
+  requires `lib/unicode/`, about 300 KB of string tables, and DCE drops functions but not global
+  initializers. anukulana calls bayan directly for the safetensors header, so it pays this
+  whatever sigil does. tula 1.1.1 recorded the same jump.
+- **`anukulana_version()` `10200` → `10201`.** The `smoke.tcyr` assertion moves with it.
+
+### Fixed
+
+- **A model config built from a file is checked before anything is sized from it.** rupantara
+  0.5.2 added the public `ru_cfg_check`, and made `ru_params_count` / `ru_decode_kv_count` return
+  `RU_ERR_CFG` (-1) for a config it rejects. Four places now call it right after `ru_cfg_init` and
+  reject on failure: `anuk_ggpt2_infer_cfg`, `anuk_gpt2_infer_cfg`, `anuk_gpt2_import` (after it
+  applies `T_run`) and `anuk_nf4_load`.
+  - Through 1.2.0 nothing checked. A GGUF with `gpt2.attention.head_count = 0`, or a correctly
+    signed NF4 checkpoint whose `cfg` tensor has `nh = 0`, divided by zero inside
+    `ru_params_count`. Reproduced: the NF4 load, run under 1.2.0's deps, was killed by SIGFPE.
+  - A safetensors `C` that isn't a multiple of 12 (`nh` is fixed at 12 on that path) used to run
+    with a layout rupantara says leaves concat columns unwritten. It is rejected now too.
+  - rupantara 0.5.3 alone already turns these into rejects (its -1 makes `mmap_anon` fail, or the
+    stored-`np` check mismatch). The guard makes the rejection explicit, happens before any sizing
+    and names the fault (`nf4-load: bad cfg`).
+  - `SECURITY.md`'s threat model gains this as item 6.
+
+### Added
+
+- **10 assertions (suite 129 → 139).** `gguf.tcyr` 38 → 43: `head_count` patched to 0 and then to
+  3 in an exported GGUF. `gpt2.tcyr` 10 → 12: `nh = 3` and `nh = 0` against `C = 4`.
+  `nf4_store.tcyr` 21 → 24: a correctly signed checkpoint with `nh = 0` and well-formed base
+  tensors, so the load reaches the sizing path.
+
+### Verified
+
+- **In-tree, git-first.** On a fresh `lib/` and `cyrius.lock`, `cyrius deps` commit-pinned all
+  five deps: sigil `3c47656`, tula `09d469b`, rosnet `af2bb1a`, rupantara `83b6e74`, tyche
+  `cdb74e2`. Every vendored `lib/<dep>.cyr` header was confirmed at its new version.
+  `cyrius deps --verify` reports 69 verified and 0 failed, and `cyrius deps --locked` is clean.
+- Suite **139/139** across 9 files. The build prints no warnings, lint has 0 `warn ` lines, fmt
+  and vet are clean, and the DCE binary builds and runs (`version` prints `10201`).
+- **The new tests catch a missing guard.** With the four `ru_cfg_check` lines removed, `gpt2.tcyr`
+  and `gguf.tcyr` each fail 2 assertions. `nf4_store.tcyr` still passes, because rupantara 0.5.3's
+  -1 rejects the load at the `np` check (`nf4-load: np/cfg mismatch`). The same guard-free load
+  under 1.2.0's deps dies of SIGFPE.
+- **Not run: `make fidelity` or the checkpoint demos.** The GPT-2 checkpoint is still not staged
+  on the verification host. rosnet and rupantara report bit-identical CPU results, but the
+  HF-logit gate has not been re-run since 1.1.3.
+
 ## [1.2.0] - 2026-11-09
 
 Moves anukulana onto the cyrius 6.7 series and git-first dependency resolution. No behavior or API
