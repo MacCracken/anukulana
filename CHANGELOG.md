@@ -6,6 +6,73 @@ moving, no API freeze until v1.0).
 
 ## [Unreleased]
 
+## [1.2.0] - 2026-11-09
+
+Moves anukulana onto the cyrius 6.7 series and git-first dependency resolution. No behavior or API
+change. The minor bump marks the toolchain line, as tula 1.1.0, rosnet 1.2.0 and rupantara 0.5.0 did.
+
+### Changed
+
+- **Toolchain `6.6.20` → `6.7.9`** (through 6.7.0–6.7.8). `src/` needed no change. Upstream changes
+  checked against anukulana's `src/` and `tests/`:
+  - **6.7.0–6.7.8** reserve `trait`, `const`, `true`, `false`, `do` and `dyn`. anukulana uses none of
+    them outside comments and strings.
+  - **6.7.3** makes `!` a real operator. Before that a lone `!x` compiled as `x`. anukulana has no `!`
+    outside `!=`.
+  - **6.7.9** makes unary `-` and `~` on a constant bind tighter, and **6.7.8–6.7.9** change how typed
+    `*T` pointers step and dereference. anukulana has neither: its buffers are untyped addresses read
+    with `load64` / `load32` / `store64`.
+  - **6.7.6** rounds every write into an `f32`. anukulana has no `f32` variables. f32, f16 and bf16
+    payloads are widened to f64 at the bit level (`_st_f32_to_f64` over a `load32`).
+  - **6.7.6** folds `cyrius tests` into `cyrius test`. The Makefile and CI already run
+    `cyrius test <file>` once per suite.
+- **Dependencies moved to the releases built against 6.7.9.** None of them changes its source or API,
+  and their stdlib sidecars are identical to the 6.6.20 set, so `[deps].stdlib` doesn't move.
+  - `sigil` `3.13.10` → `3.13.15`. It pins 6.7.9 and is the sigil tula 1.1.0 pins. 3.13.11–3.13.15
+    are additive-only for API, and the `ed25519_*` calls tula and `nf4_store` make are unchanged.
+    The 6.7.9 toolchain bundles an older copy (3.13.11); see Notes.
+  - `tula` `1.0.3` → `1.1.0`. The public surface and on-disk format v1 are exactly 1.0.3's.
+  - `rosnet` `1.1.3` → `1.2.0`. rosnet's `src/` is unchanged, and it reports byte-identical f64
+    results for every CPU op, `linear_fwd` / `linear_bwd` included. tyche comes in transitively at
+    `1.2.0` (was `1.1.1`), with its source and stream unchanged.
+  - `rupantara` `0.4.4` → `0.5.0`. The forward and API are unchanged. It pins rosnet `1.2.0` too, so
+    the graph still resolves a single rosnet.
+- **Git first.** Every build resolves the four dep tags, a dev box's included. The `path = "../x"`
+  lines are now dev overrides, read only in local mode (`CYRIUS_LOCAL=1`, `CYRIUS_LOCAL=<dep,dep>`
+  or `--local`). The "⚠ `path` SHADOWS `tag`" comment in `cyrius.cyml` is replaced with a git-first
+  note, and the roadmap's 6.7.6 to-do is marked applied. Its `cyrius deps --locked` item doesn't
+  apply: CI has no lock guard or path-stripping step, and `cyrius.lock` stays gitignored.
+- **DCE binary 715,728 → 454,448 B.** sigil 3.13.12 shrank a 256 KiB static buffer to 4 KB, so the
+  `array local … gets STATIC storage` and `large static data` build warnings are gone.
+- **`anukulana_version()` `10104` → `10200`.** The `smoke.tcyr` assertion moves with it.
+
+### Fixed
+
+- **The in-tree build compiles again.** At 1.1.4 the `path` overrides pulled the 6.7.x sibling
+  checkouts, which do not compile on 6.6.20. Under git first, `make build` and `make test` in the
+  tree compile the tags CI compiles.
+
+### Notes
+
+- Builds print `./lib/ shadows version-pinned …/versions/6.7.9/lib — … sigil 3.13.15 (pinned:
+  3.13.11)`. The 6.7.9 toolchain ships its own sigil from before 3.13.12. `lib/` holds the declared
+  `[deps.sigil]` tag, which is what CI builds, so the `cyrius lib sync --full` the warning suggests
+  isn't needed. `CYRIUS_NO_WARN_SHADOW_LIB=1` silences it.
+
+### Verified
+
+- **In-tree, default (git-first) mode.** On a fresh `lib/` and `cyrius.lock`, `cyrius deps` printed
+  the `hint:` naming the four unused checkouts and commit-pinned all five deps: sigil `3c47656`,
+  tula `3cded05`, rosnet `f065c58`, rupantara `2467829`, tyche `2c393fe`. Every vendored
+  `lib/<dep>.cyr` header was confirmed at its new version. `cyrius deps --verify` reports 61
+  verified and 0 failed, and `cyrius deps --locked` is clean.
+- Suite **129/129** across 9 files, the same as 1.1.4. Lint has 0 `warn ` lines, fmt and vet are
+  clean, and the DCE binary builds and runs.
+- **Local mode.** `CYRIUS_LOCAL=1` built all four overrides from `build/local-deps/`, each reported
+  against the tag CI builds. `lib/` and `cyrius.lock` were byte-identical afterwards.
+- **Not run: `make fidelity` or the checkpoint demos.** The GPT-2 checkpoint is still not staged on
+  the verification host, so the HF-logit gate has not been re-run at this pin or at 1.1.4's.
+
 ## [1.1.4] - 2026-11-09
 
 A toolchain and dependency realign to the cyrius 6.6.20 set. No behavior change.

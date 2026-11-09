@@ -5,7 +5,7 @@ description = "anukulana (अनुकूलन — adaptation) — sovereign Ty
 license = "GPL-3.0-only"
 repository = "https://github.com/MacCracken/anukulana"
 language = "cyrius"
-cyrius = "6.6.20"
+cyrius = "6.7.9"
 
 # anukulana is a reference BINARY (like attn11 / tarka) — no [lib]/distlib.
 [build]
@@ -55,48 +55,49 @@ stdlib = [
     "ganita",
 ]
 
+# Git first (cyrius >= 6.7.6): every build, a dev box's included, resolves each
+# dep's `tag` (commit pin checked in cyrius.lock). A `path` beside `git`/`tag` is
+# a DEV OVERRIDE read only in local mode (`CYRIUS_LOCAL=1`,
+# `CYRIUS_LOCAL=<dep,dep>` or `--local`), which builds from `build/local-deps/`
+# and leaves `lib/` + `cyrius.lock` untouched. Before 6.7.6 the path silently
+# shadowed the tag, so local builds never compiled the pinned code.
+
 # sigil — the sovereign crypto boundary; supplies the ed25519_* that tula's
-# dist/tula.cyr leaves unresolved (the standard consumer-bundle pattern). Local
-# dev resolves via path=../sigil; CI via git+tag.
-# ⚠ `path` SHADOWS `tag` locally, so a stale `tag` is invisible to every local
-# build and test — CI is the only place the pinned code is compiled. 3.12.9
-# (the pin that stood when cyrius moved 6.5.27 -> 6.6.2) still calls `payload()`,
-# deleted at cyrius 6.6.0, so CI failed `undefined function 'payload'` on every
-# job while the local tree was green. 3.12.16 is the 6.6 value-form migration.
-# 3.13.10 is the last sigil tag pinned within 6.6.x (it pins 6.6.18; 3.13.11
-# moves to 6.7.5) — the sigil bundled in cyrius 6.6.20 and the one tula 1.0.3
-# pins. Verify a bump with `path` dropped: the ../sigil checkout runs ahead.
+# dist/tula.cyr leaves unresolved (the standard consumer-bundle pattern).
+# 3.13.15 pins cyrius 6.7.9 and is the sigil tula 1.1.0 pins. The 6.7.9
+# toolchain bundles an older sigil (3.13.11), so builds print a `./lib/ shadows
+# version-pinned …` note; `lib/` holds the declared tag, which is what CI builds.
 [deps.sigil]
 git = "https://github.com/MacCracken/sigil.git"
 path = "../sigil"
-tag = "3.13.10"
+tag = "3.13.15"
 modules = ["dist/sigil.cyr"]
 
 # tula — the sovereign weight-file format (read/write/verify). M1 consumes it to
 # open + enumerate + verify a checkpoint before the foreign safetensors path (M2).
-# 1.0.3 is the tula release built against cyrius 6.6.20.
+# 1.1.0 is the tula release built against cyrius 6.7.9.
 [deps.tula]
 git = "https://github.com/MacCracken/tula.git"
 path = "../tula"
-tag = "1.0.3"
+tag = "1.1.0"
 modules = ["dist/tula.cyr"]
 
 # rosnet — f64 tensors + BLAS-1 + matmul (linear_fwd/linear_bwd, t_alloc/…). M2
 # runs the imported model's forward through it (via rupantara) + LoRA linears.
-# 1.1.3 is the rosnet release built against cyrius 6.6.20 (pulls tyche 1.1.1),
-# and the one rupantara 0.4.4 pins.
+# 1.2.0 is the rosnet release built against cyrius 6.7.9 (pulls tyche 1.2.0),
+# and the one rupantara 0.5.0 pins.
 [deps.rosnet]
 git = "https://github.com/MacCracken/rosnet.git"
 path = "../rosnet"
-tag = "1.1.3"
+tag = "1.2.0"
 modules = ["dist/rosnet.cyr"]
 
 # rupantara — the sovereign transformer FORWARD (ru_model_fwd). M2 maps an
 # imported GPT-2 checkpoint onto rupantara's packed layout and runs it. CPU-only
 # (no mabda/gpu). rosnet MUST be included before rupantara (rupantara calls it).
-# 0.4.4 is the rupantara release built against cyrius 6.6.20.
+# 0.5.0 is the rupantara release built against cyrius 6.7.9.
 [deps.rupantara]
 git = "https://github.com/MacCracken/rupantara.git"
 path = "../rupantara"
-tag = "0.4.4"
+tag = "0.5.0"
 modules = ["dist/rupantara.cyr"]
