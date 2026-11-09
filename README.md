@@ -55,7 +55,8 @@ make bench   # import hot-path benchmarks (docs/benchmarks.md)
 Import a GPT-2-small checkpoint → map onto rupantara's layout → **produce correct
 logits on rosnet**, matched against the reference implementation. That moment is
 the "sovereign AND interoperable" proof — **landed**: HF's greedy stream reproduced
-exactly, logits within fp32 rounding. See the roadmap.
+exactly, logits within fp32 rounding. See the CHANGELOG (0.3.0); what's next is in the
+[roadmap](docs/development/roadmap.md).
 
 ## Ecosystem
 

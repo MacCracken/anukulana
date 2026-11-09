@@ -17,8 +17,8 @@
 #   HF computes the forward in fp32; we compute in f64 over the SAME f32-widened
 #   weights — so the measured diff is HF's own fp32 rounding, not model error.
 #   Bit-exact is therefore impossible by construction; the gate bounds the gap
-#   and pins the argmax stream. Threshold set empirically with margin (see
-#   docs/development/roadmap.md M2).
+#   and pins the argmax stream. Threshold set empirically with margin (the
+#   measurement is at ORACLE_GATE_MAXREL below; CHANGELOG 0.3.0).
 
 fn _orc_magic(): i64 { return 0x315849464B554E41; }   # bytes "ANUKFIX1" as LE u64
 

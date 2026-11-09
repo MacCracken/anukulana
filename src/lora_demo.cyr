@@ -6,7 +6,8 @@
 # the frozen forward. dL/dlogits comes straight from softmax-xent, so the
 # gradient path into A,B is EXACTLY the plan's "two rosnet.linear_bwd passes,
 # no new gradient op": no transformer backward chain is needed (per-layer
-# adapters need one — that chain is attn11's territory, flagged in the roadmap).
+# adapters need one — that chain is attn11's territory: the roadmap's Standing
+# decisions).
 # Because ONLY the adapter trains, f and the base logits are computed ONCE and
 # every step is head-sized (fast), while the 124M base params stay bit-frozen.
 #

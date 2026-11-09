@@ -119,21 +119,9 @@ CHANGELOG.
 
 ## Next
 
-**M3 (LoRA) ✅ CLOSED + M4 (QLoRA/NF4) ✅ CORE COMPLETE — shipped in 0.4.0,
-2026-07-04.** M3: `src/lora.cyr` (fwd/bwd/merge/xent/SGD/**Adam**, FD-gated
-dA+dB entry-by-entry) + `gpt2-lora` head adapter — xent 10.79→0.0000, argmax
-1/8→8/8, base bit-frozen (head-adapter scope accepted by the user; deeper
-adapters would patch **attn11** if ever wanted — allowed except SIMD, which
-cyrius delivers next arc). M4: `src/nf4.cyr` (NF4 codec + double-quant, 8-test
-exactness gate) + `gpt2-qlora` — the whole 124M base at 4 bits (codes 62 MB),
-adapter recovers the task 8/8 over it, codes bit-frozen; 4-bit drift at 124M
-scale reported honestly. Findings: plain SGD diverges on real-GPT-2 features
-(massive-activation outliers → Adam required); the NF4 table's largest gap is
-on the NEGATIVE side. **The persistence bite shipped in 0.5.0** (signed NF4
-checkpoint + adapter via tula, bit-identical round-trips, trust boundary
-gated). **1.0.0 SHIPPED same day** — API frozen, fuzz gate added (2 audit fixes
-in `st_open` folded in), benchmarks + audit + SECURITY.md landed. Post-1.0 =
-maintenance + the additive lane. **The GGUF headline landed 2026-07-05** (see
-Version above) — remaining additive lanes: quantized GGML payloads,
-llama-architecture (TinyLlama-class) mapping, NF4 throughput (SIMD-gated).
-See `roadmap.md`.
+**1.3.x — re-prove on real weights; settle the 1.2.2 surface** ([`roadmap.md`](roadmap.md)): re-run
+the seven real-checkpoint commands (none since 1.1.3) and re-capture the end-to-end benchmarks, add a
+real-weights CI job (tula's ask; a 548 MB download, the maintainer's call) and `--bounds` /
+`--aarch64` CI jobs, and freeze the 1.2.2 helpers. After that: the tula 1.2–1.6 surface (1.4.x),
+`convert` at source precision (1.5.x), rupantara 0.6–0.7 (1.6.x, gated), quantized GGUF (1.7.x) and
+the llama architecture (1.8.x, gated on rupantara).

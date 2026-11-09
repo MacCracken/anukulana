@@ -6,6 +6,19 @@ moving, no API freeze until v1.0).
 
 ## [Unreleased]
 
+### Changed
+
+- **`docs/development/roadmap.md` reorganized.** The shipped milestones (M0–M6, the v1.0 criteria, GGUF,
+  `--sk`, the applied cyrius 6.7.6 note) are gone from it; they live in this CHANGELOG, `state.md` and the
+  audits. The remaining work is grouped by what gates it: 1.3.x (re-prove on real weights, freeze the
+  1.2.2 helpers), 1.4.x (the tula 1.2–1.6 surface), 1.5.x (`convert` at source precision), 1.6.x
+  (rupantara 0.6–0.7, gated), 1.7.x (quantized GGUF payloads), 1.8.x (the llama architecture, gated on
+  rupantara), a 1.x.x later list and a 2.0.0 backlog of the four changes 1.x can't carry. The standing
+  decisions (the head-adapter scope, attn11's backward boundary, NF4 vs tentib) and the discipline rules
+  are kept.
+- Comments in `src/lora.cyr`, `src/lora_demo.cyr` and `src/oracle.cyr`, the README and `state.md` no
+  longer point at the removed roadmap sections.
+
 ## [1.2.2] - 2026-11-09
 
 The P(-1) hardening, optimization and repair sweep, recorded in

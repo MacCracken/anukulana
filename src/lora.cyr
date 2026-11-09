@@ -3,7 +3,7 @@
 #   W' = W + s·(A·B)      s = alpha/r;  A(K,r) gaussian-init, B(r,N) zero-init
 #
 # so at init the adapter contributes EXACTLY zero (B=0) and the base model is
-# untouched. Per the plan (docs/development/roadmap.md M3 + agnosticos
+# untouched. Per the M3 plan (CHANGELOG 0.4.0 + agnosticos
 # type3-weight-import.md): gradients route ONLY into A,B, computed by two
 # ordinary `rosnet.linear_bwd` passes — NO new gradient op. The naive
 # `dL/dA = Bᵀ·dL/dZ` one-liner is wrong (it omits the activation Xᵀ term);
