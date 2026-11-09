@@ -7,6 +7,10 @@ on:
     branches: [main]
   workflow_call:
 
+# Least privilege (1.2.2): no job needs to write.
+permissions:
+  contents: read
+
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
@@ -16,7 +20,9 @@ jobs:
     name: Build & Test
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
 
       - name: Install Cyrius toolchain
         run: |
@@ -38,7 +44,7 @@ jobs:
       - name: Lint
         run: |
           fail=0
-          for f in src/*.cyr tests/tcyr/*.tcyr; do
+          for f in src/*.cyr tests/tcyr/*.tcyr tests/common.cyr tests/anukulana.bcyr; do
             [ -e "$f" ] || continue
             out=$(cyrius lint "$f" 2>&1 || true)
             echo "$out"
@@ -51,7 +57,7 @@ jobs:
       - name: Format check
         run: |
           fail=0
-          for f in src/*.cyr tests/tcyr/*.tcyr; do
+          for f in src/*.cyr tests/tcyr/*.tcyr tests/common.cyr tests/anukulana.bcyr; do
             [ -e "$f" ] || continue
             if ! cyrius fmt "$f" --check > /dev/null 2>&1; then
               echo "needs fmt: $f"; fail=1
@@ -75,11 +81,25 @@ jobs:
         run: |
           for f in tests/tcyr/*.tcyr; do cyrius test "$f" || exit 1; done
 
+      - name: Docs check (every public fn documented)
+        run: cyrius doc --check src/*.cyr
+
+      - name: Benchmarks (import hot paths; numbers in docs/benchmarks.md)
+        run: cyrius bench tests/anukulana.bcyr
+
+      - name: Run the binary
+        run: |
+          ./build/anukulana version
+          ./build/anukulana > /dev/null
+          if ./build/anukulana no-such-command 2> /dev/null; then echo "unknown command must fail"; exit 1; fi
+
   security:
     name: Security Scan
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
       - name: Scan for dangerous patterns
         run: |
           FAIL=0
@@ -103,7 +123,9 @@ jobs:
     name: Documentation
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
       - name: Check required files
         run: |
           MISSING=0

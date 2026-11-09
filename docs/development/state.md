@@ -1,9 +1,24 @@
 # anukulana — Current State
 
-> **Last refresh**: 2026-07-05 | **Cadence**: every release.
+> **Last refresh**: 2026-11-09 (1.2.2) | **Cadence**: every release.
 > `CLAUDE.md` is preferences/process; this file is volatile state.
 
 ## Version
+
+**1.2.2 — 2026-11-09 (the P(-1) hardening, optimization and repair sweep).**
+[`docs/audit/2026-11-09-audit.md`](../audit/2026-11-09-audit.md): two HIGH
+hostile-file crashes fixed (a safetensors shape never compared with its payload;
+a GGUF weight overflowing a heap scratch), six MEDIUM (GGUF dim wrap and KV
+width, unchecked tensors in signed files, count-not-shape mapping checks, the
+operator-key file, the per-token decode allocation), LOW hygiene, CI hardening.
+Import hot paths 1.4–2.4× faster, bit-identical. Suite **219** (was 139), green
+plain, `--bounds` and `--aarch64`; 15/15 mutants killed.
+
+**1.1.2 → 1.2.1 (2026-08-18 → 2026-11-09): toolchain and dependency realigns.**
+6.3.31 → 6.5.27 → 6.6.2 → 6.6.20 → 6.7.9 (git-first deps) → 6.7.18, each with
+its dependency set; 1.2.1 added rupantara's `ru_cfg_check` at every config built
+from a file (a `head_count = 0` GGUF crashed with SIGFPE through 1.2.0). See the
+CHANGELOG for each step.
 
 **1.1.1 — RELEASED 2026-07-05 (`--sk` operator-key signing — ifran Lane 2
 closes).** `gpt2-tula … --sk <operator.sk>` signs the NF4 checkpoint + adapter
@@ -73,23 +88,16 @@ exactly).** The M2 arc landed across 0.2.0 + 0.3.0:
   1.05e-6** (fp32-rounding scale); gate frozen at **maxrel ≤ 1e-5** + exact
   argmax + NaN-free. `make fidelity`.
 
-Suite **129**; lint/fmt clean. Released: **0.1.0 · 0.2.0 · 0.3.0 · 0.4.0 · 0.5.0 · 1.0.0 · 1.1.0 · 1.1.1**.
+Suite **219** (1.2.2); lint/fmt/vet/doc clean. Every version since 0.1.0 is in the CHANGELOG.
 
 ## Toolchain
 
-Cyrius pin **6.5.27** (`cyrius.cyml`; **bumped 6.3.31 -> 6.5.27 on 2026-08-17**,
-ML/AI-arc realign; previously 6.3.27→6.3.31 at 0.2.0 to pick up the re-folded
-ganita `f64_tanh` fix). ⚠ The bump was **not** cosmetic — at 6.3.31 the whole
-suite was **0 passed / 9 failed**, every file a compile error, and the bump plus
-one source rename is what made it green again (9/9, 129 assertions):
-`lib sync --full` supplied `thread_local_alloc` (stdlib v6.4.65, which the
-vendored `sigil` already called), and bayan 1.4.1's rename forced
-`src/safetensors.cyr` off `bayan_json_v_parse_str` onto **`bayan_json_v_parse_buf`**
-— the same (buf, len) signature. That rename is deliberate upstream: while the
-cstr+len form held the `_str` name, Cyrius's `X(a, ...)` -> `X_str` overload
-dispatch silently rewrote every `bayan_json_v_parse(someStr)` in the ecosystem
-into a 1-arg call that returned 0 for valid JSON. Deps wired: `sigil` + `tula` + `rosnet` +
-`rupantara` (+ stdlib bayan/math/ganita).
+Cyrius pin and dependency tags: see `cyrius.cyml` (1.2.2: cyrius 6.7.18 with sigil
+3.13.15, tula 1.6.1, rosnet 1.4.1, rupantara 0.5.3; tyche 1.2.2 transitively).
+Since 6.7.6 every build resolves the tags (git first); the `path = "../x"` lines
+are dev overrides used only under `CYRIUS_LOCAL=1`. The history of each pin move,
+including the 6.5.27 bump that took the suite from 0/9 to 9/9, is in the
+CHANGELOG.
 
 ## Build artifacts
 
@@ -100,10 +108,12 @@ into a 1-arg call that returned 0 for valid JSON. Deps wired: `sigil` + `tula` +
 
 ## Cross-repo status
 
-- **tula** — released 1.0.0 (format frozen). anukulana **M1 DONE** (consumed).
-- **rupantara** — released 0.4.0 (forward + KV-cache decode, parity-proven).
-  Consumed by the import path; **M2 DONE** on it.
-- **rosnet 0.2.0 / sigil 3.9.9+** — consumed (tensors / signature verify).
+- **tula 1.6.1** (format v1 frozen) — anukulana **M1 DONE** (consumed); 1.2.2 uses
+  its strict validator on every signed file it reads.
+- **rupantara 0.5.3** (forward + KV-cache decode, validated entries) — consumed by
+  the import path; **M2 DONE** on it. 1.2.2 decodes on its allocation-free `_s`
+  entries, closing the cross-repo item its 2026-11-09 audit filed.
+- **rosnet 1.4.1 / sigil 3.13.15** — consumed (tensors / Ed25519).
 - **akshara** — not yet wired (the oracle uses integer token patterns; a real
   tokenizer enters with the LoRA fine-tune data path if needed).
 

@@ -2,7 +2,8 @@
 #
 #   make build   — build the binary (src/main.cyr -> build/anukulana)
 #   make test    — CPU test suites (tests/tcyr/*.tcyr)
-#   make lint / fmt-check / vet  — quality gates
+#   make lint / fmt-check / vet / doc  — quality gates (doc: every public fn documented)
+#   make bench   — import hot-path benchmarks (tests/anukulana.bcyr; docs/benchmarks.md)
 #   make clean   — scrub build/
 
 CYRIUS ?= cyrius
@@ -34,7 +35,7 @@ fidelity: build
 .PHONY: lint
 lint:
 	@fail=0; \
-	for f in src/*.cyr tests/tcyr/*.tcyr; do \
+	for f in src/*.cyr tests/tcyr/*.tcyr tests/common.cyr tests/anukulana.bcyr; do \
 		out=$$($(CYRIUS) lint $$f 2>&1); echo "$$out"; \
 		echo "$$out" | grep -qE '^\s*warn ' && fail=1; \
 	done; \
@@ -43,7 +44,7 @@ lint:
 .PHONY: fmt-check
 fmt-check:
 	@fail=0; \
-	for f in src/*.cyr tests/tcyr/*.tcyr; do \
+	for f in src/*.cyr tests/tcyr/*.tcyr tests/common.cyr tests/anukulana.bcyr; do \
 		if ! $(CYRIUS) fmt $$f --check > /dev/null 2>&1; then \
 			echo "needs fmt: $$f"; fail=1; \
 		fi; \
@@ -53,6 +54,14 @@ fmt-check:
 .PHONY: vet
 vet:
 	$(CYRIUS) vet src/main.cyr
+
+.PHONY: doc
+doc:
+	$(CYRIUS) doc --check src/*.cyr
+
+.PHONY: bench
+bench: check-lib-wiring
+	$(CYRIUS) bench tests/anukulana.bcyr
 
 .PHONY: clean
 clean:

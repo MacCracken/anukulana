@@ -6,6 +6,27 @@
 > (rosnet/rupantara). Wall-clock via `time`, one representative run each —
 > re-capture on toolchain or hardware change.
 
+## Import hot paths — `make bench` (1.2.2, 2026-11-09)
+
+`tests/anukulana.bcyr` times the import's inner loops on synthetic, f32-exact data, so it needs no
+checkpoint. Same host and session, cyrius 6.7.18, median of 3 runs. 1.2.2's outputs are bit-identical to
+1.2.1's (held by `tests/tcyr/safetensors.tcyr`'s widener-equivalence test and the round-trip suites).
+
+| Bench | 1.2.1 | 1.2.2 | |
+|---|---|---|---|
+| `st_read_f64 F32 n=1M` | 12.862 ms | 5.598 ms | 2.30× |
+| `st_read_f64 F16 n=1M` | 11.185 ms | 8.199 ms | 1.36× |
+| `gg_read_f64 F32 n=1M` | 8.208 ms | 5.499 ms | 1.49× |
+| `anuk_gpt2_pack F32 V=2048 C=128 T=64 NL=4` (1.06M params) | 13.708 ms | 5.711 ms | 2.40× |
+| `anuk_ggpt2_pack F32 V=2048 C=128 T=64 NL=4` | 14.325 ms | 8.033 ms | 1.78× |
+| `nf4_dq_pack nb=64k` (unchanged code) | 0.417 ms | 0.410 ms | — |
+| `nf4_dq_unpack nb=64k` (unchanged code) | 0.264 ms | 0.273 ms | — |
+
+What moved: one `load32` per f32 instead of four byte loads; bulk widen loops that rebias normal numbers
+inline; the safetensors fused QKV split straight into place and `wpe` read to T rows; GGUF transposes that
+widen each element once (QKV was widened three times). The end-to-end numbers below predate this and have
+not been re-captured (no checkpoint on the 1.2.2 host); import was about 3.5 s of each command then.
+
 ## The v1.0 numbers (end-to-end CLI commands)
 
 | Command | Wall | What it covers |

@@ -108,12 +108,124 @@ fn test_parse(): i64 {
     return 0;
 }
 
+# a raw safetensors image: [u64 hlen][js][plen zero bytes]
+fn _st_raw(js, plen, out_len): i64 {
+    var hlen = strlen(js);
+    var total = 8 + hlen + plen;
+    var buf = alloc(total + 8);
+    _put_u64_le(buf, hlen);
+    _copy(buf + 8, js, hlen);
+    store64(out_len, total);
+    return buf;
+}
+fn _st_try(js, plen): i64 {
+    var lp = alloc(8);
+    var b = _st_raw(js, plen, lp);
+    return st_open(b, load64(lp));
+}
+
+# 1.2.2: a fixed-width tensor's shape must match its payload exactly, and every
+# dim must be a non-negative integer whose product can't wrap
+fn test_shape_payload(): i64 {
+    assert_eq(_st_try("{\"w\":{\"dtype\":\"F32\",\"shape\":[100000000],\"data_offsets\":[0,4]}}", 4), 0,
+      "shape [1e8] over 4 payload bytes rejected");
+    assert_eq(_st_try("{\"w\":{\"dtype\":\"F32\",\"shape\":[2],\"data_offsets\":[0,4]}}", 4), 0,
+      "F32 [2] over 4 bytes (short) rejected");
+    assert_eq(_st_try("{\"w\":{\"dtype\":\"F32\",\"shape\":[2],\"data_offsets\":[0,12]}}", 12), 0,
+      "F32 [2] over 12 bytes (long) rejected");
+    assert_nonnull(_st_try("{\"w\":{\"dtype\":\"F32\",\"shape\":[2],\"data_offsets\":[0,8]}}", 8),
+      "F32 [2] over 8 bytes accepted");
+    assert_eq(_st_try("{\"w\":{\"dtype\":\"F32\",\"shape\":[2.5],\"data_offsets\":[0,8]}}", 8), 0,
+      "non-integer dim rejected");
+    assert_eq(_st_try("{\"w\":{\"dtype\":\"F32\",\"shape\":[\"2\"],\"data_offsets\":[0,8]}}", 8), 0,
+      "string dim rejected");
+    assert_eq(_st_try("{\"w\":{\"dtype\":\"F32\",\"shape\":[-2],\"data_offsets\":[0,8]}}", 8), 0,
+      "negative dim rejected");
+    assert_eq(_st_try("{\"w\":{\"dtype\":\"F32\",\"shape\":[2],\"data_offsets\":[0.0,8]}}", 8), 0,
+      "non-integer offset rejected");
+    assert_eq(_st_try("{\"w\":{\"dtype\":\"U8\",\"shape\":[1099511627776,1099511627776],\"data_offsets\":[0,0]}}", 0),
+      0, "a dim product that would wrap rejected");
+    assert_nonnull(_st_try("{\"m\":{\"dtype\":\"U8\",\"shape\":[3],\"data_offsets\":[0,3]}}", 3),
+      "U8 [3] over 3 bytes accepted");
+    assert_eq(_st_try("{\"m\":{\"dtype\":\"U8\",\"shape\":[3],\"data_offsets\":[0,4]}}", 4), 0,
+      "U8 [3] over 4 bytes rejected (sizes checked for dtypes that aren't read)");
+    var r = _st_try("{\"q\":{\"dtype\":\"F4\",\"shape\":[5],\"data_offsets\":[0,3]}}", 3);
+    assert_nonnull(r, "a sub-byte dtype (no size contract) is still listed");
+    assert_eq(st_read_f64(r, st_entry(r, 0), alloc(64)), 0 - 1, "and refuses to read");
+    return 0;
+}
+
+fn test_range_read(): i64 {
+    var lenbox = alloc(8);
+    var blob = _build_blob(lenbox);
+    var r = st_open(blob, load64(lenbox));
+    var ew = st_find(r, "w");
+    assert_eq(st_entry_dim(ew, 2), 0, "st_entry_dim past ndim is 0");
+    assert_eq(st_entry_dim(ew, 0 - 1), 0, "st_entry_dim(-1) is 0");
+    assert_eq(st_entry_nbytes(ew), 32, "st_entry_nbytes = data_offsets span");
+    var out = alloc(4 * 8);
+    assert_eq(st_read_f64_range(r, ew, 1, 2, out), 0, "range [1, 3) of w reads");
+    assert_eq(load64(out), f64_from(2), "w[1] = 2");
+    assert_eq(load64(out + 8), f64_from(3), "w[2] = 3");
+    assert_eq(st_read_f64_range(r, ew, 3, 2, out), 0 - 1, "range past the end refused");
+    assert_eq(st_read_f64_range(r, ew, 0 - 1, 1, out), 0 - 1, "negative start refused");
+    var eb = st_find(r, "b");
+    assert_eq(st_read_f64_range(r, eb, 2, 1, out), 0, "F32 range read");
+    assert_eq(load64(out), f64_from(0 - 1), "b[2] = -1 via the bulk widener");
+    return 0;
+}
+
+# 1.2.2: the bulk wideners give the reference wideners' bits, every class
+fn test_bulk_wideners(): i64 {
+    var n = 65536;
+    var src = alloc(n * 4);
+    var dst = alloc(n * 8);
+    var i = 0;
+    while (i < n) { store8(src + i * 2, i & 0xFF); store8(src + i * 2 + 1, (i >> 8) & 0xFF); i = i + 1; }
+    _st_widen_f16(src, dst, n);
+    var bad = 0;
+    i = 0;
+    while (i < n) { if (load64(dst + i * 8) != _st_f16_to_f64(i)) { bad = bad + 1; } i = i + 1; }
+    assert_eq(bad, 0, "f16 bulk widen == reference for all 65536 patterns");
+    _st_widen_bf16(src, dst, n);
+    bad = 0;
+    i = 0;
+    while (i < n) { if (load64(dst + i * 8) != _st_bf16_to_f64(i)) { bad = bad + 1; } i = i + 1; }
+    assert_eq(bad, 0, "bf16 bulk widen == reference for all 65536 patterns");
+    # f32: a stride-4093 sweep of the whole space plus every class edge
+    var m = 1048576 + 16;
+    var s32 = alloc(m * 4);
+    var d32 = alloc(m * 8);
+    var pat = alloc(m * 8);
+    i = 0;
+    while (i < 1048576) { store64(pat + i * 8, (i * 4093) & 0xFFFFFFFF); i = i + 1; }
+    var edges = alloc(16 * 8);
+    store64(edges, 0); store64(edges + 8, 0x80000000); store64(edges + 16, 1); store64(edges + 24, 0x807FFFFF);
+    store64(edges + 32, 0x00800000); store64(edges + 40, 0x7F7FFFFF); store64(edges + 48, 0x7F800000);
+    store64(edges + 56, 0xFF800000); store64(edges + 64, 0x7FC00000); store64(edges + 72, 0x7F800001);
+    store64(edges + 80, 0xFFFFFFFF); store64(edges + 88, 0x3F800000); store64(edges + 96, 0x00400000);
+    store64(edges + 104, 0xFF7FFFFF); store64(edges + 112, 0x80800000); store64(edges + 120, 0x7FFFFFFF);
+    i = 0;
+    while (i < 16) { store64(pat + (1048576 + i) * 8, load64(edges + i * 8)); i = i + 1; }
+    i = 0;
+    while (i < m) { _put_u32_le(s32 + i * 4, load64(pat + i * 8)); i = i + 1; }
+    _st_widen_f32(s32, d32, m);
+    bad = 0;
+    i = 0;
+    while (i < m) { if (load64(d32 + i * 8) != _st_f32_to_f64(load64(pat + i * 8))) { bad = bad + 1; } i = i + 1; }
+    assert_eq(bad, 0, "f32 bulk widen == reference (1M-pattern sweep + 16 class edges)");
+    return 0;
+}
+
 fn main(): i64 {
     alloc_init();
     test_wideners();
     test_parse();
+    test_shape_payload();
+    test_range_read();
+    test_bulk_wideners();
     return assert_summary();
 }
 
 var rc = main();
-syscall(60, rc);
+sys_exit(rc);

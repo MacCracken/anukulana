@@ -27,11 +27,99 @@ fn _lora_xor_checksum(p, n): i64 {
     return h;
 }
 
+# ---- the head adapter shared by gpt2-lora / gpt2-qlora / gpt2-tula (1.2.2) ----
+# One copy of what the three demos each held through 1.2.1: the adapter A (C, r)
+# and B (r, V), its forward/backward scratch and Adam state, and the 800-step
+# training loop. Same operations in the same order as each 1.2.1 copy, so the
+# trained adapter is bit-identical (tests/tcyr/lora.tcyr holds it to a verbatim
+# copy of the old loop).
+#
+# Record (i64 slots): T C V r | A B | u t y probs dy dA dB dys du dxs | mA vA mB vB
+fn _had(ad, k): i64 { return load64(ad + k * 8); }
+
+# A new adapter for T rows of C features onto V logits at rank r: A ~ N(0, 0.02²)
+# from tyche seeded with 20260704, B = 0 (so it starts as an exact no-op).
+fn anuk_head_adapter_new(T, C, V, r): i64 {
+    var ad = alloc(20 * 8);
+    store64(ad, T); store64(ad + 8, C); store64(ad + 16, V); store64(ad + 24, r);
+    rng_seed(20260704);
+    var A = t_alloc(C * r);
+    var B = t_alloc(r * V);
+    lora_init(A, B, C, r, V, f64_div(f64_from(2), f64_from(100)));   # std 0.02
+    store64(ad + 4 * 8, A);
+    store64(ad + 5 * 8, B);
+    store64(ad + 6 * 8, t_alloc(T * r));     # u
+    store64(ad + 7 * 8, t_alloc(T * V));     # t
+    store64(ad + 8 * 8, t_alloc(T * V));     # y
+    store64(ad + 9 * 8, t_alloc(T * V));     # probs
+    store64(ad + 10 * 8, t_alloc(T * V));    # dy
+    store64(ad + 11 * 8, t_alloc(C * r));    # dA
+    store64(ad + 12 * 8, t_alloc(r * V));    # dB
+    store64(ad + 13 * 8, t_alloc(T * V));    # dys
+    store64(ad + 14 * 8, t_alloc(T * r));    # du
+    store64(ad + 15 * 8, t_alloc(T * C));    # dxs
+    store64(ad + 16 * 8, t_alloc(C * r));    # mA
+    store64(ad + 17 * 8, t_alloc(C * r));    # vA
+    store64(ad + 18 * 8, t_alloc(r * V));    # mB
+    store64(ad + 19 * 8, t_alloc(r * V));    # vB
+    return ad;
+}
+# The adapter's A (C, r).
+fn anuk_head_adapter_a(ad): i64 { return _had(ad, 4); }
+# The adapter's B (r, V).
+fn anuk_head_adapter_b(ad): i64 { return _had(ad, 5); }
+
+# y = base + s·(f·A)·B into the adapter's y buffer, for any A, B of its shape
+# (the reload check runs a loaded pair). Returns y (T x V).
+fn anuk_head_adapter_fwd_with(ad, f, base, A, B, s): i64 {
+    var T = _had(ad, 0); var C = _had(ad, 1); var V = _had(ad, 2); var r = _had(ad, 3);
+    var y = _had(ad, 8);
+    t_copy(y, base, T * V);
+    lora_fwd(f, A, B, _had(ad, 6), _had(ad, 7), y, T, C, r, V, s);
+    return y;
+}
+# The same with the adapter's own A, B.
+fn anuk_head_adapter_fwd(ad, f, base, s): i64 {
+    return anuk_head_adapter_fwd_with(ad, f, base, _had(ad, 4), _had(ad, 5), s);
+}
+
+# Train `steps` Adam steps (lr) of softmax cross-entropy toward targets, the base
+# logits fixed. Prints the loss every `every` steps when every > 0. Stores the
+# step-0 loss at loss0_out; returns the last step's loss.
+fn anuk_head_adapter_train(ad, f, base, targets, s, steps, lr, every, loss0_out): i64 {
+    var T = _had(ad, 0); var C = _had(ad, 1); var V = _had(ad, 2); var r = _had(ad, 3);
+    var A = _had(ad, 4); var B = _had(ad, 5);
+    var u = _had(ad, 6); var y = _had(ad, 8); var probs = _had(ad, 9); var dy = _had(ad, 10);
+    var dA = _had(ad, 11); var dB = _had(ad, 12);
+    var loss = f64_from(0);
+    var step = 0;
+    while (step < steps) {
+        anuk_head_adapter_fwd(ad, f, base, s);
+        loss = lora_xent_loss(y, probs, targets, T, V);
+        if (step == 0) { store64(loss0_out, loss); }
+        if (every > 0 && (step % every) == 0) {
+            _anuk_sput("  step "); _anuk_puti(step);
+            _anuk_sput(" loss "); fmt_float(loss, 4); _anuk_sput("\n");
+        }
+        lora_xent_bwd(probs, targets, dy, T, V);
+        t_zero(dA, C * r);
+        t_zero(dB, r * V);
+        lora_bwd(f, u, A, B, dy, dA, dB, _had(ad, 13), _had(ad, 14), _had(ad, 15), T, C, r, V, s);
+        lora_adam(A, dA, _had(ad, 16), _had(ad, 17), C * r, lr, step + 1);
+        lora_adam(B, dB, _had(ad, 18), _had(ad, 19), r * V, lr, step + 1);
+        step = step + 1;
+    }
+    return loss;
+}
+
 # Frozen forward, once: run embed -> NL blocks -> final LN over `tokens` and
 # return f(T,C) — the features the head adapter trains over. Pure composition of
 # rupantara's public ops (allocates its own scratch; fine for a once-per-run
 # call). Shared by gpt2-lora and gpt2-qlora.
 fn anuk_frozen_features(cfg, params, tokens, T): i64 {
+    # these are rupantara's leaf kernels, which take dims on trust: check once
+    # (1.2.2; every caller passes an already-checked cfg)
+    if (ru_cfg_check(cfg) != RU_OK()) { return 0; }
     var C = _cfg_C(cfg);
     var NL = _cfg_NL(cfg);
     var TC = T * C;
@@ -59,11 +147,13 @@ fn anuk_frozen_features(cfg, params, tokens, T): i64 {
     return f;
 }
 
+# `gpt2-lora <model.safetensors>`: train the head adapter over the frozen f64
+# import. Returns 0 on PASS, 1 otherwise.
 fn anuk_gpt2_lora(path): i64 {
     var cfg = alloc(64);
     var T = 8;
     var params = anuk_gpt2_import(path, 12, T, cfg);
-    if (params == 0) { _anuk_sput("lora: import failed (open / infer / pack)\n"); return 1; }
+    if (params == 0) { _anuk_eput("lora: import failed (open / infer / pack)\n"); return 1; }
     var V = _cfg_V(cfg);
     var C = _cfg_C(cfg);
     var NL = _cfg_NL(cfg);
@@ -75,94 +165,44 @@ fn anuk_gpt2_lora(path): i64 {
     _anuk_sput(" T="); _anuk_puti(T); _anuk_sput("\n");
 
     # fixed input (the gpt2 command's pattern) + next-token targets
-    var tokens = alloc(T * 8);
-    var i = 0;
-    while (i < T) { store64(tokens + i * 8, (i * 137 + 11) % V); i = i + 1; }
-    var targets = alloc(T * 8);
-    i = 0;
-    while (i < T - 1) { store64(targets + i * 8, load64(tokens + (i + 1) * 8)); i = i + 1; }
-    store64(targets + (T - 1) * 8, load64(tokens));
+    var tokens = anuk_demo_tokens(T, V);
+    var targets = anuk_demo_targets(tokens, T);
 
     # ---- frozen forward, ONCE: f = final-LN output; base logits = head(f) ----
-    var TC = T * C;
     var f = anuk_frozen_features(cfg, params, tokens, T);
     var base_logits = t_alloc(T * V);
     ru_head_fwd(f, _p_tokemb(params), base_logits, T, C, V);
 
     # baseline: how many positions does the FROZEN model already predict?
-    var match0 = 0;
-    i = 0;
-    while (i < T) {
-        if (ru_argmax(base_logits + i * V * 8, V) == load64(targets + i * 8)) { match0 = match0 + 1; }
-        i = i + 1;
-    }
+    var match0 = anuk_argmax_matches(base_logits, targets, T, V);
 
     # ---- the adapter: A(C,r) gaussian, B(r,V) zero; s = alpha/r ---------------
     var r = 8;
     var s = f64_from(2);                                  # alpha = 16, r = 8
-    rng_seed(20260704);
-    var A = t_alloc(C * r);
-    var B = t_alloc(r * V);
-    lora_init(A, B, C, r, V, f64_div(f64_from(2), f64_from(100)));   # std 0.02
-    var u = t_alloc(T * r);
-    var t = t_alloc(T * V);
-    var y = t_alloc(T * V);
-    var probs = t_alloc(T * V);
-    var dy = t_alloc(T * V);
-    var dA = t_alloc(C * r);
-    var dB = t_alloc(r * V);
-    var dys = t_alloc(T * V);
-    var du = t_alloc(T * r);
-    var dxs = t_alloc(TC);
+    var ad = anuk_head_adapter_new(T, C, V, r);
 
     # adapter-off sanity: B=0 => logits bit-identical to base
-    t_copy(y, base_logits, T * V);
-    lora_fwd(f, A, B, u, t, y, T, C, r, V, s);
+    var y = anuk_head_adapter_fwd(ad, f, base_logits, s);
     var offdiffs = 0;
-    i = 0;
+    var i = 0;
     while (i < T * V) { if (load64(y + i * 8) != load64(base_logits + i * 8)) { offdiffs = offdiffs + 1; } i = i + 1; }
     _anuk_sput("adapter-off logits vs base: diffs="); _anuk_puti(offdiffs); _anuk_sput("\n");
 
-    # ---- train: SGD on A,B only (f + base logits are fixed) -------------------
-    # Adam state (plain SGD diverges here — the real f carries massive-activation
-    # outlier dims; see lora_adam's header)
-    var mA = t_alloc(C * r); var vA = t_alloc(C * r);
-    var mB = t_alloc(r * V); var vB = t_alloc(r * V);
+    # ---- train: Adam on A,B only (f + base logits are fixed) ------------------
+    # (plain SGD diverges here — the real f carries massive-activation outlier
+    # dims; see lora_adam's header)
     var steps = 800;
     var lr = f64_div(f64_from(1), f64_from(100));         # 1e-2 (Adam)
-    var loss0 = f64_from(0);
-    var loss = f64_from(0);
-    var step = 0;
-    while (step < steps) {
-        t_copy(y, base_logits, T * V);
-        lora_fwd(f, A, B, u, t, y, T, C, r, V, s);
-        loss = lora_xent_loss(y, probs, targets, T, V);
-        if (step == 0) { loss0 = loss; }
-        if ((step % 200) == 0) {
-            _anuk_sput("  step "); _anuk_puti(step);
-            _anuk_sput(" loss "); fmt_float(loss, 4); _anuk_sput("\n");
-        }
-        lora_xent_bwd(probs, targets, dy, T, V);
-        t_zero(dA, C * r);
-        t_zero(dB, r * V);
-        lora_bwd(f, u, A, B, dy, dA, dB, dys, du, dxs, T, C, r, V, s);
-        lora_adam(A, dA, mA, vA, C * r, lr, step + 1);
-        lora_adam(B, dB, mB, vB, r * V, lr, step + 1);
-        step = step + 1;
-    }
+    var loss0p = alloc(8);
+    var loss = anuk_head_adapter_train(ad, f, base_logits, targets, s, steps, lr, 200, loss0p);
+    var loss0 = load64(loss0p);
     _anuk_sput("xent loss: step0 "); fmt_float(loss0, 4);
     _anuk_sput(" -> step"); _anuk_puti(steps);
     _anuk_sput(" "); fmt_float(loss, 4); _anuk_sput("\n");
 
     # ---- after: greedy argmax vs targets --------------------------------------
-    t_copy(y, base_logits, T * V);
-    lora_fwd(f, A, B, u, t, y, T, C, r, V, s);
-    var match1 = 0;
-    i = 0;
-    while (i < T) {
-        if (ru_argmax(y + i * V * 8, V) == load64(targets + i * 8)) { match1 = match1 + 1; }
-        i = i + 1;
-    }
+    y = anuk_head_adapter_fwd(ad, f, base_logits, s);
+    var match1 = anuk_argmax_matches(y, targets, T, V);
     var ck1 = _lora_xor_checksum(params, np);
     _anuk_sput("greedy argmax == target: base "); _anuk_puti(match0);
     _anuk_sput("/"); _anuk_puti(T);

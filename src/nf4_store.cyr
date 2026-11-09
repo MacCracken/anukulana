@@ -9,68 +9,119 @@
 # data is discrete — nothing may drift on disk).
 #
 # Checkpoint layout (names ≤ 47 chars):
-#   "cfg"                 F64  [8]    V,C,T,nh,nkv,NL,F,tie — as f64_from ints
+#   "cfg"                 F64  [8]    V,C,T,nh,nkv,NL,F,attn_bias — as f64_from ints
 #   "base.nf4"            NF4  [np]   packed codes (2/byte)
 #   "base.nf4.scale.q8"   INT8 [nb]   double-quantized per-block scales (0..127)
 #   "base.nf4.scale.sup"  F64  [nsb]  per-superblock scale absmax
 # Adapter layout:
 #   "lora.A"    F64 [C,r]   ·   "lora.B"    F64 [r,V]   ·
 #   "lora.meta" F64 [2] = (s, r)
+#
+# Loading (1.2.2): a file is accepted only if it passes tula's strict validator
+# (every payload exactly its dtype x shape, no duplicate names, canonical layout),
+# its Ed25519 signature verifies, and every tensor read has exactly the dtype and
+# shape above. Through 1.2.1 only the dims of some tensors were compared, so a
+# signed file with a 1-element "lora.meta", an INT8 "lora.A" or a short
+# "base.nf4.scale.sup" was read past its payload.
 
 fn _nfs_shp1(a): i64 { var s = alloc(8); store64(s, a); return s; }
 fn _nfs_shp2(a, b): i64 { var s = alloc(16); store64(s, a); store64(s + 8, b); return s; }
 
+# The entry `name` if it has exactly `dtype` and shape [d0] (d1 < 0) or [d0, d1];
+# d0 < 0 accepts any length for a rank-1 tensor. Otherwise 0.
+fn _nfs_tensor(r, name, dtype, d0, d1): i64 {
+    var e = tula_find(r, name);
+    if (e == 0) { return 0; }
+    if (tula_entry_dtype(e) != dtype) { return 0; }
+    if (d1 < 0) {
+        if (tula_entry_ndim(e) != 1) { return 0; }
+        if (d0 >= 0) { if (tula_entry_dim(e, 0) != d0) { return 0; } }
+        return e;
+    }
+    if (tula_entry_ndim(e) != 2) { return 0; }
+    if (tula_entry_dim(e, 0) != d0) { return 0; }
+    if (tula_entry_dim(e, 1) != d1) { return 0; }
+    return e;
+}
+
+# Open-time checks shared by both loaders: strict structure, then the signature.
+# Returns 0 when the reader may be used, else -1 (with a message).
+fn _nfs_check(r, pk, who): i64 {
+    if (tula_validate_strict(r, tula_total_len(r)) != TULA_OK) {
+        _anuk_eput(who); _anuk_eput(": strict validation failed\n");
+        return 0 - 1;
+    }
+    if (tula_verify(r, pk) != TULA_SIG_OK) {
+        _anuk_eput(who); _anuk_eput(": signature REJECTED\n");
+        return 0 - 1;
+    }
+    return 0;
+}
+
 # ---- save the NF4-quantized base as a signed .tula --------------------------
 # Quantizes params(np f64) through the FULL pipeline (tula NF4 pack -> local
-# double-quant) and writes a signed checkpoint. Returns 0, or -1 on any failure.
+# double-quant) and writes a signed checkpoint. Returns 0, or -1 on any failure
+# (1.2.2: including a cfg rupantara rejects). The quantization buffers are
+# unmapped before returning.
 fn anuk_nf4_save(path, cfg, params, sk): i64 {
+    if (ru_cfg_check(cfg) != RU_OK()) { return 0 - 1; }
     var np = ru_params_count(cfg);
     var bs = NF4_BS();
     var nb = tula_nf4_blocks(np, bs);
     var nsb = (nb + NF4_SBS() - 1) / NF4_SBS();
-    var nibbles = mmap_anon(tula_nf4_bytes(np));
+    var nbytes = tula_nf4_bytes(np);
+    var nibbles = mmap_anon(nbytes);
     var scales = mmap_anon(nb * 8);
-    if (nibbles == 0) { return 0 - 1; }
-    if (scales == 0) { return 0 - 1; }
-    tula_nf4_pack(params, np, bs, scales, nibbles);
     var q8 = mmap_anon(nb);
-    var supers = t_alloc(nsb);
-    if (q8 == 0) { return 0 - 1; }
-    nf4_dq_pack(scales, nb, q8, supers);
-    var cfgv = t_alloc(8);
-    store64(cfgv + 0 * 8, f64_from(_cfg_V(cfg)));
-    store64(cfgv + 1 * 8, f64_from(_cfg_C(cfg)));
-    store64(cfgv + 2 * 8, f64_from(_cfg_T(cfg)));
-    store64(cfgv + 3 * 8, f64_from(_cfg_nh(cfg)));
-    store64(cfgv + 4 * 8, f64_from(_cfg_nkv(cfg)));
-    store64(cfgv + 5 * 8, f64_from(_cfg_NL(cfg)));
-    store64(cfgv + 6 * 8, f64_from(_cfg_F(cfg)));
-    store64(cfgv + 7 * 8, f64_from(1));
-    var b = tula_builder_new();
-    tula_builder_add(b, "cfg", TULA_DT_F64, _nfs_shp1(8), 1, cfgv, 64);
-    tula_builder_add(b, "base.nf4", TULA_DT_NF4, _nfs_shp1(np), 1, nibbles, tula_nf4_bytes(np));
-    tula_builder_add(b, "base.nf4.scale.q8", TULA_DT_INT8, _nfs_shp1(nb), 1, q8, nb);
-    tula_builder_add(b, "base.nf4.scale.sup", TULA_DT_F64, _nfs_shp1(nsb), 1, supers, nsb * 8);
-    var buf = tula_builder_finish_signed(b, sk);
-    if (buf == 0) { return 0 - 1; }
-    var total = tula_total_len(buf);
-    if (tula_write_file(path, buf, total) != total) { return 0 - 1; }
-    return 0;
+    var rc = 0 - 1;
+    if (nibbles != 0 && scales != 0 && q8 != 0) {
+        tula_nf4_pack(params, np, bs, scales, nibbles);
+        var supers = t_alloc(nsb);
+        nf4_dq_pack(scales, nb, q8, supers);
+        var cfgv = t_alloc(8);
+        store64(cfgv + 0 * 8, f64_from(_cfg_V(cfg)));
+        store64(cfgv + 1 * 8, f64_from(_cfg_C(cfg)));
+        store64(cfgv + 2 * 8, f64_from(_cfg_T(cfg)));
+        store64(cfgv + 3 * 8, f64_from(_cfg_nh(cfg)));
+        store64(cfgv + 4 * 8, f64_from(_cfg_nkv(cfg)));
+        store64(cfgv + 5 * 8, f64_from(_cfg_NL(cfg)));
+        store64(cfgv + 6 * 8, f64_from(_cfg_F(cfg)));
+        store64(cfgv + 7 * 8, f64_from(_cfg_bias(cfg)));
+        var b = tula_builder_new();
+        tula_builder_add(b, "cfg", TULA_DT_F64, _nfs_shp1(8), 1, cfgv, 64);
+        tula_builder_add(b, "base.nf4", TULA_DT_NF4, _nfs_shp1(np), 1, nibbles, nbytes);
+        tula_builder_add(b, "base.nf4.scale.q8", TULA_DT_INT8, _nfs_shp1(nb), 1, q8, nb);
+        tula_builder_add(b, "base.nf4.scale.sup", TULA_DT_F64, _nfs_shp1(nsb), 1, supers, nsb * 8);
+        var buf = tula_builder_finish_signed(b, sk);
+        if (buf != 0) {
+            var total = tula_total_len(buf);
+            if (tula_write_file(path, buf, total) == total) { rc = 0; }
+        }
+    }
+    if (nibbles != 0) { cyr_munmap(nibbles, nbytes); }
+    if (scales != 0) { cyr_munmap(scales, nb * 8); }
+    if (q8 != 0) { cyr_munmap(q8, nb); }
+    return rc;
 }
 
 # ---- load + verify an NF4 checkpoint -----------------------------------------
-# Opens (validated), verifies the Ed25519 signature against pk (REJECTS unsigned
-# or bad — the trust boundary), reconstructs cfg, and dequantizes the base into
-# a fresh mmap_anon f64 buffer. Returns the params ptr, or 0 on any failure.
+# Opens (validated, strict), verifies the Ed25519 signature against pk (REJECTS
+# unsigned or bad — the trust boundary), reconstructs cfg, and dequantizes the
+# base into a fresh mmap_anon f64 buffer. Returns the params ptr, or 0 on any
+# failure. The file's mapping is released before returning (1.2.2: it was kept
+# for the life of the process).
 fn anuk_nf4_load(path, pk, cfg_out): i64 {
     var r = tula_open_mmap(path);
-    if (r == 0) { _anuk_sput("nf4-load: open/validate failed\n"); return 0; }
-    if (tula_verify(r, pk) != TULA_SIG_OK) {
-        _anuk_sput("nf4-load: signature REJECTED\n");
-        return 0;
-    }
-    var ec = tula_find(r, "cfg");
-    if (ec == 0) { _anuk_sput("nf4-load: no cfg tensor\n"); return 0; }
+    if (r == 0) { _anuk_eput("nf4-load: open/validate failed\n"); return 0; }
+    var params = _nfs_load_base(r, pk, cfg_out);
+    tula_close_mmap(r);
+    return params;
+}
+
+fn _nfs_load_base(r, pk, cfg_out): i64 {
+    if (_nfs_check(r, pk, "nf4-load") != 0) { return 0; }
+    var ec = _nfs_tensor(r, "cfg", TULA_DT_F64, 8, 0 - 1);
+    if (ec == 0) { _anuk_eput("nf4-load: no F64 [8] cfg tensor\n"); return 0; }
     var cv = tula_entry_data(r, ec);
     ru_cfg_init(cfg_out, f64_to(load64(cv)), f64_to(load64(cv + 8)), f64_to(load64(cv + 16)),
       f64_to(load64(cv + 24)), f64_to(load64(cv + 32)), f64_to(load64(cv + 40)),
@@ -79,27 +130,29 @@ fn anuk_nf4_load(path, pk, cfg_out): i64 {
     # rupantara 0.5.2 ru_params_count returns RU_ERR_CFG (-1) for one, so the np
     # check below would also catch it; this names the fault and doesn't lean on
     # that. Through 0.5.1, nh = 0 here divided by zero inside ru_params_count.
-    if (ru_cfg_check(cfg_out) != RU_OK()) { _anuk_sput("nf4-load: bad cfg\n"); return 0; }
-    var eb = tula_find(r, "base.nf4");
-    var eq = tula_find(r, "base.nf4.scale.q8");
-    var es = tula_find(r, "base.nf4.scale.sup");
-    if (eb == 0) { _anuk_sput("nf4-load: missing base tensors\n"); return 0; }
-    if (eq == 0) { _anuk_sput("nf4-load: missing base tensors\n"); return 0; }
-    if (es == 0) { _anuk_sput("nf4-load: missing base tensors\n"); return 0; }
-    var np = tula_entry_dim(eb, 0);
-    if (np != ru_params_count(cfg_out)) { _anuk_sput("nf4-load: np/cfg mismatch\n"); return 0; }
-    var nb = tula_entry_dim(eq, 0);
-    if (nb != tula_nf4_blocks(np, NF4_BS())) { _anuk_sput("nf4-load: block-count mismatch\n"); return 0; }
+    if (ru_cfg_check(cfg_out) != RU_OK()) { _anuk_eput("nf4-load: bad cfg\n"); return 0; }
+    var np = ru_params_count(cfg_out);
+    var nb = tula_nf4_blocks(np, NF4_BS());
+    var nsb = (nb + NF4_SBS() - 1) / NF4_SBS();
+    var eb = _nfs_tensor(r, "base.nf4", TULA_DT_NF4, np, 0 - 1);
+    var eq = _nfs_tensor(r, "base.nf4.scale.q8", TULA_DT_INT8, nb, 0 - 1);
+    var es = _nfs_tensor(r, "base.nf4.scale.sup", TULA_DT_F64, nsb, 0 - 1);
+    if (eb == 0 || eq == 0 || es == 0) {
+        _anuk_eput("nf4-load: base tensors missing or not the cfg's dtype/shape\n");
+        return 0;
+    }
     var scales = mmap_anon(nb * 8);
     if (scales == 0) { return 0; }
     nf4_dq_unpack(tula_entry_data(r, eq), tula_entry_data(r, es), nb, scales);
     var params = mmap_anon(np * 8);
-    if (params == 0) { return 0; }
-    tula_nf4_unpack(tula_entry_data(r, eb), scales, np, NF4_BS(), params);
+    if (params != 0) { tula_nf4_unpack(tula_entry_data(r, eb), scales, np, NF4_BS(), params); }
+    cyr_munmap(scales, nb * 8);
     return params;
 }
 
 # ---- adapter save / load ------------------------------------------------------
+# Write the adapter (A [C,r], B [r,V], meta (s, r)) as a signed .tula. Returns 0
+# or -1.
 fn anuk_adapter_save(path, A, B, C, r, V, s, sk): i64 {
     var meta = t_alloc(2);
     store64(meta, s);
@@ -116,27 +169,24 @@ fn anuk_adapter_save(path, A, B, C, r, V, s, sk): i64 {
 }
 
 # Loads + verifies an adapter; writes A/B into caller buffers (sized C*r / r*V)
-# and returns the packed (s in out_s[0], r in out_s[1] as f64 bits). 0 = ok, -1 = fail.
+# and returns the packed (s in out_s[0], r in out_s[1] as f64 bits). 0 = ok, -1 =
+# fail: unsigned / bad signature, not strictly valid, a tensor missing or not
+# exactly F64 of the expected shape, or a meta r that isn't the caller's r.
 fn anuk_adapter_load(path, pk, A_out, B_out, C, r, V, out_s): i64 {
     var rd = tula_read_file(path);
-    if (rd == 0) { _anuk_sput("adapter-load: open/validate failed\n"); return 0 - 1; }
-    if (tula_verify(rd, pk) != TULA_SIG_OK) {
-        _anuk_sput("adapter-load: signature REJECTED\n");
+    if (rd == 0) { _anuk_eput("adapter-load: open/validate failed\n"); return 0 - 1; }
+    if (_nfs_check(rd, pk, "adapter-load") != 0) { return 0 - 1; }
+    var ea = _nfs_tensor(rd, "lora.A", TULA_DT_F64, C, r);
+    var eb = _nfs_tensor(rd, "lora.B", TULA_DT_F64, r, V);
+    var em = _nfs_tensor(rd, "lora.meta", TULA_DT_F64, 2, 0 - 1);
+    if (ea == 0 || eb == 0 || em == 0) {
+        _anuk_eput("adapter-load: tensors missing or not the expected dtype/shape\n");
         return 0 - 1;
     }
-    var ea = tula_find(rd, "lora.A");
-    var eb = tula_find(rd, "lora.B");
-    var em = tula_find(rd, "lora.meta");
-    if (ea == 0) { return 0 - 1; }
-    if (eb == 0) { return 0 - 1; }
-    if (em == 0) { return 0 - 1; }
-    if (tula_entry_dim(ea, 0) != C) { return 0 - 1; }
-    if (tula_entry_dim(ea, 1) != r) { return 0 - 1; }
-    if (tula_entry_dim(eb, 0) != r) { return 0 - 1; }
-    if (tula_entry_dim(eb, 1) != V) { return 0 - 1; }
+    var mv = tula_entry_data(rd, em);
+    if (f64_to(load64(mv + 8)) != r) { _anuk_eput("adapter-load: meta rank mismatch\n"); return 0 - 1; }
     t_copy(A_out, tula_entry_data(rd, ea), C * r);
     t_copy(B_out, tula_entry_data(rd, eb), r * V);
-    var mv = tula_entry_data(rd, em);
     store64(out_s, load64(mv));
     store64(out_s + 8, load64(mv + 8));
     return 0;
@@ -145,11 +195,22 @@ fn anuk_adapter_load(path, pk, A_out, B_out, C, r, V, out_s): i64 {
 # ---- operator-key loading (ifran Lane 2) --------------------------------------
 # Load a 64 B Ed25519 secret key file — sigil's `ed25519_keypair` sk layout
 # (seed||pk), which is exactly what ifran writes as `~/.ifran/operator.sk`.
-# The public key is the trailing 32 bytes (`sk + 32`). Returns sk ptr | 0
-# (absent / short file). Key management stays the caller's per tula's charter —
-# this just lets the caller BE the operator instead of an ephemeral demo key.
+# The public key is the trailing 32 bytes (`sk + 32`). Returns sk ptr | 0. Key
+# management stays the caller's per tula's charter — this just lets the caller
+# BE the operator instead of an ephemeral demo key.
+#
+# 1.2.2: the file must be exactly 64 bytes (a longer one — a PEM file, say — was
+# accepted and its first 64 bytes used), and its trailing 32 bytes must be the
+# public key derived from its seed. A file whose halves disagree used to load,
+# then sign with a key no verifier would accept.
 fn anuk_sk_load(path): i64 {
-    var sk = alloc(64);
-    if (file_read_all(path, sk, 64) != 64) { return 0; }
+    var sk = alloc(65);
+    if (file_read_all(path, sk, 65) != 64) { return 0; }
+    var sk2 = alloc(64);
+    var pk2 = alloc(32);
+    ed25519_keypair(sk, sk2, pk2);
+    var ok = memeq(pk2, sk + 32, 32);
+    memset(sk2, 0, 64);                      # a copy of the secret: don't leave it behind
+    if (ok != 1) { memset(sk, 0, 65); return 0; }
     return sk;
 }

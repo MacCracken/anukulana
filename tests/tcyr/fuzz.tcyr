@@ -10,10 +10,33 @@
 # The gate: NO crash, ever (a fault kills the test process = red suite); every
 # outcome is "reader" or "clean reject". Accessor calls on accepted readers
 # must stay in-bounds.
+#
+# 1.2.2: every fuzzed image sits flush against an UNMAPPED guard page, so a read
+# one byte past it faults instead of landing in neighbouring heap; the
+# safetensors probe now READS every accepted float tensor (through 1.2.1 it only
+# computed nelems, which is how a shape larger than its payload went unseen); and
+# a structure-aware round mutates only the digits of the JSON header (shapes,
+# offsets), the class that defect lives in.
 include "src/lib.cyr"
 include "lib/assert.cyr"
 
 var _fz_state = 0;
+
+# A buffer of `cap` bytes whose END is flush against an unmapped page: returns
+# the end address; an image of length L lives at end - L.
+fn _fz_guard_end(cap): i64 {
+    var pages = (cap + 4095) / 4096 + 1;
+    var base = mmap_anon(pages * 4096);
+    cyr_munmap(base + (pages - 1) * 4096, 4096);
+    return base + (pages - 1) * 4096;
+}
+# copy n bytes of src to end - n; returns the copy's start
+fn _fz_place(src, n, end): i64 {
+    var p = end - n;
+    var i = 0;
+    while (i < n) { store8(p + i, load8(src + i)); i = i + 1; }
+    return p;
+}
 fn _fz_seed(s): i64 { _fz_state = s; return 0; }
 fn _fz_next(): i64 {
     _fz_state = (_fz_state * 6364136223846793005 + 1442695040888963407);
@@ -43,15 +66,20 @@ fn _fz_valid_st(out_len): i64 {
 }
 
 fn _fz_probe_reader(r): i64 {
-    # touch the accessor surface of an ACCEPTED reader — must stay in-bounds
+    # touch the accessor surface of an ACCEPTED reader — must stay in-bounds —
+    # and read every float tensor (a known dtype's nelems is bounded by its payload)
     var n = st_count(r);
     var i = 0;
     while (i < n) {
         var e = st_entry(r, i);
-        st_entry_dtype(e);
+        var dt = st_entry_dtype(e);
         st_entry_ndim(e);
-        st_entry_nelems(e);
+        var ne = st_entry_nelems(e);
         st_entry_data(r, e);
+        if (dt != ST_DT_UNKNOWN && dt != ST_DT_I64 && ne >= 0 && ne < 65536) {
+            var out = alloc(ne * 8 + 8);
+            if (out != 0) { st_read_f64(r, e, out); }
+        }
         i = i + 1;
     }
     return n;
@@ -64,6 +92,7 @@ fn test_fuzz_safetensors(): i64 {
     assert_nonnull(st_open(valid, vlen), "the valid seed buffer opens");
 
     var work = alloc(vlen + 8);
+    var gend = _fz_guard_end(vlen + 256);
     var accepted = 0;
     var rejected = 0;
     _fz_seed(20260704);
@@ -79,16 +108,44 @@ fn test_fuzz_safetensors(): i64 {
             store8(work + (_fz_next() % vlen), _fz_next() & 0xFF);
             m = m + 1;
         }
-        var r = st_open(work, vlen);
+        var r = st_open(_fz_place(work, vlen, gend), vlen);
         if (r != 0) { _fz_probe_reader(r); accepted = accepted + 1; }
         else { rejected = rejected + 1; }
         round = round + 1;
     }
 
+    # ---- digit-mutation fuzz (1.2.2): 20k rounds, 1-2 header digits rewritten --
+    var hlen = load64(valid);
+    var dig = 0;
+    round = 0;
+    while (round < 20000) {
+        var i3 = 0;
+        while (i3 < vlen) { store8(work + i3, load8(valid + i3)); i3 = i3 + 1; }
+        var nd = 1 + (_fz_next() % 2);
+        var m3 = 0;
+        while (m3 < nd) {
+            var tries = 0;
+            var pos = 8 + (_fz_next() % hlen);
+            while (tries < 64 && (load8(work + pos) < 48 || load8(work + pos) > 57)) {
+                pos = 8 + (_fz_next() % hlen);
+                tries = tries + 1;
+            }
+            if (load8(work + pos) >= 48 && load8(work + pos) <= 57) {
+                store8(work + pos, 48 + (_fz_next() % 10));
+                dig = dig + 1;
+            }
+            m3 = m3 + 1;
+        }
+        var rd = st_open(_fz_place(work, vlen, gend), vlen);
+        if (rd != 0) { _fz_probe_reader(rd); }
+        round = round + 1;
+    }
+    assert_gt(dig, 19999, "digit fuzz: header digits were rewritten");
+
     # ---- truncation sweep: every prefix length of the valid buffer -------------
     var L = 0;
     while (L <= vlen) {
-        var r2 = st_open(valid, L);
+        var r2 = st_open(_fz_place(valid, L, gend), L);
         if (r2 != 0) { _fz_probe_reader(r2); }
         L = L + 1;
     }
@@ -100,7 +157,7 @@ fn test_fuzz_safetensors(): i64 {
         var gl = _fz_next() % 257;
         var i2 = 0;
         while (i2 < gl) { store8(g + i2, _fz_next() & 0xFF); i2 = i2 + 1; }
-        var r3 = st_open(g, gl);
+        var r3 = st_open(_fz_place(g, gl, gend), gl);
         if (r3 != 0) { _fz_probe_reader(r3); }
         round = round + 1;
     }
@@ -143,6 +200,15 @@ fn test_fuzz_oracle_fixture(): i64 {
         round = round + 1;
     }
     assert(1, "oracle-fixture fuzz: 3k mutated/truncated files survived");
+    # directed (1.2.2): a V whose V * 8 wraps, and one past the 2^24 cap
+    store64(buf + 16, 1);                             # T = 1, so 16 + T*16 fits in 48 bytes
+    store64(buf + 24, 2305843009213693952);           # V = 2^61: V * 8 == 0 mod 2^64
+    file_write_all(path, buf, 48);
+    assert_eq(_orc_read_fixture(path, nsb, tb, vb), 0, "fixture with V = 2^61 rejected");
+    store64(buf + 16, 2);
+    store64(buf + 24, 16777217);
+    file_write_all(path, buf, vlen);
+    assert_eq(_orc_read_fixture(path, nsb, tb, vb), 0, "fixture with V > 2^24 rejected");
     return 0;
 }
 
@@ -227,6 +293,7 @@ fn test_fuzz_gguf(): i64 {
     assert_nonnull(gg_open(valid, vlen), "the valid seed GGUF opens");
 
     var work = alloc(vlen + 8);
+    var gend = _fz_guard_end(vlen + 256);
     var accepted = 0;
     var rejected = 0;
     _fz_seed(20260705);
@@ -242,7 +309,7 @@ fn test_fuzz_gguf(): i64 {
             store8(work + (_fz_next() % vlen), _fz_next() & 0xFF);
             m = m + 1;
         }
-        var r = gg_open(work, vlen);
+        var r = gg_open(_fz_place(work, vlen, gend), vlen);
         if (r != 0) { _fz_probe_gg(r); accepted = accepted + 1; }
         else { rejected = rejected + 1; }
         round = round + 1;
@@ -251,7 +318,7 @@ fn test_fuzz_gguf(): i64 {
     # truncation sweep: every prefix length of the valid buffer
     var L = 0;
     while (L <= vlen) {
-        var r2 = gg_open(valid, L);
+        var r2 = gg_open(_fz_place(valid, L, gend), L);
         if (r2 != 0) { _fz_probe_gg(r2); }
         L = L + 1;
     }
@@ -263,7 +330,7 @@ fn test_fuzz_gguf(): i64 {
         var gl = _fz_next() % 257;
         var i2 = 0;
         while (i2 < gl) { store8(g + i2, _fz_next() & 0xFF); i2 = i2 + 1; }
-        var r3 = gg_open(g, gl);
+        var r3 = gg_open(_fz_place(g, gl, gend), gl);
         if (r3 != 0) { _fz_probe_gg(r3); }
         round = round + 1;
     }
@@ -282,4 +349,4 @@ fn main(): i64 {
 }
 
 var rc = main();
-syscall(60, rc);
+sys_exit(rc);

@@ -8,7 +8,13 @@
 # + bayan_json_v_obj_* / _arr_* / _str / _int); we never hand-roll JSON. Only the
 # byte-level bits are ours: little-endian integer reads + IEEE-754 f32/f16/bf16 ->
 # f64 widening (no sovereign widener exists — candidate to promote into rosnet).
-# Untrusted-input safe: every offset is bounds-checked against the buffer length.
+#
+# Untrusted-input safe: every offset is bounds-checked against the buffer length,
+# every dim is a non-negative integer whose product cannot wrap, and (1.2.2) a
+# tensor of a fixed-width dtype must occupy EXACTLY shape x element-size bytes, so
+# no read sized from the shape can leave its payload. Through 1.2.1 the shape was
+# never compared with data_offsets: `shape [1e8]` over 4 payload bytes was
+# accepted, and st_read_f64 read 400 MB past the buffer (SIGSEGV).
 
 enum StDType {
     ST_DT_F64 = 0;
@@ -22,14 +28,19 @@ enum StDType {
 # off_start(96) off_end(104). ST_MAX_NDIM = 8. record = 112 bytes.
 # reader record: buf(0) data_start(8) count(16) entries(24) root(32) = 40 bytes.
 
+# Cap on a tensor's element count (2^56): no count, and no byte size of a dtype up
+# to 8 bytes wide, can wrap an i64 below it.
+fn ST_MAX_ELEMS(): i64 { return 0x100000000000000; }
+
 # ---- little-endian byte reads ----------------------------------------------
+# Both targets (x86_64, aarch64) are little-endian and allow unaligned loads.
 fn _st_u16_le(p): i64 { return load8(p) | (load8(p + 1) << 8); }
-fn _st_u32_le(p): i64 {
-    return load8(p) | (load8(p + 1) << 8) | (load8(p + 2) << 16) | (load8(p + 3) << 24);
-}
-fn _st_u64_le(p): i64 { return _st_u32_le(p) | (_st_u32_le(p + 4) << 32); }
+fn _st_u32_le(p): i64 { return load32(p) & 0xFFFFFFFF; }
+fn _st_u64_le(p): i64 { return load64(p); }
 
 # ---- IEEE-754 widening to the f64 bit pattern (i64) -------------------------
+# The per-element reference widener: every class (zero, subnormal, normal, inf,
+# NaN). The bulk loops below must match it bit for bit.
 # binary32 (F32): [sign:1][exp:8, bias 127][mant:23]. b holds the 32 bits.
 fn _st_f32_to_f64(b): i64 {
     var sign = (b >> 31) & 1;
@@ -75,6 +86,57 @@ fn _st_f16_to_f64(b): i64 {
     return s64 | (((exp - 15) + 1023) << 52) | (mant << 42);
 }
 
+# ---- bulk widening: the import hot loops (1.2.2) ----------------------------
+# Bit-identical to the reference wideners above, element for element: a normal
+# number (exponent neither all-zeros nor all-ones) is rebiased inline, everything
+# else goes through the reference. Shared with the GGUF reader.
+# n F32 values at src -> n f64 at dst.
+fn _st_widen_f32(src, dst, n): i64 {
+    var i = 0;
+    while (i < n) {
+        var b = load32(src + i * 4) & 0xFFFFFFFF;
+        var ex = (b >> 23) & 0xFF;
+        if (ex != 0 && ex != 255) {
+            store64(dst + i * 8, ((b >> 31) << 63) | ((ex + 896) << 52) | ((b & 0x7FFFFF) << 29));
+        } else {
+            store64(dst + i * 8, _st_f32_to_f64(b));
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+# n F16 values -> f64. Each half is byte-composed, so the last element never
+# reads past the payload.
+fn _st_widen_f16(src, dst, n): i64 {
+    var i = 0;
+    while (i < n) {
+        var h = _st_u16_le(src + i * 2);
+        var ex = (h >> 10) & 0x1F;
+        if (ex != 0 && ex != 31) {
+            store64(dst + i * 8, ((h >> 15) << 63) | ((ex + 1008) << 52) | ((h & 0x3FF) << 42));
+        } else {
+            store64(dst + i * 8, _st_f16_to_f64(h));
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+# n BF16 values -> f64 (each is the top half of an f32).
+fn _st_widen_bf16(src, dst, n): i64 {
+    var i = 0;
+    while (i < n) {
+        var b = _st_u16_le(src + i * 2) << 16;
+        var ex = (b >> 23) & 0xFF;
+        if (ex != 0 && ex != 255) {
+            store64(dst + i * 8, ((b >> 31) << 63) | ((ex + 896) << 52) | ((b & 0x7FFFFF) << 29));
+        } else {
+            store64(dst + i * 8, _st_f32_to_f64(b));
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
 # ---- dtype string (bayan Str) -> code --------------------------------------
 fn _st_streq(p, plen, lit): i64 {
     if (plen != strlen(lit)) { return 0; }
@@ -90,6 +152,29 @@ fn _st_dtype_from_str(p, plen): i64 {
     if (_st_streq(p, plen, "I64") == 1) { return ST_DT_I64; }
     return ST_DT_UNKNOWN;
 }
+# Bytes per element of any fixed-width safetensors dtype, read or not (so every
+# such tensor's payload size is checked); 0 for a dtype with no byte-sized element
+# (sub-byte F4/F6) or one this reader doesn't know — no size contract to enforce.
+fn _st_dtype_str_bytes(p, plen): i64 {
+    if (_st_streq(p, plen, "F64") == 1) { return 8; }
+    if (_st_streq(p, plen, "I64") == 1) { return 8; }
+    if (_st_streq(p, plen, "U64") == 1) { return 8; }
+    if (_st_streq(p, plen, "F32") == 1) { return 4; }
+    if (_st_streq(p, plen, "I32") == 1) { return 4; }
+    if (_st_streq(p, plen, "U32") == 1) { return 4; }
+    if (_st_streq(p, plen, "F16") == 1) { return 2; }
+    if (_st_streq(p, plen, "BF16") == 1) { return 2; }
+    if (_st_streq(p, plen, "I16") == 1) { return 2; }
+    if (_st_streq(p, plen, "U16") == 1) { return 2; }
+    if (_st_streq(p, plen, "BOOL") == 1) { return 1; }
+    if (_st_streq(p, plen, "U8") == 1) { return 1; }
+    if (_st_streq(p, plen, "I8") == 1) { return 1; }
+    if (_st_streq(p, plen, "F8_E5M2") == 1) { return 1; }
+    if (_st_streq(p, plen, "F8_E4M3") == 1) { return 1; }
+    if (_st_streq(p, plen, "F8_E8M0") == 1) { return 1; }
+    return 0;
+}
+# The dtype code's name: "F64", "F32", "F16", "BF16", "I64", or "?" (unknown).
 fn st_dtype_name(dt): i64 {
     if (dt == ST_DT_F64) { return "F64"; }
     if (dt == ST_DT_F32) { return "F32"; }
@@ -108,9 +193,58 @@ fn _st_dtype_elem_bytes(dt): i64 {
 }
 
 # ---- open a safetensors buffer (untrusted) ---------------------------------
-# Returns a reader, or 0 if the header is missing/overruns/malformed or any
-# tensor's data_offsets are out of bounds. Keeps the bayan DOM alive (tensor
-# names point into it).
+# Validate one tensor's header object into entry record `e`. Returns 0 | -1.
+fn _st_parse_entry(key, val, dtype_v, data_len, e): i64 {
+    var dstr = bayan_json_v_str(dtype_v);
+    if (dstr == 0) { return 0 - 1; }
+    var dt = _st_dtype_from_str(str_data(dstr), str_len(dstr));
+    var esz = _st_dtype_str_bytes(str_data(dstr), str_len(dstr));
+    var shape_v = bayan_json_v_obj_get_by_cstr(val, "shape");
+    if (bayan_json_v_is_arr(shape_v) == 0) { return 0 - 1; }
+    var ndim = bayan_json_v_arr_len(shape_v);
+    if (ndim > 8) { return 0 - 1; }
+    var off_v = bayan_json_v_obj_get_by_cstr(val, "data_offsets");
+    if (bayan_json_v_is_arr(off_v) == 0) { return 0 - 1; }
+    if (bayan_json_v_arr_len(off_v) != 2) { return 0 - 1; }
+    var o0v = bayan_json_v_arr_get(off_v, 0);
+    var o1v = bayan_json_v_arr_get(off_v, 1);
+    if (bayan_json_v_is_int(o0v) == 0) { return 0 - 1; }   # 4.5 or "4" is not an offset
+    if (bayan_json_v_is_int(o1v) == 0) { return 0 - 1; }
+    var o0 = bayan_json_v_int(o0v);
+    var o1 = bayan_json_v_int(o1v);
+    if (o0 < 0) { return 0 - 1; }
+    if (o1 < o0) { return 0 - 1; }
+    if (o1 > data_len) { return 0 - 1; }                # payload out of bounds
+    var n = 1;
+    var k = 0;
+    while (k < 8) { store64(e + 32 + k * 8, 0); k = k + 1; }
+    k = 0;
+    while (k < ndim) {
+        var dv = bayan_json_v_arr_get(shape_v, k);
+        if (bayan_json_v_is_int(dv) == 0) { return 0 - 1; }
+        var d = bayan_json_v_int(dv);
+        if (d < 0) { return 0 - 1; }
+        if (d != 0 && n > ST_MAX_ELEMS() / d) { return 0 - 1; }   # the product would wrap
+        n = n * d;
+        store64(e + 32 + k * 8, d);
+        k = k + 1;
+    }
+    if (esz > 0) {
+        if (n * esz != o1 - o0) { return 0 - 1; }      # shape and payload disagree
+    }
+    store64(e + 0, str_data(key));
+    store64(e + 8, str_len(key));
+    store64(e + 16, dt);
+    store64(e + 24, ndim);
+    store64(e + 96, o0);
+    store64(e + 104, o1);
+    return 0;
+}
+
+# Returns a reader, or 0 if the header is missing/overruns/malformed, any tensor's
+# data_offsets are out of bounds, or any fixed-width tensor's shape does not match
+# its payload size. Keeps the bayan DOM alive (tensor names point into it). Header
+# objects without a "dtype" (e.g. "__metadata__") are skipped.
 fn st_open(buf, len): i64 {
     if (len < 8) { return 0; }
     var hlen = _st_u64_le(buf);
@@ -123,48 +257,22 @@ fn st_open(buf, len): i64 {
     if (root == 0) { return 0; }                        # malformed JSON
     if (bayan_json_v_is_obj(root) == 0) { return 0; }
     var nobj = bayan_json_v_obj_len(root);
-    var entries = alloc(nobj * 112);
+    var entries = alloc(nobj * 112 + 8);
     if (entries == 0) { return 0; }                    # hostile huge-entry-count header
     var count = 0;
     var i = 0;
     while (i < nobj) {
         var val = bayan_json_v_obj_val(root, i);
         var dtype_v = bayan_json_v_obj_get_by_cstr(val, "dtype");
-        if (dtype_v == 0) { i = i + 1; }                # __metadata__ / non-tensor: skip
-        else {
+        if (dtype_v != 0) {
             var key = bayan_json_v_obj_key(root, i);    # Str: tensor name
-            var dstr = bayan_json_v_str(dtype_v);
-            if (dstr == 0) { return 0; }
-            var dt = _st_dtype_from_str(str_data(dstr), str_len(dstr));
-            var shape_v = bayan_json_v_obj_get_by_cstr(val, "shape");
-            if (bayan_json_v_is_arr(shape_v) == 0) { return 0; }
-            var ndim = bayan_json_v_arr_len(shape_v);
-            if (ndim > 8) { return 0; }
-            var off_v = bayan_json_v_obj_get_by_cstr(val, "data_offsets");
-            if (bayan_json_v_is_arr(off_v) == 0) { return 0; }
-            if (bayan_json_v_arr_len(off_v) != 2) { return 0; }
-            var o0 = bayan_json_v_int(bayan_json_v_arr_get(off_v, 0));
-            var o1 = bayan_json_v_int(bayan_json_v_arr_get(off_v, 1));
-            if (o0 < 0) { return 0; }
-            if (o1 < o0) { return 0; }
-            if (o1 > data_len) { return 0; }            # payload out of bounds
-            var e = entries + count * 112;
-            store64(e + 0, str_data(key));
-            store64(e + 8, str_len(key));
-            store64(e + 16, dt);
-            store64(e + 24, ndim);
-            var k = 0;
-            while (k < ndim) {
-                store64(e + 32 + k * 8, bayan_json_v_int(bayan_json_v_arr_get(shape_v, k)));
-                k = k + 1;
-            }
-            store64(e + 96, o0);
-            store64(e + 104, o1);
+            if (_st_parse_entry(key, val, dtype_v, data_len, entries + count * 112) != 0) { return 0; }
             count = count + 1;
-            i = i + 1;
         }
+        i = i + 1;
     }
     var r = alloc(40);
+    if (r == 0) { return 0; }
     store64(r + 0, buf);
     store64(r + 8, data_start);
     store64(r + 16, count);
@@ -174,26 +282,39 @@ fn st_open(buf, len): i64 {
 }
 
 # ---- accessors --------------------------------------------------------------
+# Number of tensors in reader r.
 fn st_count(r): i64 { return load64(r + 16); }
+# Entry record i (0 <= i < st_count(r)).
 fn st_entry(r, i): i64 { return load64(r + 24) + i * 112; }
-fn st_entry_name(e): i64 { return load64(e); }          # ptr into the JSON header
+# The entry's name: a pointer into the JSON header, NOT NUL-terminated (see _len).
+fn st_entry_name(e): i64 { return load64(e); }
+# Length of the entry's name in bytes.
 fn st_entry_name_len(e): i64 { return load64(e + 8); }
+# The entry's ST_DT_* code (ST_DT_UNKNOWN for a dtype this reader doesn't widen).
 fn st_entry_dtype(e): i64 { return load64(e + 16); }
+# The entry's rank, 0..8.
 fn st_entry_ndim(e): i64 { return load64(e + 24); }
-fn st_entry_dim(e, k): i64 { return load64(e + 32 + k * 8); }
+# Dim k of the entry, or 0 for k outside [0, ndim).
+fn st_entry_dim(e, k): i64 {
+    if (k < 0) { return 0; }
+    if (k >= st_entry_ndim(e)) { return 0; }
+    return load64(e + 32 + k * 8);
+}
+# Element count: the product of the dims (validated not to wrap; 1 for rank 0).
 fn st_entry_nelems(e): i64 {
     var n = 1;
     var nd = st_entry_ndim(e);
     var k = 0;
-    while (k < nd) { n = n * st_entry_dim(e, k); k = k + 1; }
+    while (k < nd) { n = n * load64(e + 32 + k * 8); k = k + 1; }
     return n;
 }
+# Payload size in bytes (data_offsets[1] - data_offsets[0]; 1.2.2).
+fn st_entry_nbytes(e): i64 { return load64(e + 104) - load64(e + 96); }
 # pointer to the tensor's raw payload bytes in the buffer (bounds already checked).
 fn st_entry_data(r, e): i64 { return load64(r) + load64(r + 8) + load64(e + 96); }
 
 # find the first entry whose name matches (ptr + len); returns e or 0.
 fn st_find(r, name): i64 {
-    var nlen = strlen(name);
     var n = st_count(r);
     var i = 0;
     while (i < n) {
@@ -204,31 +325,27 @@ fn st_find(r, name): i64 {
     return 0;
 }
 
-# ---- read a tensor into a caller f64[nelems] buffer, widening per dtype -----
-# Returns 0, or -1 for an unsupported dtype (e.g. I64 — not a float weight).
-fn st_read_f64(r, e, dst): i64 {
-    var n = st_entry_nelems(e);
-    var src = st_entry_data(r, e);
+# ---- read a tensor into a caller f64 buffer, widening per dtype -----------
+# Read elements [start, start + n) of entry e (row-major flat index) into dst[0..n)
+# as f64 (1.2.2). Returns 0, or -1 for a range outside the tensor or a dtype that
+# isn't a float weight (I64, unknown).
+fn st_read_f64_range(r, e, start, n, dst): i64 {
+    var total = st_entry_nelems(e);
+    if (start < 0) { return 0 - 1; }
+    if (n < 0) { return 0 - 1; }
+    if (n > total) { return 0 - 1; }
+    if (start > total - n) { return 0 - 1; }
     var dt = st_entry_dtype(e);
-    var i = 0;
-    if (dt == ST_DT_F64) {
-        while (i < n) { store64(dst + i * 8, load64(src + i * 8)); i = i + 1; }
-        return 0;
-    }
-    if (dt == ST_DT_F32) {
-        while (i < n) { store64(dst + i * 8, _st_f32_to_f64(_st_u32_le(src + i * 4))); i = i + 1; }
-        return 0;
-    }
-    if (dt == ST_DT_F16) {
-        while (i < n) { store64(dst + i * 8, _st_f16_to_f64(_st_u16_le(src + i * 2))); i = i + 1; }
-        return 0;
-    }
-    if (dt == ST_DT_BF16) {
-        while (i < n) { store64(dst + i * 8, _st_bf16_to_f64(_st_u16_le(src + i * 2))); i = i + 1; }
-        return 0;
-    }
+    var src = st_entry_data(r, e);
+    if (dt == ST_DT_F64) { memcpy(dst, src + start * 8, n * 8); return 0; }
+    if (dt == ST_DT_F32) { _st_widen_f32(src + start * 4, dst, n); return 0; }
+    if (dt == ST_DT_F16) { _st_widen_f16(src + start * 2, dst, n); return 0; }
+    if (dt == ST_DT_BF16) { _st_widen_bf16(src + start * 2, dst, n); return 0; }
     return 0 - 1;
 }
+# Read the whole tensor into dst (st_entry_nelems f64). Returns 0, or -1 for an
+# unsupported dtype (e.g. I64 — not a float weight).
+fn st_read_f64(r, e, dst): i64 { return st_read_f64_range(r, e, 0, st_entry_nelems(e), dst); }
 
 # read a whole safetensors file from disk (up to `maxlen` bytes) into a heap buffer
 # and open it. No size syscall here — the caller passes a `maxlen` >= the file size
@@ -243,8 +360,9 @@ fn st_read_file(path, maxlen): i64 {
 }
 
 # mmap a safetensors file read-only (zero-copy; bypasses the 256MB alloc cap) and
-# open it. The mapping outlives the fd. Returns a reader or 0. Use this for large
-# models (GPT-2-small is 548 MB — well past the alloc cap).
+# open it. The mapping outlives the fd, and is unmapped again if the file is
+# rejected (1.2.2). Returns a reader or 0. Use this for large models (GPT-2-small
+# is 548 MB — well past the alloc cap).
 fn st_open_mmap(path): i64 {
     var fd = file_open(path, 0, 0);          # O_RDONLY
     if (fd < 0) { return 0; }
@@ -253,5 +371,7 @@ fn st_open_mmap(path): i64 {
     var addr = mmap_file_ro(fd, size);       # maps from offset 0
     file_close(fd);                          # mapping survives the close
     if (addr == 0) { return 0; }
-    return st_open(addr, size);
+    var r = st_open(addr, size);
+    if (r == 0) { cyr_munmap(addr, size); }
+    return r;
 }

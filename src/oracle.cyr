@@ -38,27 +38,30 @@ fn _orc_read_fixture(path, out_ns, out_t, out_v): i64 {
     var cap = 4 * 1024 * 1024;
     var fb = alloc(cap);
     var n = file_read_all(path, fb, cap);
-    if (n < 16) { _anuk_sput("oracle: fixture missing or short\n"); return 0; }
-    if (load64(fb) != _orc_magic()) { _anuk_sput("oracle: bad fixture magic\n"); return 0; }
+    if (n < 16) { _anuk_eput("oracle: fixture missing or short\n"); return 0; }
+    if (load64(fb) != _orc_magic()) { _anuk_eput("oracle: bad fixture magic\n"); return 0; }
     var ns = load64(fb + 8);
-    if (ns < 1) { _anuk_sput("oracle: empty fixture\n"); return 0; }
-    if (ns > 64) { _anuk_sput("oracle: implausible n_seqs\n"); return 0; }
+    if (ns < 1) { _anuk_eput("oracle: empty fixture\n"); return 0; }
+    if (ns > 64) { _anuk_eput("oracle: implausible n_seqs\n"); return 0; }
     var off = 16;
     var T0 = 0;
     var V0 = 0;
     var s = 0;
     while (s < ns) {
-        if (off + 16 > n) { _anuk_sput("oracle: truncated seq header\n"); return 0; }
+        if (off + 16 > n) { _anuk_eput("oracle: truncated seq header\n"); return 0; }
         var T = load64(fb + off);
         var V = load64(fb + off + 8);
-        if (T < 1) { _anuk_sput("oracle: bad T\n"); return 0; }
-        if (T > 1024) { _anuk_sput("oracle: bad T\n"); return 0; }
-        if (V < 2) { _anuk_sput("oracle: bad V\n"); return 0; }
+        if (T < 1) { _anuk_eput("oracle: bad T\n"); return 0; }
+        if (T > 1024) { _anuk_eput("oracle: bad T\n"); return 0; }
+        if (V < 2) { _anuk_eput("oracle: bad V\n"); return 0; }
+        if (V > 16777216) { _anuk_eput("oracle: bad V\n"); return 0; }   # 2^24: keeps V*8 far from wrapping
         if (T0 == 0) { T0 = T; V0 = V; }
-        if (T != T0) { _anuk_sput("oracle: non-uniform T across seqs (v1 requires uniform)\n"); return 0; }
-        if (V != V0) { _anuk_sput("oracle: non-uniform V across seqs\n"); return 0; }
+        if (T != T0) { _anuk_eput("oracle: non-uniform T across seqs (v1 requires uniform)\n"); return 0; }
+        if (V != V0) { _anuk_eput("oracle: non-uniform V across seqs\n"); return 0; }
+        # T <= 1024 and V <= 2^24 bound the seq's size; compare against what is left
+        # (1.2.2: V = 2^61 made `V * 8` wrap to 0 and the overrun check passed)
+        if (16 + T * 16 + V * 8 > n - off) { _anuk_eput("oracle: seq payload overruns file\n"); return 0; }
         off = off + 16 + T * 16 + V * 8;
-        if (off > n) { _anuk_sput("oracle: seq payload overruns file\n"); return 0; }
         s = s + 1;
     }
     store64(out_ns, ns);
@@ -80,11 +83,11 @@ fn anuk_gpt2_oracle(model_path, fix_path): i64 {
     var Vf = load64(vb);
     var cfg = alloc(64);
     var params = anuk_gpt2_import(model_path, 12, T, cfg);
-    if (params == 0) { _anuk_sput("oracle: import failed (open / infer / pack)\n"); return 1; }
+    if (params == 0) { _anuk_eput("oracle: import failed (open / infer / pack)\n"); return 1; }
     var V = _cfg_V(cfg);
     if (V != Vf) {
-        _anuk_sput("oracle: vocab mismatch — model V="); _anuk_puti(V);
-        _anuk_sput(" fixture V="); _anuk_puti(Vf); _anuk_sput("\n");
+        _anuk_eput("oracle: vocab mismatch — model V="); _anuk_eput_int(V);
+        _anuk_eput(" fixture V="); _anuk_eput_int(Vf); _anuk_eput("\n");
         return 1;
     }
     _anuk_sput("oracle: model V="); _anuk_puti(V);
@@ -101,7 +104,14 @@ fn anuk_gpt2_oracle(model_path, fix_path): i64 {
         var toks = fb + off + 16;
         var hfam = toks + T * 8;
         var ref = hfam + T * 8;
-        ru_model_fwd(cfg, params, toks, Lb, 0);
+        # a rejected forward (a fixture token outside [0, V)) leaves Lb untouched,
+        # so it must not be scored (1.2.2: the return code was ignored)
+        var frc = ru_model_fwd(cfg, params, toks, Lb, 0);
+        if (frc != RU_OK()) {
+            _anuk_eput("oracle: forward rejected the fixture sequence (code ");
+            _anuk_eput_int(frc); _anuk_eput(")\n");
+            return 1;
+        }
         var amfail = 0;
         var p = 0;
         while (p < T) {
@@ -115,7 +125,9 @@ fn anuk_gpt2_oracle(model_path, fix_path): i64 {
         var v = 0;
         while (v < V) {
             var ours = load64(last + v * 8);
+            var theirs = load64(ref + v * 8);
             if (f64_eq(ours, ours) == 0) { nans = nans + 1; }
+            if (f64_eq(theirs, theirs) == 0) { nans = nans + 1; }   # 1.2.2: was skipped silently
             var d = _orc_abs(f64_sub(ours, load64(ref + v * 8)));
             if (f64_gt(d, maxabs) == 1) { maxabs = d; }
             var den = _orc_abs(load64(ref + v * 8));

@@ -1,0 +1,169 @@
+# anukulana benchmarks — the import hot paths (docs/benchmarks.md holds the numbers).
+#
+# Import is most of every CLI command's wall time (about 3.5 s of each at GPT-2
+# small, 2026-07-04): 123.6M fp32 -> f64 widens plus the pack onto rupantara's
+# layout. These benches time those paths on synthetic, f32-exact data, so they
+# need no checkpoint:
+#   - st_read_f64 / gg_read_f64: the per-element widen, 1M elements
+#   - anuk_gpt2_pack / anuk_ggpt2_pack: the whole pack of a small GPT-2
+#     (V=2048 C=128 T=64 nh=4 NL=4 F=512, about 1.06M params), from F32 files
+#   - nf4_dq_pack / nf4_dq_unpack: the local double-quant layer, 64k scales
+# Labels are stable across releases so before/after runs line up.
+include "src/lib.cyr"
+include "tests/common.cyr"
+
+# deterministic, f32-exact fill (small ints over 32)
+fn _bfill32(p, n, salt): i64 {
+    var i = 0;
+    while (i < n) {
+        var m = ((i + salt) * 37 + 11) % 101 - 50;
+        store64(p + i * 8, f64_div(f64_from(m), f64_from(32)));
+        i = i + 1;
+    }
+    return 0;
+}
+
+fn _bench_st_read(dtype_name, esz, iters, label): i64 {
+    var n = 1048576;
+    var js = str_builder_new();
+    str_builder_add_cstr(js, "{\"w\":{\"dtype\":\"");
+    str_builder_add_cstr(js, dtype_name);
+    str_builder_add_cstr(js, "\",\"shape\":[1048576],\"data_offsets\":[0,");
+    str_builder_add_int(js, n * esz);
+    str_builder_add_cstr(js, "]}}");
+    var hs = str_builder_build(js);
+    var hlen = str_len(hs);
+    var total = 8 + hlen + n * esz;
+    var buf = alloc(total);
+    store64(buf, hlen);
+    _bcopy(buf + 8, str_data(hs), hlen);
+    var src = t_alloc(n);
+    _bfill32(src, n, 1);
+    var pay = buf + 8 + hlen;
+    var i = 0;
+    while (i < n) {
+        if (esz == 4) { _put_u32_le(pay + i * 4, _n_f32(load64(src + i * 8))); }
+        else {
+            var h = _n_f16(load64(src + i * 8));
+            store8(pay + i * 2, h & 0xFF); store8(pay + i * 2 + 1, (h >> 8) & 0xFF);
+        }
+        i = i + 1;
+    }
+    var r = st_open(buf, total);
+    var e = st_entry(r, 0);
+    var dst = t_alloc(n);
+    var b = bench_new(label);
+    bench_batch_start(b);
+    i = 0;
+    while (i < iters) { st_read_f64(r, e, dst); i = i + 1; }
+    bench_batch_stop(b, iters);
+    bench_report(b);
+    return 0;
+}
+
+fn bench_gg_read(): i64 {
+    var n = 1048576;
+    var src = t_alloc(n);
+    _bfill32(src, n, 2);
+    var w = _ggw_new();
+    _ggw_add(w, "w", src, n, 0, 1, 0);
+    var lp = alloc(8);
+    var buf = _ggw_finish(w, 0, 32, 0, lp);
+    var r = gg_open(buf, load64(lp));
+    var e = gg_entry(r, 0);
+    var dst = t_alloc(n);
+    var iters = 20;
+    var b = bench_new("gg_read_f64 F32 n=1M");
+    bench_batch_start(b);
+    var i = 0;
+    while (i < iters) { gg_read_f64(r, e, dst); i = i + 1; }
+    bench_batch_stop(b, iters);
+    bench_report(b);
+    return 0;
+}
+
+fn _bench_cfg(): i64 {
+    var cfg = alloc(64);
+    ru_cfg_init(cfg, 2048, 128, 64, 4, 4, 4, 512, 1);
+    return cfg;
+}
+
+fn bench_st_pack(): i64 {
+    var cfg = _bench_cfg();
+    var np = ru_params_count(cfg);
+    var P = t_alloc(np);
+    _bfill32(P, np, 3);
+    var lp = alloc(8);
+    var blob = _export_gpt2_dt(cfg, P, lp, 1);
+    var r = st_open(blob, load64(lp));
+    var cfg2 = alloc(64);
+    anuk_gpt2_infer_cfg(r, cfg2, 4);
+    var P2 = t_alloc(np);
+    var iters = 10;
+    var b = bench_new("anuk_gpt2_pack F32 V=2048 C=128 T=64 NL=4");
+    bench_batch_start(b);
+    var i = 0;
+    while (i < iters) { anuk_gpt2_pack(r, cfg2, P2); i = i + 1; }
+    bench_batch_stop(b, iters);
+    bench_report(b);
+    return 0;
+}
+
+fn bench_gg_pack(): i64 {
+    var cfg = _bench_cfg();
+    var np = ru_params_count(cfg);
+    var P = t_alloc(np);
+    _bfill32(P, np, 4);
+    var lp = alloc(8);
+    var buf = _export_gguf(cfg, P, lp);
+    var r = gg_open(buf, load64(lp));
+    var cfg2 = alloc(64);
+    anuk_ggpt2_infer_cfg(r, cfg2, 64);
+    var P2 = t_alloc(np);
+    var iters = 10;
+    var b = bench_new("anuk_ggpt2_pack F32 V=2048 C=128 T=64 NL=4");
+    bench_batch_start(b);
+    var i = 0;
+    while (i < iters) { anuk_ggpt2_pack(r, cfg2, P2); i = i + 1; }
+    bench_batch_stop(b, iters);
+    bench_report(b);
+    return 0;
+}
+
+fn bench_dq(): i64 {
+    var nb = 65536;
+    var scales = t_alloc(nb);
+    var i = 0;
+    while (i < nb) { store64(scales + i * 8, f64_div(f64_from((i * 31) % 997 + 1), f64_from(1000))); i = i + 1; }
+    var q8 = alloc(nb);
+    var supers = t_alloc(nb / NF4_SBS() + 1);
+    var out = t_alloc(nb);
+    var iters = 50;
+    var b = bench_new("nf4_dq_pack nb=64k");
+    bench_batch_start(b);
+    i = 0;
+    while (i < iters) { nf4_dq_pack(scales, nb, q8, supers); i = i + 1; }
+    bench_batch_stop(b, iters);
+    bench_report(b);
+    var b2 = bench_new("nf4_dq_unpack nb=64k");
+    bench_batch_start(b2);
+    i = 0;
+    while (i < iters) { nf4_dq_unpack(q8, supers, nb, out); i = i + 1; }
+    bench_batch_stop(b2, iters);
+    bench_report(b2);
+    return 0;
+}
+
+fn main(): i64 {
+    alloc_init();
+    _bench_st_read("F32", 4, 20, "st_read_f64 F32 n=1M");
+    _bench_st_read("F16", 2, 20, "st_read_f64 F16 n=1M");
+    bench_gg_read();
+    bench_st_pack();
+    bench_gg_pack();
+    bench_dq();
+    return 0;
+}
+
+var rc = main();
+sys_exit(rc);

@@ -1,139 +1,100 @@
 # anukulana (अनुकूलन — adaptation) — Type-3 pretrained-import reference (binary).
 #
-# M1: consume tula (the sovereign weight format) — `inspect` opens a checkpoint,
-# lists tensors, and reports its signature. The foreign safetensors/GGUF import +
-# forward-on-rupantara path (the headline) lands in M2 per docs/development/roadmap.md.
+# The CLI: `inspect` opens a tula checkpoint; `gpt2*` import a real GPT-2 through
+# the foreign safetensors / GGUF doors, run it on rupantara, and adapt it (LoRA,
+# QLoRA, signed persistence). See docs/api.md for every command.
+#
+# Exit codes: 0 success; 1 a failed command or a missing argument; 2 an unknown
+# command or option (1.2.2: an unknown command printed the usage and exited 0).
+# Results go to stdout, errors to stderr (1.2.2: errors went to stdout).
 
 include "src/lib.cyr"
 
-fn usage(): i64 {
-    var l1 = "anukulana - sovereign pretrained-import reference\n\n";
-    var l2 = "usage: anukulana <command> [args]\n";
-    var l3 = "  inspect <file.tula>   open a tula checkpoint: list tensors + signature\n";
-    var l4 = "  version               print the packed version int\n";
-    var l4b = "  gpt2 <model.safetensors>              import + run (no-oracle validation)\n";
-    var l4c = "  gpt2-oracle <model.safetensors> <fixture.bin>   HF-fidelity gate\n";
-    var l4d = "  gpt2-lora <model.safetensors>         LoRA head-adapter fine-tune (frozen base)\n";
-    var l4e = "  gpt2-qlora <model.safetensors>        QLoRA: adapter over the NF4-quantized base\n";
-    var l4f = "  gpt2-tula <model> <ckpt.tula> <adapter.tula> [--sk <operator.sk>]\n";
-    var l4f2 = "                                        signed NF4 + adapter round-trip\n";
-    var l4f3 = "                                        (--sk: sign with a real 64B operator key\n";
-    var l4f4 = "                                         — e.g. ifran's ~/.ifran/operator.sk)\n";
-    var l4g = "  gpt2-gguf <model.gguf>                import via GGUF + run (batch==decode gate)\n";
-    var l4h = "  gpt2-cross <model.safetensors> <model.gguf>   cross-format bit-identity gate\n";
-    var l5 = "  (all Type-3 charter commands built)\n";
-    syscall(1, 1, l1, strlen(l1));
-    syscall(1, 1, l2, strlen(l2));
-    syscall(1, 1, l3, strlen(l3));
-    syscall(1, 1, l4, strlen(l4));
-    syscall(1, 1, l4b, strlen(l4b));
-    syscall(1, 1, l4c, strlen(l4c));
-    syscall(1, 1, l4d, strlen(l4d));
-    syscall(1, 1, l4e, strlen(l4e));
-    syscall(1, 1, l4f, strlen(l4f));
-    syscall(1, 1, l4f2, strlen(l4f2));
-    syscall(1, 1, l4f3, strlen(l4f3));
-    syscall(1, 1, l4f4, strlen(l4f4));
-    syscall(1, 1, l4g, strlen(l4g));
-    syscall(1, 1, l4h, strlen(l4h));
-    syscall(1, 1, l5, strlen(l5));
+fn _u(fd, s): i64 { sys_write(fd, s, strlen(s)); return 0; }
+
+# Print the usage text to fd (1 when asked for, 2 after a bad command).
+fn usage(fd): i64 {
+    _u(fd, "anukulana - sovereign pretrained-import reference\n\n");
+    _u(fd, "usage: anukulana <command> [args]\n");
+    _u(fd, "  inspect <file.tula>   open a tula checkpoint: list tensors + signature\n");
+    _u(fd, "  version               print the packed version int\n");
+    _u(fd, "  gpt2 <model.safetensors>              import + run (no-oracle validation)\n");
+    _u(fd, "  gpt2-oracle <model.safetensors> <fixture.bin>   HF-fidelity gate\n");
+    _u(fd, "  gpt2-lora <model.safetensors>         LoRA head-adapter fine-tune (frozen base)\n");
+    _u(fd, "  gpt2-qlora <model.safetensors>        QLoRA: adapter over the NF4-quantized base\n");
+    _u(fd, "  gpt2-tula <model> <ckpt.tula> <adapter.tula> [--sk <operator.sk>]\n");
+    _u(fd, "                                        signed NF4 + adapter round-trip\n");
+    _u(fd, "                                        (--sk: sign with a real 64B operator key\n");
+    _u(fd, "                                         — e.g. ifran's ~/.ifran/operator.sk)\n");
+    _u(fd, "  gpt2-gguf <model.gguf>                import via GGUF + run (batch==decode gate)\n");
+    _u(fd, "  gpt2-cross <model.safetensors> <model.gguf>   cross-format bit-identity gate\n");
+    _u(fd, "  (all Type-3 charter commands built)\n");
     return 0;
 }
 
-# `gpt2 <model.safetensors>` — import a real GPT-2-small checkpoint, run its forward
-# on a short fixed input, and cross-check the batch forward against the KV-cache
-# incremental decode (they must be bit-identical). Proves the importer + wideners +
-# mapping on a real 124M-param fp32 model. (Exact HF-reference-logit match is a
-# separate gate that needs a torch oracle; this is the no-oracle validation.)
-fn _gpt2_run(path): i64 {
-    var cfg = alloc(64);
-    var T_run = 8;
-    var params = anuk_gpt2_import(path, 12, T_run, cfg);   # 12 heads; mmap (past alloc cap)
-    if (params == 0) { _anuk_sput("gpt2: import failed (open / infer / pack)\n"); return 1; }
+# `gpt2` / `gpt2-gguf` after the import: report the model, then run the batch
+# forward against the KV-cache incremental decode (they must be bit-identical) on
+# a short fixed input. Proves the importer + wideners + mapping on a real model.
+# (Exact HF-reference-logit match is the separate `gpt2-oracle` gate.) One copy
+# for both doors (1.2.2: two near-identical copies).
+fn _anuk_run_check(label, cfg, params): i64 {
     var V = _cfg_V(cfg);
+    var T_run = _cfg_T(cfg);
     # weight sanity: are the widened params finite? (localizes NaN: weights vs forward)
     var np = ru_params_count(cfg);
     var nanp = 0;
     var j = 0;
     while (j < np) { var xx = load64(params + j * 8); if (f64_eq(xx, xx) == 0) { nanp = nanp + 1; } j = j + 1; }
     _anuk_sput("params with NaN: "); _anuk_puti(nanp); _anuk_sput(" / "); _anuk_puti(np); _anuk_sput("\n");
-    _anuk_sput("imported GPT-2: V="); _anuk_puti(V);
+    _anuk_sput("imported GPT-2 ("); _anuk_sput(label); _anuk_sput("): V="); _anuk_puti(V);
     _anuk_sput(" C="); _anuk_puti(_cfg_C(cfg));
     _anuk_sput(" NL="); _anuk_puti(_cfg_NL(cfg));
-    _anuk_sput(" heads=12 T_run="); _anuk_puti(T_run); _anuk_sput("\n");
-    var tokens = alloc(T_run * 8);
-    var i = 0;
-    while (i < T_run) { store64(tokens + i * 8, (i * 137 + 11) % V); i = i + 1; }
+    _anuk_sput(" heads="); _anuk_puti(_cfg_nh(cfg));
+    _anuk_sput(" T_run="); _anuk_puti(T_run); _anuk_sput("\n");
+    var tokens = anuk_demo_tokens(T_run, V);
     var Lb = alloc(T_run * V * 8);
-    ru_model_fwd(cfg, params, tokens, Lb, 0);
-    var Ld = alloc(T_run * V * 8);
-    var kv = alloc(ru_decode_kv_count(cfg) * 8);
-    var row = alloc(V * 8);
-    var pos = 0;
-    while (pos < T_run) {
-        ru_model_fwd_row(cfg, params, load64(tokens + pos * 8), pos, kv, row);
-        var v = 0;
-        while (v < V) { store64(Ld + (pos * V + v) * 8, load64(row + v * 8)); v = v + 1; }
-        pos = pos + 1;
+    var diffs = anuk_decode_check(cfg, params, tokens, Lb);
+    if (diffs < 0) {
+        _anuk_eput("forward rejected the input (rupantara code "); _anuk_eput_int(diffs); _anuk_eput(")\n");
+        return 1;
     }
-    var diffs = 0;
-    i = 0;
-    while (i < T_run * V) { if (load64(Lb + i * 8) != load64(Ld + i * 8)) { diffs = diffs + 1; } i = i + 1; }
     _anuk_sput("batch forward vs KV-cache decode: logit diffs="); _anuk_puti(diffs); _anuk_sput("\n");
     var last = Lb + (T_run - 1) * V * 8;
     var am = ru_argmax(last, V);
     _anuk_sput("next-token argmax (last pos): id="); _anuk_puti(am); _anuk_sput("\n");
     var mx = load64(last + am * 8);
     if (f64_eq(mx, mx) == 0) {
-        _anuk_sput("logits: NaN — the IMPORT is correct (weights + batch==decode are clean); the\n");
-        _anuk_sput("  forward NaN is ganita f64_tanh overflowing (inf/inf) for |x|>~709, which GPT-2's\n");
-        _anuk_sput("  GELU x^3 hits on massive-activation outliers. Fix: saturate f64_tanh. See issue.\n");
+        # (ganita's f64_tanh used to overflow to NaN here for |x| > ~709; it has
+        # saturated since the 6.3.31 pin — issue 2026-07-02 is closed.)
+        _anuk_sput("logits: NaN — FAIL (see params with NaN above)\n");
         return 1;
     }
     _anuk_sput("logits finite: OK\n");
-    if (diffs == 0) { _anuk_sput("RESULT: real GPT-2 imported + ran; batch==decode bit-identical\n"); return 0; }
+    if (diffs == 0) {
+        _anuk_sput("RESULT: GPT-2 imported via "); _anuk_sput(label);
+        _anuk_sput(" + ran; batch==decode bit-identical\n");
+        return 0;
+    }
     _anuk_sput("RESULT: ran, but batch != decode — investigate\n");
     return 1;
 }
 
-# `gpt2-gguf <model.gguf>` — the same no-oracle validation as `gpt2`, through
-# the GGUF door: import (KV-driven config, blk.N.* mapping, transpose-back),
-# then batch forward vs KV-cache decode must be bit-identical.
+# `gpt2 <model.safetensors>` — import a real GPT-2-small checkpoint (12 heads;
+# safetensors doesn't carry them) and run the batch-vs-decode check.
+fn _gpt2_run(path): i64 {
+    var cfg = alloc(64);
+    var params = anuk_gpt2_import(path, 12, 8, cfg);       # mmap (past alloc cap)
+    if (params == 0) { _anuk_eput("gpt2: import failed (open / infer / pack)\n"); return 1; }
+    return _anuk_run_check("safetensors", cfg, params);
+}
+
+# `gpt2-gguf <model.gguf>` — the same check through the GGUF door (KV-driven
+# config, blk.N.* mapping, transpose-back).
 fn _ggpt2_run(path): i64 {
     var cfg = alloc(64);
-    var T_run = 8;
-    var params = anuk_ggpt2_import(path, T_run, cfg);
-    if (params == 0) { _anuk_sput("gpt2-gguf: import failed (open / infer / pack)\n"); return 1; }
-    var V = _cfg_V(cfg);
-    _anuk_sput("imported GPT-2 (GGUF): V="); _anuk_puti(V);
-    _anuk_sput(" C="); _anuk_puti(_cfg_C(cfg));
-    _anuk_sput(" NL="); _anuk_puti(_cfg_NL(cfg));
-    _anuk_sput(" heads="); _anuk_puti(_cfg_nh(cfg));
-    _anuk_sput(" T_run="); _anuk_puti(T_run); _anuk_sput("\n");
-    var tokens = alloc(T_run * 8);
-    var i = 0;
-    while (i < T_run) { store64(tokens + i * 8, (i * 137 + 11) % V); i = i + 1; }
-    var Lb = alloc(T_run * V * 8);
-    ru_model_fwd(cfg, params, tokens, Lb, 0);
-    var Ld = alloc(T_run * V * 8);
-    var kv = alloc(ru_decode_kv_count(cfg) * 8);
-    var row = alloc(V * 8);
-    var pos = 0;
-    while (pos < T_run) {
-        ru_model_fwd_row(cfg, params, load64(tokens + pos * 8), pos, kv, row);
-        var v = 0;
-        while (v < V) { store64(Ld + (pos * V + v) * 8, load64(row + v * 8)); v = v + 1; }
-        pos = pos + 1;
-    }
-    var diffs = 0;
-    i = 0;
-    while (i < T_run * V) { if (load64(Lb + i * 8) != load64(Ld + i * 8)) { diffs = diffs + 1; } i = i + 1; }
-    _anuk_sput("batch forward vs KV-cache decode: logit diffs="); _anuk_puti(diffs); _anuk_sput("\n");
-    var am = ru_argmax(Lb + (T_run - 1) * V * 8, V);
-    _anuk_sput("next-token argmax (last pos): id="); _anuk_puti(am); _anuk_sput("\n");
-    if (diffs == 0) { _anuk_sput("RESULT: GPT-2 imported via GGUF + ran; batch==decode bit-identical\n"); return 0; }
-    _anuk_sput("RESULT: ran, but batch != decode — investigate\n");
-    return 1;
+    var params = anuk_ggpt2_import(path, 8, cfg);
+    if (params == 0) { _anuk_eput("gpt2-gguf: import failed (open / infer / pack)\n"); return 1; }
+    return _anuk_run_check("GGUF", cfg, params);
 }
 
 # `gpt2-cross <model.safetensors> <model.gguf>` — THE cross-format gate: the
@@ -144,14 +105,20 @@ fn _gpt2_cross(st_path, gg_path): i64 {
     var cfgA = alloc(64);
     var T_run = 8;
     var pA = anuk_gpt2_import(st_path, 12, T_run, cfgA);
-    if (pA == 0) { _anuk_sput("gpt2-cross: safetensors import failed\n"); return 1; }
+    if (pA == 0) { _anuk_eput("gpt2-cross: safetensors import failed\n"); return 1; }
     var cfgB = alloc(64);
     var pB = anuk_ggpt2_import(gg_path, T_run, cfgB);
-    if (pB == 0) { _anuk_sput("gpt2-cross: gguf import failed\n"); return 1; }
-    if (_cfg_V(cfgA) != _cfg_V(cfgB)) { _anuk_sput("gpt2-cross: V mismatch\n"); return 1; }
-    if (_cfg_C(cfgA) != _cfg_C(cfgB)) { _anuk_sput("gpt2-cross: C mismatch\n"); return 1; }
-    if (_cfg_NL(cfgA) != _cfg_NL(cfgB)) { _anuk_sput("gpt2-cross: NL mismatch\n"); return 1; }
-    if (_cfg_F(cfgA) != _cfg_F(cfgB)) { _anuk_sput("gpt2-cross: F mismatch\n"); return 1; }
+    if (pB == 0) { _anuk_eput("gpt2-cross: gguf import failed\n"); return 1; }
+    # every field (1.2.2: nh and T weren't compared, so a GGUF with other heads
+    # passed the params check and only failed later, on logits)
+    var k = 0;
+    while (k < 8) {
+        if (load64(cfgA + k * 8) != load64(cfgB + k * 8)) {
+            _anuk_eput("gpt2-cross: config mismatch at field "); _anuk_eput_int(k); _anuk_eput("\n");
+            return 1;
+        }
+        k = k + 1;
+    }
     var np = ru_params_count(cfgA);
     var pdiffs = 0;
     var i = 0;
@@ -159,115 +126,96 @@ fn _gpt2_cross(st_path, gg_path): i64 {
     _anuk_sput("packed params: "); _anuk_puti(np);
     _anuk_sput(" total, diffs="); _anuk_puti(pdiffs); _anuk_sput("\n");
     var V = _cfg_V(cfgA);
-    var tokens = alloc(T_run * 8);
-    i = 0;
-    while (i < T_run) { store64(tokens + i * 8, (i * 137 + 11) % V); i = i + 1; }
+    var tokens = anuk_demo_tokens(T_run, V);
     var LA = alloc(T_run * V * 8);
     var LB = alloc(T_run * V * 8);
-    ru_model_fwd(cfgA, pA, tokens, LA, 0);
-    ru_model_fwd(cfgB, pB, tokens, LB, 0);
+    var ra = ru_model_fwd(cfgA, pA, tokens, LA, 0);
+    var rb = ru_model_fwd(cfgB, pB, tokens, LB, 0);
+    if (ra != RU_OK() || rb != RU_OK()) {
+        _anuk_eput("gpt2-cross: forward rejected the input\n");
+        return 1;
+    }
     var ldiffs = 0;
     i = 0;
     while (i < T_run * V) { if (load64(LA + i * 8) != load64(LB + i * 8)) { ldiffs = ldiffs + 1; } i = i + 1; }
     _anuk_sput("logits ("); _anuk_puti(T_run * V);
     _anuk_sput("): diffs="); _anuk_puti(ldiffs); _anuk_sput("\n");
-    if (pdiffs == 0) { if (ldiffs == 0) {
-            _anuk_sput("RESULT: cross-format BIT-IDENTICAL (safetensors == GGUF)\n");
-            return 0;
-        } }
+    if (pdiffs == 0 && ldiffs == 0) {
+        _anuk_sput("RESULT: cross-format BIT-IDENTICAL (safetensors == GGUF)\n");
+        return 0;
+    }
     _anuk_sput("RESULT: cross-format mismatch — investigate\n");
     return 1;
 }
 
+# 1 iff the command has at least `n` argv entries; otherwise prints `msg` to
+# stderr and returns 0.
+fn _need(n, msg): i64 {
+    if (argc() >= n) { return 1; }
+    _anuk_eput(msg);
+    return 0;
+}
+
+# Dispatch argv(1) to a command; returns the process exit code.
 fn main(): i64 {
     alloc_init();
     args_init();
-    if (argc() < 2) { usage(); return 0; }
+    if (argc() < 2) { usage(1); return 0; }
     var cmd = argv(1);
+    if (streq(cmd, "help") == 1 || streq(cmd, "--help") == 1 || streq(cmd, "-h") == 1) { usage(1); return 0; }
     if (streq(cmd, "inspect") == 1) {
-        if (argc() < 3) {
-            var e = "anukulana: inspect needs a <file.tula>\n";
-            syscall(1, 1, e, strlen(e));
-            return 1;
-        }
+        if (_need(3, "anukulana: inspect needs a <file.tula>\n") == 0) { return 1; }
         if (anuk_inspect(argv(2)) < 0) { return 1; }
         return 0;
     }
     if (streq(cmd, "version") == 1) {
         _anuk_puti(anukulana_version());
-        syscall(1, 1, "\n", 1);
+        _anuk_sput("\n");
         return 0;
     }
     if (streq(cmd, "gpt2") == 1) {
-        if (argc() < 3) {
-            var e = "anukulana: gpt2 needs a <model.safetensors>\n";
-            syscall(1, 1, e, strlen(e));
-            return 1;
-        }
+        if (_need(3, "anukulana: gpt2 needs a <model.safetensors>\n") == 0) { return 1; }
         return _gpt2_run(argv(2));
     }
     if (streq(cmd, "gpt2-oracle") == 1) {
-        if (argc() < 4) {
-            var e = "anukulana: gpt2-oracle needs <model.safetensors> <fixture.bin>\n";
-            syscall(1, 1, e, strlen(e));
-            return 1;
-        }
+        if (_need(4, "anukulana: gpt2-oracle needs <model.safetensors> <fixture.bin>\n") == 0) { return 1; }
         return anuk_gpt2_oracle(argv(2), argv(3));
     }
     if (streq(cmd, "gpt2-lora") == 1) {
-        if (argc() < 3) {
-            var e = "anukulana: gpt2-lora needs a <model.safetensors>\n";
-            syscall(1, 1, e, strlen(e));
-            return 1;
-        }
+        if (_need(3, "anukulana: gpt2-lora needs a <model.safetensors>\n") == 0) { return 1; }
         return anuk_gpt2_lora(argv(2));
     }
     if (streq(cmd, "gpt2-qlora") == 1) {
-        if (argc() < 3) {
-            var e = "anukulana: gpt2-qlora needs a <model.safetensors>\n";
-            syscall(1, 1, e, strlen(e));
-            return 1;
-        }
+        if (_need(3, "anukulana: gpt2-qlora needs a <model.safetensors>\n") == 0) { return 1; }
         return anuk_gpt2_qlora(argv(2));
     }
     if (streq(cmd, "gpt2-gguf") == 1) {
-        if (argc() < 3) {
-            var e = "anukulana: gpt2-gguf needs a <model.gguf>\n";
-            syscall(1, 1, e, strlen(e));
-            return 1;
-        }
+        if (_need(3, "anukulana: gpt2-gguf needs a <model.gguf>\n") == 0) { return 1; }
         return _ggpt2_run(argv(2));
     }
     if (streq(cmd, "gpt2-cross") == 1) {
-        if (argc() < 4) {
-            var e = "anukulana: gpt2-cross needs <model.safetensors> <model.gguf>\n";
-            syscall(1, 1, e, strlen(e));
-            return 1;
-        }
+        if (_need(4, "anukulana: gpt2-cross needs <model.safetensors> <model.gguf>\n") == 0) { return 1; }
         return _gpt2_cross(argv(2), argv(3));
     }
     if (streq(cmd, "gpt2-tula") == 1) {
-        if (argc() < 5) {
-            var e = "anukulana: gpt2-tula needs <model.safetensors> <ckpt.tula> <adapter.tula> [--sk <key>]\n";
-            syscall(1, 1, e, strlen(e));
-            return 1;
-        }
+        var e1 = "anukulana: gpt2-tula needs <model.safetensors> <ckpt.tula> <adapter.tula>";
+        if (argc() < 5) { _anuk_eput(e1); _anuk_eput(" [--sk <key>]\n"); return 1; }
         var sk_path = 0;
         if (argc() >= 6) {
-            if (streq(argv(5), "--sk") == 1) {
-                if (argc() < 7) {
-                    var e2 = "anukulana: --sk needs a <operator.sk> path\n";
-                    syscall(1, 1, e2, strlen(e2));
-                    return 1;
-                }
-                sk_path = argv(6);
+            # 1.2.2: anything but `--sk <path>` here was silently ignored
+            if (streq(argv(5), "--sk") == 0 || argc() > 7) {
+                _anuk_eput("anukulana: gpt2-tula: unknown option (only --sk <operator.sk>)\n");
+                return 2;
             }
+            if (_need(7, "anukulana: --sk needs a <operator.sk> path\n") == 0) { return 1; }
+            sk_path = argv(6);
         }
         return anuk_gpt2_tula(argv(2), argv(3), argv(4), sk_path);
     }
-    usage();
-    return 0;
+    _anuk_eput("anukulana: unknown command: "); _anuk_eput(cmd); _anuk_eput("\n\n");
+    usage(2);
+    return 2;
 }
 
 var exit_code = main();
-syscall(60, exit_code);
+sys_exit(exit_code);

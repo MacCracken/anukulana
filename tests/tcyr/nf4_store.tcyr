@@ -192,13 +192,118 @@ fn test_bad_cfg_rejected(): i64 {
     return 0;
 }
 
+fn _mf_keys(sk, pk): i64 {
+    var seed = alloc(32);
+    var k = 0;
+    while (k < 32) { store8(seed + k, (k * 11 + 3) & 0xFF); k = k + 1; }
+    ed25519_keypair(seed, sk, pk);
+    return 0;
+}
+fn _mf_write(b, sk, path): i64 {
+    var buf = tula_builder_finish_signed(b, sk);
+    return tula_write_file(path, buf, tula_total_len(buf));
+}
+# an adapter file; `mode` breaks one thing (0 = valid)
+fn _mf_adapter(sk, path, mode): i64 {
+    var C = 4; var r = 2; var V = 3;
+    var meta = t_alloc(2);
+    store64(meta, f64_from(2));
+    store64(meta + 8, f64_from(r));
+    if (mode == 4) { store64(meta + 8, f64_from(r + 1)); }   # meta says another rank
+    var b = tula_builder_new();
+    if (mode == 2) { tula_builder_add(b, "lora.A", TULA_DT_INT8, _nfs_shp2(C, r), 2, alloc(C * r), C * r); }
+    else { tula_builder_add(b, "lora.A", TULA_DT_F64, _nfs_shp2(C, r), 2, t_alloc(C * r), C * r * 8); }
+    if (mode == 3) { tula_builder_add(b, "lora.A", TULA_DT_F64, _nfs_shp2(C, r), 2, t_alloc(C * r), C * r * 8); }
+    tula_builder_add(b, "lora.B", TULA_DT_F64, _nfs_shp2(r, V), 2, t_alloc(r * V), r * V * 8);
+    if (mode == 1) { tula_builder_add(b, "lora.meta", TULA_DT_F64, _nfs_shp1(1), 1, meta, 8); }
+    else { tula_builder_add(b, "lora.meta", TULA_DT_F64, _nfs_shp1(2), 1, meta, 16); }
+    return _mf_write(b, sk, path);
+}
+# an NF4 checkpoint for a cfg with nb > 256 (two superblocks); `mode` breaks one thing
+fn _mf_ckpt(sk, path, mode): i64 {
+    var cfg = alloc(64);
+    ru_cfg_init(cfg, 600, 32, 2, 1, 1, 1, 128, 1);
+    var np = ru_params_count(cfg);
+    var nb = tula_nf4_blocks(np, NF4_BS());
+    var cfgv = t_alloc(8);
+    store64(cfgv, f64_from(600)); store64(cfgv + 8, f64_from(32)); store64(cfgv + 16, f64_from(2));
+    store64(cfgv + 24, f64_from(1)); store64(cfgv + 32, f64_from(1)); store64(cfgv + 40, f64_from(1));
+    store64(cfgv + 48, f64_from(128)); store64(cfgv + 56, f64_from(1));
+    var b = tula_builder_new();
+    if (mode == 2) { tula_builder_add(b, "cfg", TULA_DT_INT8, _nfs_shp1(64), 1, cfgv, 64); }
+    else { tula_builder_add(b, "cfg", TULA_DT_F64, _nfs_shp1(8), 1, cfgv, 64); }
+    if (mode == 3) { tula_builder_add(b, "base.nf4", TULA_DT_F64, _nfs_shp1(np), 1, t_alloc(np), np * 8); }
+    else {
+        tula_builder_add(b, "base.nf4", TULA_DT_NF4, _nfs_shp1(np), 1, alloc(tula_nf4_bytes(np)),
+          tula_nf4_bytes(np));
+    }
+    tula_builder_add(b, "base.nf4.scale.q8", TULA_DT_INT8, _nfs_shp1(nb), 1, alloc(nb), nb);
+    if (mode == 1) { tula_builder_add(b, "base.nf4.scale.sup", TULA_DT_F64, _nfs_shp1(1), 1, t_alloc(1), 8); }
+    else { tula_builder_add(b, "base.nf4.scale.sup", TULA_DT_F64, _nfs_shp1(2), 1, t_alloc(2), 16); }
+    return _mf_write(b, sk, path);
+}
+
+# 1.2.2: signed files are read only if every tensor is exactly what the layout
+# says. Through 1.2.1 each of these was accepted and read past a payload.
+fn test_malformed_files(): i64 {
+    var sk = alloc(64);
+    var pk = alloc(32);
+    _mf_keys(sk, pk);
+    var A = t_alloc(8); var B = t_alloc(6); var out = t_alloc(2);
+    var path = "/tmp/anuk_nf4_store_mf.tula";
+    _mf_adapter(sk, path, 0);
+    assert_eq(anuk_adapter_load(path, pk, A, B, 4, 2, 3, out), 0, "well-formed adapter loads");
+    _mf_adapter(sk, path, 1);
+    assert_eq(anuk_adapter_load(path, pk, A, B, 4, 2, 3, out), 0 - 1, "adapter with lora.meta [1] rejected");
+    _mf_adapter(sk, path, 2);
+    assert_eq(anuk_adapter_load(path, pk, A, B, 4, 2, 3, out), 0 - 1, "adapter with an INT8 lora.A rejected");
+    _mf_adapter(sk, path, 3);
+    assert_eq(anuk_adapter_load(path, pk, A, B, 4, 2, 3, out), 0 - 1,
+      "adapter with two lora.A entries rejected (strict validation)");
+    _mf_adapter(sk, path, 4);
+    assert_eq(anuk_adapter_load(path, pk, A, B, 4, 2, 3, out), 0 - 1, "adapter whose meta rank differs rejected");
+    var cfg2 = alloc(64);
+    _mf_ckpt(sk, path, 0);
+    assert_nonnull(anuk_nf4_load(path, pk, cfg2), "well-formed two-superblock checkpoint loads");
+    _mf_ckpt(sk, path, 1);
+    assert_eq(anuk_nf4_load(path, pk, cfg2), 0, "checkpoint with one superblock max where two are needed rejected");
+    _mf_ckpt(sk, path, 2);
+    assert_eq(anuk_nf4_load(path, pk, cfg2), 0, "checkpoint with an INT8 cfg rejected");
+    _mf_ckpt(sk, path, 3);
+    assert_eq(anuk_nf4_load(path, pk, cfg2), 0, "checkpoint whose base.nf4 is F64 rejected");
+    # a cfg rupantara rejects is refused at save time too
+    var bad = alloc(64);
+    ru_cfg_init(bad, 11, 4, 2, 0, 0, 1, 16, 1);
+    assert_eq(anuk_nf4_save(path, bad, t_alloc(8), sk), 0 - 1, "nf4_save with nh = 0 refused");
+    return 0;
+}
+
+# 1.2.2: a key file must be exactly seed||pk, with pk derived from the seed
+fn test_sk_file_checks(): i64 {
+    var sk = alloc(96);
+    var pk = alloc(32);
+    _mf_keys(sk, pk);
+    file_write_all("/tmp/anuk_sk_96.sk", sk, 96);
+    assert_eq(anuk_sk_load("/tmp/anuk_sk_96.sk"), 0, "96-byte key file rejected");
+    file_write_all("/tmp/anuk_sk_63.sk", sk, 63);
+    assert_eq(anuk_sk_load("/tmp/anuk_sk_63.sk"), 0, "63-byte key file rejected");
+    file_write_all("/tmp/anuk_sk_ok.sk", sk, 64);
+    assert_nonnull(anuk_sk_load("/tmp/anuk_sk_ok.sk"), "a consistent 64-byte key loads");
+    store8(sk + 40, load8(sk + 40) ^ 0xFF);
+    file_write_all("/tmp/anuk_sk_bad.sk", sk, 64);
+    assert_eq(anuk_sk_load("/tmp/anuk_sk_bad.sk"), 0, "a key whose pk half isn't derive(seed) rejected");
+    return 0;
+}
+
 fn main(): i64 {
     alloc_init();
     test_store();
     test_sk_load();
     test_bad_cfg_rejected();
+    test_malformed_files();
+    test_sk_file_checks();
     return assert_summary();
 }
 
 var rc = main();
-syscall(60, rc);
+sys_exit(rc);

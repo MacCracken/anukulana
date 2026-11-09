@@ -1,6 +1,11 @@
 # ganita `f64_tanh` overflows to NaN for large |x| (blocks real-model import)
 
-**Status:** OPEN — surfaced by anukulana M2 bite 3 (real GPT-2-small import).
+**Status:** CLOSED (closed 2026-11-09, anukulana 1.2.2 audit) — fixed upstream. The 0.2.0 pin
+bump to cyrius 6.3.31 took the first saturating fix, and cyrius 6.6.13 (ganita 1.2.11) replaced the function
+with fdlibm's `expm1` form. At 6.7.18 `ganita_f64_tanh` returns ±1 for |x| > 20, so `f64_tanh(1000)` is 1.
+The status line was never updated when the fix landed; the body below is the original report.
+
+**Originally:** OPEN — surfaced by anukulana M2 bite 3 (real GPT-2-small import).
 **Affected:** `ganita` (`ganita_f64_tanh`, aliased `f64_tanh`) → therefore every
 GELU consumer: **rupantara** `ru_gelu_fwd`, **attn11** `gelu_fwd`, and anything
 calling `f64_tanh` on a large argument. `ganita` is a v1.0 lib folded into the

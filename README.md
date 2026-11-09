@@ -15,9 +15,10 @@ them: the weight **format** is `tula`; the transformer **forward** is `rupantara
 
 ## Status
 
-**1.1.0 — STABLE: the Type-3 reference, frozen at 1.0.0 + the GGUF door** ([`docs/api.md`](docs/api.md) +
+**1.2.2 — STABLE: the Type-3 reference, frozen at 1.0.0 + the GGUF door** ([`docs/api.md`](docs/api.md) +
 [`STABILITY.md`](STABILITY.md); parsers fuzz-gated, audited —
-[`SECURITY.md`](SECURITY.md); benchmarks captured). The charter (import → run →
+[`SECURITY.md`](SECURITY.md) and the 2026-11-09 P(-1) sweep,
+[`docs/audit/2026-11-09-audit.md`](docs/audit/2026-11-09-audit.md); benchmarks captured). The charter (import → run →
 match → adapt → persist), as built across 0.2.0–0.5.0: `gpt2` imports a real **GPT-2-small safetensors** and runs it on
 **rupantara** (batch == KV-decode bit-identical); `gpt2-oracle` gates the
 forward against a **committed HF-reference fixture** (argmax identical ×48,
@@ -35,14 +36,17 @@ plus the `blk.N.*` GPT-2 mapping; `gpt2-gguf` runs the real checkpoint through
 the second foreign door, and `gpt2-cross` proves **both doors bit-identical**
 (123.6M packed params / 402k logits, 0 diffs). Quantized GGML payloads and the
 TinyLlama-class (llama-architecture) mapping are the next lanes; see
-[`docs/development/roadmap.md`](docs/development/roadmap.md). Cyrius pin
-**6.3.31**.
+[`docs/development/roadmap.md`](docs/development/roadmap.md). The Cyrius pin and
+the dependency tags are in [`cyrius.cyml`](cyrius.cyml); the CHANGELOG records
+each move.
 
 ## Build & test
 
 ```sh
 make build   # cyrius build src/main.cyr build/anukulana
 make test    # tests/tcyr/*.tcyr
+make lint && make fmt-check && make vet && make doc   # the quality gates
+make bench   # import hot-path benchmarks (docs/benchmarks.md)
 ./build/anukulana        # prints usage
 ```
 
@@ -56,8 +60,9 @@ exactly, logits within fp32 rounding. See the roadmap.
 ## Ecosystem
 
 Gap #1's importer. See the AGNOS planning docs `type3-weight-import.md` +
-`software-port-path.md`. Depends on `tula` (format, released 0.1.0), `rupantara`
-(forward), `rosnet`, `akshara`.
+`software-port-path.md`. Depends on `tula` (the weight format), `rupantara` (the
+forward), `rosnet` (tensors) and `sigil` (Ed25519); `akshara` (the tokenizer) is
+not wired yet.
 
 ## License
 

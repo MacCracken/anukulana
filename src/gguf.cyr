@@ -26,7 +26,10 @@
 #   ... packed below) | +40 kv_count | +48 kv_index (kv_count × 32:
 #   key_ptr key_len vtype val_off)
 
+# The GGUF magic: the bytes "GGUF" read as a little-endian u32.
 fn GGUF_MAGIC(): i64 { return 0x46554747; }
+# Cap on one tensor's element count (2^29, about 2 GB of F32).
+fn GG_MAX_ELEMS(): i64 { return 536870912; }
 
 # ---- little-endian readers (bounds are the CALLER's duty inside the parser) --
 fn _gg_u32(buf, off): i64 { return load32(buf + off) & 0xFFFFFFFF; }
@@ -96,21 +99,36 @@ fn _gg_gtype_size(t): i64 {
 }
 
 # ---- entry accessors (entry = 128B) -----------------------------------------
+# Number of tensors in reader r.
 fn gg_count(r): i64 { return load64(r + 24); }
+# Entry record i (0 <= i < gg_count(r)).
 fn gg_entry(r, i): i64 { return load64(r + 32) + i * 128; }
-fn gg_entry_name(e): i64 { return load64(e); }        # ptr into buf (NOT nul-terminated)
+# The tensor's name: a pointer into the file, NOT NUL-terminated (see _len).
+fn gg_entry_name(e): i64 { return load64(e); }
+# Length of the tensor's name in bytes.
 fn gg_entry_name_len(e): i64 { return load64(e + 8); }
+# The tensor's rank, 1..4.
 fn gg_entry_ndim(e): i64 { return load64(e + 16); }
-fn gg_entry_dim(e, k): i64 { return load64(e + 24 + k * 8); }   # ne-order (0 = innermost)
+# Dim k in ne-order (0 = innermost), or 0 for k outside [0, ndim).
+fn gg_entry_dim(e, k): i64 {
+    if (k < 0) { return 0; }
+    if (k >= gg_entry_ndim(e)) { return 0; }
+    return load64(e + 24 + k * 8);
+}
+# The tensor's ggml type id (only F32 = 0 and F16 = 1 pass gg_open).
 fn gg_entry_gtype(e): i64 { return load64(e + 56); }
+# Element count: the product of the dims. gg_open checks it stays within
+# GG_MAX_ELEMS without wrapping.
 fn gg_entry_nelems(e): i64 {
     var n = 1;
     var k = 0;
-    while (k < gg_entry_ndim(e)) { n = n * gg_entry_dim(e, k); k = k + 1; }
+    while (k < gg_entry_ndim(e)) { n = n * load64(e + 24 + k * 8); k = k + 1; }
     return n;
 }
+# Pointer to the tensor's payload (its extent is validated by gg_open).
 fn gg_entry_data(r, e): i64 { return load64(r) + load64(r + 16) + load64(e + 64); }
 
+# Find the first tensor named `name` (a cstring); returns its entry or 0.
 fn gg_find(r, name): i64 {
     var nl = strlen(name);
     var i = 0;
@@ -154,7 +172,10 @@ fn _gg_kv_find(r, key): i64 {
 }
 
 # read an integer-valued KV (u8..u64/i64/bool) by key; `found` (i64 cell) set
-# 1/0. Returns the value (0 when absent).
+# 1/0. Returns the value (0 when absent). Each value is read at its own width
+# (1.2.2: a u16/i16 was read with a 4-byte load, 2 bytes past a value that ends
+# the buffer) and the signed types i8/i16/i32 are sign-extended (they read as
+# unsigned through 1.2.1, so i32 -1 came back as 4294967295).
 fn gg_kv_int(r, key, found): i64 {
     store64(found, 0);
     var kv = _gg_kv_find(r, key);
@@ -164,11 +185,20 @@ fn gg_kv_int(r, key, found): i64 {
     var off = load64(kv + 24);
     var v = 0;
     if (t == 0) { v = load8(buf + off); }
-    elif (t == 1) { v = load8(buf + off); }
-    elif (t == 2) { v = load32(buf + off) & 0xFFFF; }
-    elif (t == 3) { v = load32(buf + off) & 0xFFFF; }
+    elif (t == 1) {
+        v = load8(buf + off);
+        if (v >= 128) { v = v - 256; }
+    }
+    elif (t == 2) { v = load8(buf + off) | (load8(buf + off + 1) << 8); }
+    elif (t == 3) {
+        v = load8(buf + off) | (load8(buf + off + 1) << 8);
+        if (v >= 32768) { v = v - 65536; }
+    }
     elif (t == 4) { v = _gg_u32(buf, off); }
-    elif (t == 5) { v = _gg_u32(buf, off); }
+    elif (t == 5) {
+        v = _gg_u32(buf, off);
+        if (v >= 2147483648) { v = v - 4294967296; }
+    }
     elif (t == 7) { v = load8(buf + off); }
     elif (t == 10) { v = _gg_u64(buf, off); }
     elif (t == 11) { v = _gg_u64(buf, off); }
@@ -288,9 +318,16 @@ fn gg_open(buf, len): i64 {
         var e2 = entries + i * 128;
         var esz = _gg_gtype_size(load64(e2 + 56));
         if (esz < 0) { return 0; }                   # quantized/unknown dtype: later lane
-        var ne = gg_entry_nelems(e2);
-        if (ne < 1) { return 0; }
-        if (ne > 536870912) { return 0; }            # 2^29 elems (~2 GB f32) sanity cap
+        # element count, checked at every step: 4 dims of up to 2^30 can multiply
+        # past 2^64 (dims [4,27905,429509837,384773] wrapped to 4 through 1.2.1)
+        var ne = 1;
+        var k2 = 0;
+        while (k2 < load64(e2 + 16)) {
+            var d2 = load64(e2 + 24 + k2 * 8);
+            if (ne > GG_MAX_ELEMS() / d2) { return 0; }   # d2 >= 1 (checked above)
+            ne = ne * d2;
+            k2 = k2 + 1;
+        }
         var nb = ne * esz;
         var o2 = load64(e2 + 64);
         if (o2 < 0) { return 0; }
@@ -301,29 +338,29 @@ fn gg_open(buf, len): i64 {
     return r;
 }
 
-# read a tensor into a caller f64[nelems] buffer, widening per dtype
-fn gg_read_f64(r, e, dst): i64 {
+# Read elements [start, start + n) of tensor e (flat, ne-order) into dst[0..n) as
+# f64 (1.2.2). Uses the safetensors path's bulk wideners (bit-identical to the
+# per-element ones; F16 is byte-composed, so the last element never reads past
+# the payload). Returns n, or -1 for a range outside the tensor or a dtype other
+# than F32/F16.
+fn gg_read_f64_range(r, e, start, n, dst): i64 {
+    var total = gg_entry_nelems(e);
+    if (start < 0) { return 0 - 1; }
+    if (n < 0) { return 0 - 1; }
+    if (n > total) { return 0 - 1; }
+    if (start > total - n) { return 0 - 1; }
     var p = gg_entry_data(r, e);
-    var ne = gg_entry_nelems(e);
     var t = gg_entry_gtype(e);
-    var i = 0;
-    if (t == 0) {
-        while (i < ne) { store64(dst + i * 8, _st_f32_to_f64(load32(p + i * 4) & 0xFFFFFFFF)); i = i + 1; }
-        return ne;
-    }
-    if (t == 1) {
-        while (i < ne) {
-            # byte-composed (a 4-byte load at the final element could read past EOF)
-            var h = load8(p + i * 2) | (load8(p + i * 2 + 1) << 8);
-            store64(dst + i * 8, _st_f16_to_f64(h));
-            i = i + 1;
-        }
-        return ne;
-    }
+    if (t == 0) { _st_widen_f32(p + start * 4, dst, n); return n; }
+    if (t == 1) { _st_widen_f16(p + start * 2, dst, n); return n; }
     return 0 - 1;
 }
+# Read the whole tensor into dst (gg_entry_nelems f64). Returns the element
+# count, or -1 for an unsupported dtype.
+fn gg_read_f64(r, e, dst): i64 { return gg_read_f64_range(r, e, 0, gg_entry_nelems(e), dst); }
 
-# mmap a GGUF file read-only (zero-copy, past the alloc cap) and open it.
+# mmap a GGUF file read-only (zero-copy, past the alloc cap) and open it. The
+# mapping is unmapped again if the file is rejected (1.2.2).
 fn gg_open_mmap(path): i64 {
     var fd = file_open(path, 0, 0);
     if (fd < 0) { return 0; }
@@ -332,5 +369,7 @@ fn gg_open_mmap(path): i64 {
     var addr = mmap_file_ro(fd, size);
     file_close(fd);
     if (addr == 0) { return 0; }
-    return gg_open(addr, size);
+    var r = gg_open(addr, size);
+    if (r == 0) { cyr_munmap(addr, size); }
+    return r;
 }

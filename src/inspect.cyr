@@ -4,34 +4,66 @@
 # foreign safetensors/GGUF path lands in M2. Untrusted-input safe by delegation:
 # tula_read_file fully validates (bomb-guard + tula_validate) before any accessor.
 
-fn _anuk_sput(s): i64 { syscall(1, 1, s, strlen(s)); return 0; }
+# Write a NUL-terminated string to stdout.
+fn _anuk_sput(s): i64 { sys_write(1, s, strlen(s)); return 0; }
+# Write a NUL-terminated string to stderr (1.2.2: error messages went to stdout).
+fn _anuk_eput(s): i64 { sys_write(2, s, strlen(s)); return 0; }
 
-# print an i64 as decimal to stdout (minimal; dims / counts / lengths).
-fn _anuk_puti(n): i64 {
-    if (n < 0) { _anuk_sput("-"); n = 0 - n; }
-    if (n == 0) { _anuk_sput("0"); return 0; }
-    var buf = alloc(24);
+# The decimal text of n into buf (at least 21 bytes); returns its length. Every
+# i64 is handled, INT64_MIN included: digits come from the remainder's magnitude,
+# so n is never negated (1.2.2: negating INT64_MIN overflowed and only "-" was
+# printed).
+fn _anuk_itoa(n, buf): i64 {
+    var tmp[24];
+    var neg = 0;
+    if (n < 0) { neg = 1; }
     var i = 0;
-    while (n > 0) {
-        store8(buf + i, (n % 10) + 48);
-        n = n / 10;
+    if (n == 0) { store8(&tmp, 48); i = 1; }
+    while (n != 0) {
+        var d = n % 10;                      # sign of n, magnitude < 10
+        if (d < 0) { d = 0 - d; }
+        store8(&tmp + i, d + 48);
+        n = n / 10;                          # truncates toward zero
         i = i + 1;
     }
-    var j = i - 1;
-    while (j >= 0) { syscall(1, 1, buf + j, 1); j = j - 1; }
+    var p = 0;
+    if (neg == 1) { store8(buf, 45); p = 1; }
+    var j = 0;
+    while (j < i) { store8(buf + p + j, load8(&tmp + (i - 1 - j))); j = j + 1; }
+    return p + i;
+}
+
+# print an i64 as decimal to stdout, in one write (1.2.2: one write per digit).
+fn _anuk_puti(n): i64 {
+    var buf[24];
+    var len = _anuk_itoa(n, &buf);
+    sys_write(1, &buf, len);
+    return 0;
+}
+# print an i64 as decimal to stderr.
+fn _anuk_eput_int(n): i64 {
+    var buf[24];
+    var len = _anuk_itoa(n, &buf);
+    sys_write(2, &buf, len);
     return 0;
 }
 
-# tula dtype int -> human name (tula has no such helper).
+# tula dtype int -> human name (tula has no such helper). F32/F16/BF16 are tula
+# 1.3.0's (ADR 0005); through 1.2.1 they printed as "?".
 fn _anuk_dtype_name(dt): i64 {
     if (dt == TULA_DT_F64) { return "f64"; }
     if (dt == TULA_DT_INT8) { return "int8"; }
     if (dt == TULA_DT_TERNARY) { return "ternary"; }
     if (dt == TULA_DT_NF4) { return "nf4"; }
+    if (dt == TULA_DT_F32) { return "f32"; }
+    if (dt == TULA_DT_F16) { return "f16"; }
+    if (dt == TULA_DT_BF16) { return "bf16"; }
     return "?";
 }
 
 # enumerate the tensors in an opened+validated tula reader; returns the count.
+# Names are printed in full (tula 1.3.0 long names; through 1.2.1 a long name
+# printed as its 47-byte in-place key).
 fn anuk_enumerate(r): i64 {
     var n = tula_count(r);
     _anuk_sput("tensors: "); _anuk_puti(n); _anuk_sput("\n");
@@ -39,7 +71,7 @@ fn anuk_enumerate(r): i64 {
     while (i < n) {
         var e = tula_entry(r, i);
         _anuk_sput("  ");
-        _anuk_sput(tula_entry_name(e));
+        _anuk_sput(tula_entry_full_name(r, e));
         _anuk_sput("  dtype=");
         _anuk_sput(_anuk_dtype_name(tula_entry_dtype(e)));
         _anuk_sput("  shape=[");
@@ -73,9 +105,9 @@ fn anuk_verify(r, pk): i64 {
 fn anuk_inspect(path): i64 {
     var r = tula_read_file(path);
     if (r == 0) {
-        _anuk_sput("anukulana: cannot open (missing or malformed): ");
-        _anuk_sput(path);
-        _anuk_sput("\n");
+        _anuk_eput("anukulana: cannot open (missing or malformed): ");
+        _anuk_eput(path);
+        _anuk_eput("\n");
         return 0 - 1;
     }
     _anuk_sput("tula file: "); _anuk_sput(path); _anuk_sput("\n");

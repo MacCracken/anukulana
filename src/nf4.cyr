@@ -21,11 +21,15 @@
 # No gradients here (forward-only codec) — the gates are exactness properties
 # (tests/tcyr/nf4.tcyr), which now exercise tula's codec through real usage.
 
-fn NF4_BS(): i64 { return TULA_NF4_BLOCK; }   # 64 — the paper's block size (tula constant)
-fn NF4_SBS(): i64 { return 256; }             # scales per double-quant superblock (paper)
+# NF4 block size: 64 weights share one scale (the paper's; tula's TULA_NF4_BLOCK).
+fn NF4_BS(): i64 { return TULA_NF4_BLOCK; }
+# Scales per double-quantization superblock (the paper's 256).
+fn NF4_SBS(): i64 { return 256; }
 
 # ---- base codec: thin delegation to tula -------------------------------------
+# The NF4 codebook value (f64 bits) of a 4-bit code, 0..15.
 fn nf4_value(code): i64 { return tula_nf4_level(code); }
+# The code of the codebook value nearest x (a scale-normalized f64 in [-1, 1]).
 fn nf4_code(x): i64 { return tula_nf4_nearest(x); }
 
 # W(n f64) -> codes (tula_nf4_bytes(n) bytes, 2/byte) + scales (f64 per block)
@@ -34,6 +38,7 @@ fn nf4_quant(W, n, codes, scales): i64 {
     return 0;
 }
 
+# codes + per-block scales -> W_out (n f64): the inverse of nf4_quant.
 fn nf4_dequant(codes, scales, n, W_out): i64 {
     tula_nf4_unpack(codes, scales, n, NF4_BS(), W_out);
     return 0;
@@ -77,6 +82,7 @@ fn nf4_dq_pack(scales, nblocks, q8, supers): i64 {
     return 0;
 }
 
+# q8 + supers -> scales_out (nblocks f64): scale = q8 * superblock absmax / 127.
 fn nf4_dq_unpack(q8, supers, nblocks, scales_out): i64 {
     var sbs = NF4_SBS();
     var i = 0;

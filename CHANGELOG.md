@@ -6,6 +6,86 @@ moving, no API freeze until v1.0).
 
 ## [Unreleased]
 
+## [1.2.2] - 2026-11-09
+
+The P(-1) hardening, optimization and repair sweep, recorded in
+[`docs/audit/2026-11-09-audit.md`](docs/audit/2026-11-09-audit.md). Two HIGH and six MEDIUM defects, all
+reproduced on 1.2.1 first, and the fixes are each pinned by a test. For valid input every output is
+bit-identical to 1.2.1. The import hot paths are 1.4–2.4× faster. Toolchain and dependencies are unchanged
+(cyrius 6.7.18; sigil 3.13.15, tula 1.6.1, rosnet 1.4.1, rupantara 0.5.3).
+
+### Security
+
+- **HIGH — a safetensors tensor's shape was never compared with its payload.** `shape [1e8]` over 4 payload
+  bytes was accepted, and reading it ran 400 MB past the buffer (SIGSEGV); the GPT-2 importer reached it.
+  `st_open` now requires integer, non-negative dims whose product can't wrap, and a payload of exactly
+  shape × element size for every fixed-width dtype.
+- **HIGH — a GGUF weight with too many output rows overflowed a heap scratch.** `attn_qkv.weight` with
+  F + 4096 rows wrote 256 KB past the F·C scratch (SIGSEGV). Every GGUF weight must now have exactly its
+  expected shape, and the scratch is gone.
+- **MEDIUM — GGUF:** dims whose product wraps past 2^64 (`[4,27905,429509837,384773]` → 4 elements) are
+  rejected. u16/i16 KVs are no longer read with a 4-byte load (2 bytes past a value ending the buffer; it
+  crashed at an unmapped page, and `gg_open` reads `general.alignment` this way). i8/i16/i32 are
+  sign-extended.
+- **MEDIUM — signed checkpoints and adapters** are read only after tula's strict validator passes and every
+  tensor has exactly its layout's dtype and shape. Through 1.2.1 a signed file with a 1-element `lora.meta`,
+  an INT8 `lora.A` or a short `base.nf4.scale.sup` was read past its payload.
+- **MEDIUM — both GPT-2 mappings check exact shapes**, not element counts: a transposed `c_attn.weight`, a
+  `wpe` with the wrong row width and a GGUF `attn_qkv` with 4C rows were imported silently.
+- **MEDIUM — `anuk_sk_load`** requires exactly 64 bytes whose public-key half is derived from the seed. A
+  longer file, or one with mismatched halves, was accepted and then signed with a key no verifier accepts.
+- `SECURITY.md`'s threat model is updated for all of the above.
+
+### Fixed
+
+- **The CLI's decode no longer grows the heap per token.** `gpt2` and `gpt2-gguf` now share
+  `anuk_decode_check`, which runs on rupantara's allocation-free `ru_model_fwd_s` / `ru_model_fwd_row_s`
+  over one scratch block and returns rupantara's error code (through 1.2.1 every code was ignored). This
+  is the cross-repo item rupantara's 2026-11-09 audit filed against anukulana.
+- **Oracle:** a fixture `V` whose `V * 8` wrapped passed the overrun check; a NaN in the reference logits was
+  skipped instead of failing the gate; a rejected forward is no longer scored.
+- **`inspect`** names tula 1.3.0's F32/F16/BF16 dtypes (they printed `?`) and prints long names in full
+  (they printed as their 47-byte key). Integers print correctly for INT64_MIN, in one write.
+- **CLI:** errors go to stderr; an unknown command or `gpt2-tula` option exits 2 (an unknown command exited
+  0); `gpt2-cross` compares all 8 config fields; `sys_write` / `sys_exit` replace literal x86 syscall numbers.
+- **Leaks and slips:** rejected files are unmapped; `anuk_nf4_load` releases its mapping; `anuk_nf4_save`
+  unmaps its buffers, checks its cfg and stores `attn_bias` (the 8th cfg slot was labelled "tie" and
+  hard-coded); the QLoRA codes checksum covers the last byte for odd np; 8 unchecked `mmap_anon` results
+  checked; `gpt2-tula` compares all 8 cfg fields after the round trip; `st_entry_dim` / `gg_entry_dim` return
+  0 past ndim.
+- **Docs:** the ganita `f64_tanh` issue is closed (fixed upstream long ago; the status was never updated, and
+  `gpt2`'s NaN message still blamed it). README, `state.md` and `docs/api.md` drift corrected.
+
+### Changed
+
+- **Import hot paths, bit-identical** (median of 3, same host, `tests/anukulana.bcyr`): `st_read_f64` F32
+  12.86 → 5.60 ms per 1M (2.30×), F16 1.36×, `gg_read_f64` F32 1.49×; `anuk_gpt2_pack` 2.40× and
+  `anuk_ggpt2_pack` 1.78× on a 1.06M-param GPT-2. One `load32` per f32, bulk widen loops with an inline
+  normal-number path, the fused QKV split straight into place, `wpe` read to T rows only, and GGUF transposes
+  that widen each element once. Synthetic models: the real-checkpoint gain is projected, not measured.
+- **Refactor:** one head adapter (`anuk_head_adapter_*`) replaces three copies of the demos' adapter buffers
+  and 800-step Adam loop, held bit-identical to the 1.2.1 loop by a test; shared demo token/target/argmax
+  helpers; one batch-vs-decode runner. `tests/common.cyr` holds the test writers.
+- **CI and release:** actions pinned by SHA (checkout v4.4.0, upload-artifact v4.6.2, download-artifact
+  v4.3.0, action-gh-release v2.6.2); `contents: read` by default, `write` only on the publish job;
+  `persist-credentials: false`. New CI steps: `cyrius doc --check`, the benchmarks, and running the binary.
+  Makefile gains `bench` and `doc`; lint and fmt cover the new test files.
+- New out-of-freeze helpers (frozen at the next minor): `st_read_f64_range`, `st_entry_nbytes`,
+  `gg_read_f64_range`, `anuk_decode_check`, `anuk_demo_tokens` / `_targets`, `anuk_argmax_matches`,
+  `anuk_head_adapter_*`.
+- **`anukulana_version()` `10201` → `10202`.**
+
+### Verified
+
+- Suite **139 → 219** assertions across 9 files, green plain, under `cyrius test --bounds`, and under
+  qemu-aarch64 (`--aarch64`, a first for this repo). Lint (also `--strict --strict-deferrals`), fmt, vet and
+  deny are clean; `cyrius doc --check` reports 0 undocumented (was 28); `cyrius deps --locked` is clean.
+- **Mutation testing:** 15 mutants, each reverting one fix, all killed. The upgraded fuzz harness (images
+  against an unmapped guard page, reads on every accepted tensor, a header-digit round) kills the 1.2.1 code.
+- **Not run: `make fidelity` or the checkpoint demos** — still no GPT-2 checkpoint on the verification host.
+  The import changes are held bit-identical by the round-trip, widener-equivalence and refactor tests, but
+  the HF-logit gate hasn't been re-run since 1.1.3.
+
 ## [1.2.1] - 2026-11-09
 
 Moves anukulana to cyrius 6.7.18 and every dependency to its latest release. It also adopts

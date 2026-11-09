@@ -12,11 +12,24 @@
 # forward, and the adapter measurably adapts over the NF4 base with the codes
 # bit-frozen.
 
+# XOR-fold of the n code bytes (8 bytes per lane), for the codes-frozen gate.
+# 1.2.2: covers every code byte; the 1.2.1 loop stopped at np / 2 and missed the
+# last byte when np is odd.
+fn _qlora_codes_checksum(codes, n): i64 {
+    var h = 0;
+    var i = 0;
+    while (i < n) { h = h ^ (load8(codes + i) << ((i % 8) * 8)); i = i + 1; }
+    return h;
+}
+
+# `gpt2-qlora <model.safetensors>`: quantize the imported base to NF4, report the
+# quantization's fidelity, and train the head adapter over the 4-bit base.
+# Returns 0 on PASS, 1 otherwise.
 fn anuk_gpt2_qlora(path): i64 {
     var cfg = alloc(64);
     var T = 8;
     var params = anuk_gpt2_import(path, 12, T, cfg);
-    if (params == 0) { _anuk_sput("qlora: import failed (open / infer / pack)\n"); return 1; }
+    if (params == 0) { _anuk_eput("qlora: import failed (open / infer / pack)\n"); return 1; }
     var V = _cfg_V(cfg);
     var C = _cfg_C(cfg);
     var np = ru_params_count(cfg);
@@ -26,30 +39,30 @@ fn anuk_gpt2_qlora(path): i64 {
 
     # ---- NF4-quantize the whole base (codes + double-quantized scales) --------
     var bs = NF4_BS();
-    var nb = (np + bs - 1) / bs;
-    var codes = mmap_anon(np / 2 + 1);
+    var nb = tula_nf4_blocks(np, bs);
+    var ncode = tula_nf4_bytes(np);
+    var codes = mmap_anon(ncode);
     var scales = mmap_anon(nb * 8);
-    if (codes == 0) { _anuk_sput("qlora: mmap codes failed\n"); return 1; }
-    if (scales == 0) { _anuk_sput("qlora: mmap scales failed\n"); return 1; }
-    nf4_quant(params, np, codes, scales);
     var q8 = mmap_anon(nb);
+    var scales_r = mmap_anon(nb * 8);
+    var params_q = mmap_anon(np * 8);
+    if (codes == 0 || scales == 0 || q8 == 0 || scales_r == 0 || params_q == 0) {
+        _anuk_eput("qlora: mmap failed\n");
+        return 1;
+    }
+    nf4_quant(params, np, codes, scales);
     var supers = t_alloc((nb + NF4_SBS() - 1) / NF4_SBS());
     nf4_dq_pack(scales, nb, q8, supers);
     # from here on use ONLY the double-quantized pipeline (the full recipe)
-    var scales_r = mmap_anon(nb * 8);
     nf4_dq_unpack(q8, supers, nb, scales_r);
-    var params_q = mmap_anon(np * 8);
-    if (params_q == 0) { _anuk_sput("qlora: mmap params_q failed\n"); return 1; }
     nf4_dequant(codes, scales_r, np, params_q);
-    var ck_codes0 = 0;
-    var i = 0;
-    while (i < np / 2) { ck_codes0 = ck_codes0 ^ (load8(codes + i) << ((i % 8) * 8)); i = i + 1; }
+    var ck_codes0 = _qlora_codes_checksum(codes, ncode);
 
     # ---- weight-space fidelity (reported) --------------------------------------
     var wmax = f64_from(0);
     var wsum = f64_from(0);
     var qnan = 0;
-    i = 0;
+    var i = 0;
     while (i < np) {
         var wq = load64(params_q + i * 8);
         if (f64_eq(wq, wq) == 0) { qnan = qnan + 1; }
@@ -64,9 +77,7 @@ fn anuk_gpt2_qlora(path): i64 {
     _anuk_sput("  NaN "); _anuk_puti(qnan); _anuk_sput("\n");
 
     # ---- forward fidelity: f64 base vs NF4 base (reported) ---------------------
-    var tokens = alloc(T * 8);
-    i = 0;
-    while (i < T) { store64(tokens + i * 8, (i * 137 + 11) % V); i = i + 1; }
+    var tokens = anuk_demo_tokens(T, V);
     var f64f = anuk_frozen_features(cfg, params, tokens, T);
     var qf = anuk_frozen_features(cfg, params_q, tokens, T);
     var lg = t_alloc(T * V);
@@ -96,70 +107,22 @@ fn anuk_gpt2_qlora(path): i64 {
     _anuk_sput("/"); _anuk_puti(T); _anuk_sput("\n");
 
     # ---- QLoRA: the LoRA head adapter over the NF4 base ------------------------
-    var targets = alloc(T * 8);
-    i = 0;
-    while (i < T - 1) { store64(targets + i * 8, load64(tokens + (i + 1) * 8)); i = i + 1; }
-    store64(targets + (T - 1) * 8, load64(tokens));
-    var match0 = 0;
-    i = 0;
-    while (i < T) {
-        if (ru_argmax(lgq + i * V * 8, V) == load64(targets + i * 8)) { match0 = match0 + 1; }
-        i = i + 1;
-    }
+    var targets = anuk_demo_targets(tokens, T);
+    var match0 = anuk_argmax_matches(lgq, targets, T, V);
     var r = 8;
     var s = f64_from(2);
-    rng_seed(20260704);
-    var A = t_alloc(C * r);
-    var B = t_alloc(r * V);
-    lora_init(A, B, C, r, V, f64_div(f64_from(2), f64_from(100)));
-    var u = t_alloc(T * r);
-    var t = t_alloc(T * V);
-    var y = t_alloc(T * V);
-    var probs = t_alloc(T * V);
-    var dy = t_alloc(T * V);
-    var dA = t_alloc(C * r);
-    var dB = t_alloc(r * V);
-    var dys = t_alloc(T * V);
-    var du = t_alloc(T * r);
-    var dxs = t_alloc(T * C);
-    var mA = t_alloc(C * r); var vA = t_alloc(C * r);
-    var mB = t_alloc(r * V); var vB = t_alloc(r * V);
+    var ad = anuk_head_adapter_new(T, C, V, r);
     var steps = 800;
     var lr = f64_div(f64_from(1), f64_from(100));
-    var loss0 = f64_from(0);
-    var loss = f64_from(0);
-    var step = 0;
-    while (step < steps) {
-        t_copy(y, lgq, T * V);
-        lora_fwd(qf, A, B, u, t, y, T, C, r, V, s);
-        loss = lora_xent_loss(y, probs, targets, T, V);
-        if (step == 0) { loss0 = loss; }
-        if ((step % 200) == 0) {
-            _anuk_sput("  step "); _anuk_puti(step);
-            _anuk_sput(" loss "); fmt_float(loss, 4); _anuk_sput("\n");
-        }
-        lora_xent_bwd(probs, targets, dy, T, V);
-        t_zero(dA, C * r);
-        t_zero(dB, r * V);
-        lora_bwd(qf, u, A, B, dy, dA, dB, dys, du, dxs, T, C, r, V, s);
-        lora_adam(A, dA, mA, vA, C * r, lr, step + 1);
-        lora_adam(B, dB, mB, vB, r * V, lr, step + 1);
-        step = step + 1;
-    }
+    var loss0p = alloc(8);
+    var loss = anuk_head_adapter_train(ad, qf, lgq, targets, s, steps, lr, 200, loss0p);
+    var loss0 = load64(loss0p);
     _anuk_sput("xent loss over NF4 base: step0 "); fmt_float(loss0, 4);
     _anuk_sput(" -> step"); _anuk_puti(steps);
     _anuk_sput(" "); fmt_float(loss, 4); _anuk_sput("\n");
-    t_copy(y, lgq, T * V);
-    lora_fwd(qf, A, B, u, t, y, T, C, r, V, s);
-    var match1 = 0;
-    i = 0;
-    while (i < T) {
-        if (ru_argmax(y + i * V * 8, V) == load64(targets + i * 8)) { match1 = match1 + 1; }
-        i = i + 1;
-    }
-    var ck_codes1 = 0;
-    i = 0;
-    while (i < np / 2) { ck_codes1 = ck_codes1 ^ (load8(codes + i) << ((i % 8) * 8)); i = i + 1; }
+    var y = anuk_head_adapter_fwd(ad, qf, lgq, s);
+    var match1 = anuk_argmax_matches(y, targets, T, V);
+    var ck_codes1 = _qlora_codes_checksum(codes, ncode);
     _anuk_sput("greedy argmax == target: nf4-base "); _anuk_puti(match0);
     _anuk_sput("/"); _anuk_puti(T);
     _anuk_sput(" -> qlora-adapted "); _anuk_puti(match1);

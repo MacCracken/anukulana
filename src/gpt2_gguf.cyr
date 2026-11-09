@@ -17,41 +17,67 @@
 # gpt2.attention.head_count (nh), gpt2.feed_forward_length (F; absent → 4C);
 # V from token_embd's outer dim. `general.architecture` must be "gpt2".
 
+# Build "blk.<L>.<suffix>" (NUL-terminated) into buf (at least 96 bytes), or
+# into a fresh buffer when buf is 0. Returns the name. (1.2.2: through 1.2.1
+# every call built a new string, 13 per layer.)
 fn _ggpt2_name(buf, L, suffix): i64 {
-    var sb = str_builder_new();
-    str_builder_add_cstr(sb, "blk.");
-    str_builder_add_int(sb, L);
-    str_builder_add_cstr(sb, ".");
-    str_builder_add_cstr(sb, suffix);
-    return str_cstr(str_builder_build(sb));
+    if (buf == 0) { buf = alloc(96); }
+    store8(buf, 98); store8(buf + 1, 108); store8(buf + 2, 107); store8(buf + 3, 46);   # "blk."
+    var p = 4 + _gpt2_itoa(L, buf + 4);
+    store8(buf + p, 46);                                    # '.'
+    p = p + 1;
+    var s = 0;
+    while (load8(suffix + s) != 0) { store8(buf + p, load8(suffix + s)); p = p + 1; s = s + 1; }
+    store8(buf + p, 0);
+    return buf;
 }
 
-# read a 1D tensor (norms/biases) of expected length n directly into dst
+# read a 1D tensor (norms/biases) of exactly [n] directly into dst
 fn _ggpt2_vec(r, name, dst, n): i64 {
     var e = gg_find(r, name);
     if (e == 0) { return 0 - 1; }
-    if (gg_entry_nelems(e) != n) { return 0 - 1; }
+    if (gg_entry_ndim(e) != 1) { return 0 - 1; }
+    if (gg_entry_dim(e, 0) != n) { return 0 - 1; }
     if (gg_read_f64(r, e, dst) != n) { return 0 - 1; }
     return 0;
 }
 
-# read a ggml [out, in] 2D weight and TRANSPOSE into dst[in, out] (row-major),
-# with `osel` selecting an out-range [obase, obase+osz) (the fused-qkv split);
-# scratch holds the widened source (osz*insz f64, caller-sized).
-fn _ggpt2_mat_t(r, name, dst, insz, osz, obase, scratch): i64 {
+# read the fused qkv bias, exactly [3C], straight into bq / bk / bv
+fn _ggpt2_qkv_bias(r, name, bq, bk, bv, C): i64 {
+    var e = gg_find(r, name);
+    if (e == 0) { return 0 - 1; }
+    if (gg_entry_ndim(e) != 1) { return 0 - 1; }
+    if (gg_entry_dim(e, 0) != 3 * C) { return 0 - 1; }
+    if (gg_read_f64_range(r, e, 0, C, bq) != C) { return 0 - 1; }
+    if (gg_read_f64_range(r, e, C, C, bk) != C) { return 0 - 1; }
+    if (gg_read_f64_range(r, e, 2 * C, C, bv) != C) { return 0 - 1; }
+    return 0;
+}
+
+# read a ggml [out, in] 2D weight whose shape is exactly ne = [insz, outs] and
+# write its out-rows [obase, obase + osz) TRANSPOSED into dst[insz, osz]
+# (row-major); obase/osz select a third of the fused qkv. `rowbuf` holds one
+# widened source row (insz f64).
+#
+# 1.2.2: through 1.2.1 this widened the WHOLE source tensor into a scratch sized
+# for the largest expected weight (F * C), checking only that `outs` was large
+# enough. A tensor with more out-rows than F wrote past the end of the scratch
+# (a GGUF with F + 4096 qkv rows crashed with SIGSEGV), and qkv was widened three
+# times. Now the shape is exact and each element is widened once: one source row
+# into rowbuf, then scattered into its column. Bit-identical to the 1.2.1 copy.
+fn _ggpt2_mat_t(r, name, dst, insz, osz, obase, outs, rowbuf): i64 {
     var e = gg_find(r, name);
     if (e == 0) { return 0 - 1; }
     if (gg_entry_ndim(e) != 2) { return 0 - 1; }
     if (gg_entry_dim(e, 0) != insz) { return 0 - 1; }        # ne0 = in (innermost)
-    var outs = gg_entry_dim(e, 1);
+    if (gg_entry_dim(e, 1) != outs) { return 0 - 1; }        # exactly the expected rows
     if (obase + osz > outs) { return 0 - 1; }
-    # widen the whole tensor once (row-major [outs][insz]) — per-block scratch
-    if (gg_read_f64(r, e, scratch) != outs * insz) { return 0 - 1; }
     var o = 0;
     while (o < osz) {
+        if (gg_read_f64_range(r, e, (obase + o) * insz, insz, rowbuf) != insz) { return 0 - 1; }
         var i = 0;
         while (i < insz) {
-            store64(dst + (i * osz + o) * 8, load64(scratch + ((obase + o) * insz + i) * 8));
+            store64(dst + (i * osz + o) * 8, load64(rowbuf + i * 8));
             i = i + 1;
         }
         o = o + 1;
@@ -100,26 +126,19 @@ fn anuk_ggpt2_pack(r, cfg, params): i64 {
     # embeddings: widen straight into params (no transpose, no scratch)
     var te = gg_find(r, "token_embd.weight");
     if (te == 0) { return 0 - 1; }
-    if (gg_entry_nelems(te) != V * C) { return 0 - 1; }
+    if (gg_entry_ndim(te) != 2) { return 0 - 1; }
+    if (gg_entry_dim(te, 0) != C) { return 0 - 1; }
+    if (gg_entry_dim(te, 1) != V) { return 0 - 1; }
     if (gg_read_f64(r, te, _p_tokemb(params)) != V * C) { return 0 - 1; }
     var pe = gg_find(r, "position_embd.weight");
     if (pe == 0) { return 0 - 1; }
+    if (gg_entry_ndim(pe) != 2) { return 0 - 1; }
     if (gg_entry_dim(pe, 0) != C) { return 0 - 1; }
     if (gg_entry_dim(pe, 1) < T) { return 0 - 1; }
-    # first T rows only: widen row-by-row via a small scratch? — the rows are
-    # contiguous from the start, so widen exactly T*C elements
-    var pesrc = gg_entry_data(r, pe);
-    var gt = gg_entry_gtype(pe);
-    var i = 0;
-    var pdst = _p_posemb(params, cfg);
-    while (i < T * C) {
-        if (gt == 0) { store64(pdst + i * 8, _st_f32_to_f64(load32(pesrc + i * 4) & 0xFFFFFFFF)); }
-        else { store64(pdst + i * 8, _st_f16_to_f64(load8(pesrc + i * 2) | (load8(pesrc + i * 2 + 1) << 8))); }
-        i = i + 1;
-    }
-    var scratch = mmap_anon(F * C * 8 + 8);                  # biggest 2D weight (C*F)
-    if (scratch == 0) { return 0 - 1; }
-    var namebuf = 0;
+    # the first T rows are the first T*C elements
+    if (gg_read_f64_range(r, pe, 0, T * C, _p_posemb(params, cfg)) != T * C) { return 0 - 1; }
+    var rowbuf = t_alloc(C + F);                             # one widened source row
+    var namebuf = alloc(96);
     var L = 0;
     while (L < NL) {
         var pblk = params + _ru_blk_base(cfg, L) * 8;
@@ -127,19 +146,15 @@ fn anuk_ggpt2_pack(r, cfg, params): i64 {
         if (_ggpt2_vec(r, ln1g, pblk + _ru_o_ln1g(cfg) * 8, C) != 0) { return 0 - 1; }
         var ln1b = _ggpt2_name(namebuf, L, "attn_norm.bias");
         if (_ggpt2_vec(r, ln1b, pblk + _ru_o_ln1b(cfg) * 8, C) != 0) { return 0 - 1; }
-        # fused qkv [3C, C] -> Wq/Wk/Wv [C, C] (transpose + out-range split)
+        # fused qkv ne = [C, 3C] -> Wq/Wk/Wv [C, C] (transpose + out-range split)
         var qkvw = _ggpt2_name(namebuf, L, "attn_qkv.weight");
-        if (_ggpt2_mat_t(r, qkvw, pblk + _ru_o_Wq(cfg) * 8, C, C, 0, scratch) != 0) { return 0 - 1; }
-        if (_ggpt2_mat_t(r, qkvw, pblk + _ru_o_Wk(cfg) * 8, C, C, C, scratch) != 0) { return 0 - 1; }
-        if (_ggpt2_mat_t(r, qkvw, pblk + _ru_o_Wv(cfg) * 8, C, C, 2 * C, scratch) != 0) { return 0 - 1; }
-        # fused qkv bias [3C] -> bq/bk/bv
-        var qkvb = alloc(3 * C * 8);
-        if (_ggpt2_vec(r, _ggpt2_name(namebuf, L, "attn_qkv.bias"), qkvb, 3 * C) != 0) { return 0 - 1; }
-        t_copy(_bq(cfg, pblk), qkvb, C);
-        t_copy(_bk(cfg, pblk), qkvb + C * 8, C);
-        t_copy(_bv(cfg, pblk), qkvb + 2 * C * 8, C);
+        if (_ggpt2_mat_t(r, qkvw, pblk + _ru_o_Wq(cfg) * 8, C, C, 0, 3 * C, rowbuf) != 0) { return 0 - 1; }
+        if (_ggpt2_mat_t(r, qkvw, pblk + _ru_o_Wk(cfg) * 8, C, C, C, 3 * C, rowbuf) != 0) { return 0 - 1; }
+        if (_ggpt2_mat_t(r, qkvw, pblk + _ru_o_Wv(cfg) * 8, C, C, 2 * C, 3 * C, rowbuf) != 0) { return 0 - 1; }
+        var qkvb = _ggpt2_name(namebuf, L, "attn_qkv.bias");
+        if (_ggpt2_qkv_bias(r, qkvb, _bq(cfg, pblk), _bk(cfg, pblk), _bv(cfg, pblk), C) != 0) { return 0 - 1; }
         var wo = _ggpt2_name(namebuf, L, "attn_output.weight");
-        if (_ggpt2_mat_t(r, wo, pblk + _ru_o_Wo(cfg) * 8, C, C, 0, scratch) != 0) { return 0 - 1; }
+        if (_ggpt2_mat_t(r, wo, pblk + _ru_o_Wo(cfg) * 8, C, C, 0, C, rowbuf) != 0) { return 0 - 1; }
         var bo = _ggpt2_name(namebuf, L, "attn_output.bias");
         if (_ggpt2_vec(r, bo, _bo(cfg, pblk), C) != 0) { return 0 - 1; }
         var ln2g = _ggpt2_name(namebuf, L, "ffn_norm.weight");
@@ -147,11 +162,11 @@ fn anuk_ggpt2_pack(r, cfg, params): i64 {
         var ln2b = _ggpt2_name(namebuf, L, "ffn_norm.bias");
         if (_ggpt2_vec(r, ln2b, pblk + _ru_o_ln2b(cfg) * 8, C) != 0) { return 0 - 1; }
         var wfc = _ggpt2_name(namebuf, L, "ffn_up.weight");
-        if (_ggpt2_mat_t(r, wfc, pblk + _ru_o_Wfc(cfg) * 8, C, F, 0, scratch) != 0) { return 0 - 1; }
+        if (_ggpt2_mat_t(r, wfc, pblk + _ru_o_Wfc(cfg) * 8, C, F, 0, F, rowbuf) != 0) { return 0 - 1; }
         var bfc = _ggpt2_name(namebuf, L, "ffn_up.bias");
         if (_ggpt2_vec(r, bfc, pblk + _ru_o_bfc(cfg) * 8, F) != 0) { return 0 - 1; }
         var wpr = _ggpt2_name(namebuf, L, "ffn_down.weight");
-        if (_ggpt2_mat_t(r, wpr, pblk + _ru_o_Wproj(cfg) * 8, F, C, 0, scratch) != 0) { return 0 - 1; }
+        if (_ggpt2_mat_t(r, wpr, pblk + _ru_o_Wproj(cfg) * 8, F, C, 0, C, rowbuf) != 0) { return 0 - 1; }
         var bpr = _ggpt2_name(namebuf, L, "ffn_down.bias");
         if (_ggpt2_vec(r, bpr, pblk + _ru_o_bproj(cfg) * 8, C) != 0) { return 0 - 1; }
         L = L + 1;

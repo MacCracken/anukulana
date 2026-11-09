@@ -168,11 +168,92 @@ fn test_lora(): i64 {
     return 0;
 }
 
+# 1.2.2: the demos' shared head adapter (anuk_head_adapter_*) against a verbatim
+# copy of the 1.2.1 demo loop (lora_demo.cyr / qlora_demo.cyr / tula_demo.cyr each
+# held this): same seed, same features and base logits, 120 Adam steps. A, B, the
+# step-0 and final losses, and the final logits must agree bit for bit.
+fn _ref_train(f, base_logits, targets, T, C, V, steps, A_out, B_out, loss_out): i64 {
+    var r = 8;
+    var s = f64_from(2);
+    rng_seed(20260704);
+    var A = t_alloc(C * r);
+    var B = t_alloc(r * V);
+    lora_init(A, B, C, r, V, f64_div(f64_from(2), f64_from(100)));
+    var u = t_alloc(T * r);
+    var t = t_alloc(T * V);
+    var y = t_alloc(T * V);
+    var probs = t_alloc(T * V);
+    var dy = t_alloc(T * V);
+    var dA = t_alloc(C * r);
+    var dB = t_alloc(r * V);
+    var dys = t_alloc(T * V);
+    var du = t_alloc(T * r);
+    var dxs = t_alloc(T * C);
+    var mA = t_alloc(C * r); var vA = t_alloc(C * r);
+    var mB = t_alloc(r * V); var vB = t_alloc(r * V);
+    var lr = f64_div(f64_from(1), f64_from(100));
+    var loss0 = f64_from(0);
+    var loss = f64_from(0);
+    var step = 0;
+    while (step < steps) {
+        t_copy(y, base_logits, T * V);
+        lora_fwd(f, A, B, u, t, y, T, C, r, V, s);
+        loss = lora_xent_loss(y, probs, targets, T, V);
+        if (step == 0) { loss0 = loss; }
+        lora_xent_bwd(probs, targets, dy, T, V);
+        t_zero(dA, C * r);
+        t_zero(dB, r * V);
+        lora_bwd(f, u, A, B, dy, dA, dB, dys, du, dxs, T, C, r, V, s);
+        lora_adam(A, dA, mA, vA, C * r, lr, step + 1);
+        lora_adam(B, dB, mB, vB, r * V, lr, step + 1);
+        step = step + 1;
+    }
+    t_copy(y, base_logits, T * V);
+    lora_fwd(f, A, B, u, t, y, T, C, r, V, s);
+    t_copy(A_out, A, C * r);
+    t_copy(B_out, B, r * V);
+    store64(loss_out, loss0);
+    store64(loss_out + 8, loss);
+    return y;
+}
+
+fn test_head_adapter_matches_1_2_1(): i64 {
+    var T = 6; var C = 10; var V = 23; var steps = 120;
+    var f = t_alloc(T * C);
+    var base = t_alloc(T * V);
+    _dfill(f, T * C, 3, 7);
+    _dfill(base, T * V, 5, 11);
+    var tokens = anuk_demo_tokens(T, V);
+    var targets = anuk_demo_targets(tokens, T);
+    var Ar = t_alloc(C * 8); var Br = t_alloc(8 * V); var lr2 = alloc(16);
+    var yref = _ref_train(f, base, targets, T, C, V, steps, Ar, Br, lr2);
+    var ad = anuk_head_adapter_new(T, C, V, 8);
+    var loss0p = alloc(8);
+    var lr = f64_div(f64_from(1), f64_from(100));
+    var loss = anuk_head_adapter_train(ad, f, base, targets, f64_from(2), steps, lr, 0, loss0p);
+    var y = anuk_head_adapter_fwd(ad, f, base, f64_from(2));
+    var d = 0;
+    var i = 0;
+    while (i < C * 8) { if (load64(anuk_head_adapter_a(ad) + i * 8) != load64(Ar + i * 8)) { d = d + 1; } i = i + 1; }
+    i = 0;
+    while (i < 8 * V) { if (load64(anuk_head_adapter_b(ad) + i * 8) != load64(Br + i * 8)) { d = d + 1; } i = i + 1; }
+    assert_eq(d, 0, "head adapter: A and B bit-identical to the 1.2.1 loop");
+    assert_eq(load64(loss0p), load64(lr2), "head adapter: step-0 loss bit-identical");
+    assert_eq(loss, load64(lr2 + 8), "head adapter: final loss bit-identical");
+    d = 0;
+    i = 0;
+    while (i < T * V) { if (load64(y + i * 8) != load64(yref + i * 8)) { d = d + 1; } i = i + 1; }
+    assert_eq(d, 0, "head adapter: adapted logits bit-identical");
+    assert(f64_lt(loss, load64(loss0p)) == 1, "head adapter: the loss went down");
+    return 0;
+}
+
 fn main(): i64 {
     alloc_init();
     test_lora();
+    test_head_adapter_matches_1_2_1();
     return assert_summary();
 }
 
 var rc = main();
-syscall(60, rc);
+sys_exit(rc);

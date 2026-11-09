@@ -1,0 +1,366 @@
+# tests/common.cyr — shared test/bench helpers: f64 -> f32/f16 narrowing, a minimal
+# safetensors writer (F64 or F32 payloads, header built with bayan), a minimal GGUF
+# writer, and the two GPT-2 exporters (rupantara packed params -> safetensors / GGUF).
+# Included by tests/tcyr/gpt2.tcyr, tests/tcyr/gguf.tcyr and tests/anukulana.bcyr
+# after src/lib.cyr. Moved here from those two suites in 1.2.2 (unchanged except
+# where noted: the GGUF writer sizes its buffer from the model instead of a fixed
+# 4 MB, and the safetensors writer can emit F32).
+
+# ---- f64 -> f32/f16 bit narrowing (test values are exact + in range) ----------
+fn _n_f32(d): i64 {
+    var s = (d >> 63) & 1;
+    var e = (d >> 52) & 0x7FF;
+    var m = d & 0xFFFFFFFFFFFFF;
+    if (e == 0) { return s << 31; }                  # ±0 (no denormals in seeds)
+    return (s << 31) | ((e - 1023 + 127) << 23) | (m >> 29);
+}
+fn _n_f16(d): i64 {
+    var s = (d >> 63) & 1;
+    var e = (d >> 52) & 0x7FF;
+    var m = d & 0xFFFFFFFFFFFFF;
+    if (e == 0) { return s << 15; }
+    return (s << 15) | ((e - 1023 + 15) << 10) | (m >> 42);
+}
+
+# ---- a minimal GGUF WRITER ----------------------------------------------------
+# w: +0 buf | +8 off | +16 ntens | +24 tensor table (ntens × 48:
+#    name data(f64) ne0 ne1 ndim gtype)  — serialized by _ggw_finish.
+fn _ggw_new(): i64 {
+    var w = alloc(32 + 128 * 48);
+    store64(w, 0); store64(w + 8, 0); store64(w + 16, 0);
+    return w;
+}
+fn _ggw_add(w, name, data, ne0, ne1, ndim, gtype): i64 {
+    var t = w + 32 + load64(w + 16) * 48;
+    store64(t, name); store64(t + 8, data);
+    store64(t + 16, ne0); store64(t + 24, ne1);
+    store64(t + 32, ndim); store64(t + 40, gtype);
+    store64(w + 16, load64(w + 16) + 1);
+    return 0;
+}
+fn _ggw_u8(buf, offp, v): i64 {
+    store8(buf + load64(offp), v & 0xFF);
+    store64(offp, load64(offp) + 1);
+    return 0;
+}
+fn _ggw_u32(buf, offp, v): i64 {
+    var i = 0;
+    while (i < 4) { _ggw_u8(buf, offp, v >> (i * 8)); i = i + 1; }
+    return 0;
+}
+fn _ggw_u64(buf, offp, v): i64 {
+    var i = 0;
+    while (i < 8) { _ggw_u8(buf, offp, v >> (i * 8)); i = i + 1; }
+    return 0;
+}
+fn _ggw_str(buf, offp, s): i64 {
+    var n = strlen(s);
+    _ggw_u64(buf, offp, n);
+    var i = 0;
+    while (i < n) { _ggw_u8(buf, offp, load8(s + i)); i = i + 1; }
+    return 0;
+}
+fn _ggw_kv_u32(buf, offp, key, v): i64 {
+    _ggw_str(buf, offp, key); _ggw_u32(buf, offp, 4); _ggw_u32(buf, offp, v);
+    return 0;
+}
+fn _ggw_kv_str(buf, offp, key, v): i64 {
+    _ggw_str(buf, offp, key); _ggw_u32(buf, offp, 8); _ggw_str(buf, offp, v);
+    return 0;
+}
+fn _ggw_tne(t, k): i64 { if (k == 0) { return load64(t + 16); } return load64(t + 24); }
+fn _ggw_tnelems(t): i64 {
+    var n = load64(t + 16);
+    if (load64(t + 32) == 2) { n = n * load64(t + 24); }
+    return n;
+}
+
+# serialize: header + KVs (arch/dims/alignment + skip-fodder) + infos + data.
+# kvmode 1 = the GPT-2 metadata set; 0 = minimal (arch only + alignment 64).
+fn _ggw_finish(w, cfg, alignment, kvmode, out_len): i64 {
+    var ntens = load64(w + 16);
+    var cap = 4096 + alignment;                      # header + KVs + final pad
+    var ci = 0;
+    while (ci < ntens) {
+        var ct = w + 32 + ci * 48;
+        cap = cap + 64 + strlen(load64(ct)) + alignment + _ggw_tnelems(ct) * 4;
+        ci = ci + 1;
+    }
+    var buf = alloc(cap);
+    var offp = alloc(8);
+    store64(offp, 0);
+    var n_kv = 4;                                    # arch + alignment + arr + str
+    if (kvmode == 1) { n_kv = 8; }                   # + C/NL/nh/F
+    _ggw_u32(buf, offp, GGUF_MAGIC());
+    _ggw_u32(buf, offp, 3);                          # version 3
+    _ggw_u64(buf, offp, ntens);
+    _ggw_u64(buf, offp, n_kv);
+    _ggw_kv_str(buf, offp, "general.architecture", "gpt2");
+    _ggw_kv_u32(buf, offp, "general.alignment", alignment);
+    # skip-fodder: an array KV and a string KV the importer never reads —
+    # the walk must skip them structurally
+    _ggw_str(buf, offp, "test.skip_array");
+    _ggw_u32(buf, offp, 9);                          # vtype array
+    _ggw_u32(buf, offp, 4);                          # elem type u32
+    _ggw_u64(buf, offp, 3);
+    _ggw_u32(buf, offp, 11); _ggw_u32(buf, offp, 22); _ggw_u32(buf, offp, 33);
+    _ggw_kv_str(buf, offp, "test.skip_str", "ignored");
+    if (kvmode == 1) {
+        _ggw_kv_u32(buf, offp, "gpt2.embedding_length", _cfg_C(cfg));
+        _ggw_kv_u32(buf, offp, "gpt2.block_count", _cfg_NL(cfg));
+        _ggw_kv_u32(buf, offp, "gpt2.attention.head_count", _cfg_nh(cfg));
+        _ggw_kv_u32(buf, offp, "gpt2.feed_forward_length", _cfg_F(cfg));
+    }
+    # tensor infos (data offsets assigned sequentially, each alignment-aligned)
+    var doff = 0;
+    var i = 0;
+    while (i < ntens) {
+        var t = w + 32 + i * 48;
+        var gtype = load64(t + 40);
+        var esz = 4;
+        if (gtype == 1) { esz = 2; }
+        _ggw_str(buf, offp, load64(t));
+        _ggw_u32(buf, offp, load64(t + 32));         # n_dims
+        var k = 0;
+        while (k < load64(t + 32)) { _ggw_u64(buf, offp, _ggw_tne(t, k)); k = k + 1; }
+        _ggw_u32(buf, offp, gtype);
+        doff = doff + (alignment - (doff % alignment)) % alignment;
+        _ggw_u64(buf, offp, doff);
+        doff = doff + _ggw_tnelems(t) * esz;
+        i = i + 1;
+    }
+    # pad header to alignment, then write data blobs at their offsets
+    var hend = load64(offp);
+    var dstart = hend + (alignment - (hend % alignment)) % alignment;
+    while (load64(offp) < dstart) { _ggw_u8(buf, offp, 0); }
+    doff = 0;
+    i = 0;
+    while (i < ntens) {
+        var t2 = w + 32 + i * 48;
+        var gtype2 = load64(t2 + 40);
+        var esz2 = 4;
+        if (gtype2 == 1) { esz2 = 2; }
+        doff = doff + (alignment - (doff % alignment)) % alignment;
+        store64(offp, dstart + doff);
+        var src = load64(t2 + 8);
+        var ne = _ggw_tnelems(t2);
+        var j = 0;
+        while (j < ne) {
+            var d = load64(src + j * 8);
+            if (gtype2 == 0) { _ggw_u32(buf, offp, _n_f32(d)); }
+            else {
+                var h = _n_f16(d);
+                _ggw_u8(buf, offp, h); _ggw_u8(buf, offp, h >> 8);
+            }
+            j = j + 1;
+        }
+        doff = doff + ne * esz2;
+        i = i + 1;
+    }
+    store64(out_len, dstart + doff);
+    return buf;
+}
+
+fn _put_u32_le(p, x): i64 {
+    store8(p + 0, x & 0xFF); store8(p + 1, (x >> 8) & 0xFF);
+    store8(p + 2, (x >> 16) & 0xFF); store8(p + 3, (x >> 24) & 0xFF);
+    return 0;
+}
+fn _put_u64_le(p, x): i64 {
+    _put_u32_le(p, x & 0xFFFFFFFF); _put_u32_le(p + 4, (x >> 32) & 0xFFFFFFFF);
+    return 0;
+}
+fn _bcopy(dst, src, n): i64 {
+    var i = 0; while (i < n) { store8(dst + i, load8(src + i)); i = i + 1; }
+    return 0;
+}
+fn _shp1(a): i64 { var s = alloc(8); store64(s, a); return s; }
+fn _shp2(a, b): i64 { var s = alloc(16); store64(s, a); store64(s + 8, b); return s; }
+
+# ---- a minimal safetensors WRITER (F64), header built with bayan --------------
+fn _stw_new(): i64 { var w = alloc(8 + 64 * 32); store64(w, 0); return w; }
+fn _stw_nelems(shape, ndim): i64 {
+    var p = 1; var k = 0;
+    while (k < ndim) { p = p * load64(shape + k * 8); k = k + 1; }
+    return p;
+}
+fn _stw_add(w, name, data, shape, ndim): i64 {
+    var n = load64(w);
+    var s = w + 8 + n * 32;
+    store64(s + 0, name); store64(s + 8, data); store64(s + 16, shape); store64(s + 24, ndim);
+    store64(w, n + 1);
+    return 0;
+}
+fn _stw_finish(w, out_len): i64 { return _stw_finish_dt(w, out_len, 0); }
+# f32 = 1 writes "F32" payloads narrowed with _n_f32 (values must be f32-exact).
+fn _stw_finish_dt(w, out_len, f32): i64 {
+    var n = load64(w);
+    var root = bayan_json_v_obj_new();
+    var off = 0;
+    var i = 0;
+    while (i < n) {
+        var s = w + 8 + i * 32;
+        var ndim = load64(s + 24);
+        var ne = _stw_nelems(load64(s + 16), ndim);
+        var esz = 8;
+        if (f32 == 1) { esz = 4; }
+        var bytes = ne * esz;
+        var ent = bayan_json_v_obj_new();
+        # bayan obj keys + string values are Str structs, not raw cstrings.
+        var dts = "F64";
+        if (f32 == 1) { dts = "F32"; }
+        bayan_json_v_obj_set(ent, str_from("dtype"), bayan_json_v_str_new(str_from(dts)));
+        var sh = bayan_json_v_arr_new();
+        var k = 0;
+        while (k < ndim) { bayan_json_v_arr_push(sh, bayan_json_v_int_new(load64(load64(s + 16) + k * 8))); k = k + 1; }
+        bayan_json_v_obj_set(ent, str_from("shape"), sh);
+        var of = bayan_json_v_arr_new();
+        bayan_json_v_arr_push(of, bayan_json_v_int_new(off));
+        bayan_json_v_arr_push(of, bayan_json_v_int_new(off + bytes));
+        bayan_json_v_obj_set(ent, str_from("data_offsets"), of);
+        bayan_json_v_obj_set(root, str_from(load64(s + 0)), ent);
+        off = off + bytes;
+        i = i + 1;
+    }
+    var hdr = bayan_json_v_build(root);          # returns a Str, not a cstring
+    var hlen = str_len(hdr);
+    var total = 8 + hlen + off;
+    var blob = alloc(total);
+    _put_u64_le(blob, hlen);
+    _bcopy(blob + 8, str_data(hdr), hlen);
+    var poff = 0;
+    i = 0;
+    while (i < n) {
+        var s = w + 8 + i * 32;
+        var ne = _stw_nelems(load64(s + 16), load64(s + 24));
+        var dst = blob + 8 + hlen + poff;
+        var b = 0;
+        if (f32 == 1) {
+            while (b < ne) { _put_u32_le(dst + b * 4, _n_f32(load64(load64(s + 8) + b * 8))); b = b + 1; }
+            poff = poff + ne * 4;
+        } else {
+            while (b < ne) { store64(dst + b * 8, load64(load64(s + 8) + b * 8)); b = b + 1; }
+            poff = poff + ne * 8;
+        }
+        i = i + 1;
+    }
+    store64(out_len, total);
+    return blob;
+}
+
+# name buffers must persist (bayan keys); alloc a fresh one each call.
+fn _nm(L, suffix): i64 { return _gpt2_name(alloc(64), L, suffix); }
+
+# EXPORT rupantara packed params P -> GPT-2 safetensors blob (NL layers).
+fn _export_gpt2(cfg, P, out_len): i64 { return _export_gpt2_dt(cfg, P, out_len, 0); }
+fn _export_gpt2_dt(cfg, P, out_len, f32): i64 {
+    var V = _cfg_V(cfg); var C = _cfg_C(cfg); var T = _cfg_T(cfg);
+    var NL = _cfg_NL(cfg); var F = _cfg_F(cfg);
+    var w = _stw_new();
+    _stw_add(w, "wte.weight", _p_tokemb(P), _shp2(V, C), 2);
+    _stw_add(w, "wpe.weight", _p_posemb(P, cfg), _shp2(T, C), 2);
+    var L = 0;
+    while (L < NL) {
+        var pblk = P + _ru_blk_base(cfg, L) * 8;
+        _stw_add(w, _nm(L, "ln_1.weight"), pblk + _ru_o_ln1g(cfg) * 8, _shp1(C), 1);
+        _stw_add(w, _nm(L, "ln_1.bias"), pblk + _ru_o_ln1b(cfg) * 8, _shp1(C), 1);
+        # FUSE Wq/Wk/Wv [C,C] -> c_attn.weight [C,3C]
+        var catw = alloc(C * 3 * C * 8);
+        var Wq = pblk + _ru_o_Wq(cfg) * 8;
+        var Wk = pblk + _ru_o_Wk(cfg) * 8;
+        var Wv = pblk + _ru_o_Wv(cfg) * 8;
+        var i = 0;
+        while (i < C) {
+            var o = 0;
+            while (o < C) {
+                store64(catw + (i * 3 * C + o) * 8, load64(Wq + (i * C + o) * 8));
+                store64(catw + (i * 3 * C + C + o) * 8, load64(Wk + (i * C + o) * 8));
+                store64(catw + (i * 3 * C + 2 * C + o) * 8, load64(Wv + (i * C + o) * 8));
+                o = o + 1;
+            }
+            i = i + 1;
+        }
+        _stw_add(w, _nm(L, "attn.c_attn.weight"), catw, _shp2(C, 3 * C), 2);
+        # FUSE bq/bk/bv [C] -> c_attn.bias [3C]
+        var catb = alloc(3 * C * 8);
+        var bq = _bq(cfg, pblk); var bk = _bk(cfg, pblk); var bv = _bv(cfg, pblk);
+        var c = 0;
+        while (c < C) {
+            store64(catb + c * 8, load64(bq + c * 8));
+            store64(catb + (C + c) * 8, load64(bk + c * 8));
+            store64(catb + (2 * C + c) * 8, load64(bv + c * 8));
+            c = c + 1;
+        }
+        _stw_add(w, _nm(L, "attn.c_attn.bias"), catb, _shp1(3 * C), 1);
+        _stw_add(w, _nm(L, "attn.c_proj.weight"), pblk + _ru_o_Wo(cfg) * 8, _shp2(C, C), 2);
+        _stw_add(w, _nm(L, "attn.c_proj.bias"), _bo(cfg, pblk), _shp1(C), 1);
+        _stw_add(w, _nm(L, "ln_2.weight"), pblk + _ru_o_ln2g(cfg) * 8, _shp1(C), 1);
+        _stw_add(w, _nm(L, "ln_2.bias"), pblk + _ru_o_ln2b(cfg) * 8, _shp1(C), 1);
+        _stw_add(w, _nm(L, "mlp.c_fc.weight"), pblk + _ru_o_Wfc(cfg) * 8, _shp2(C, F), 2);
+        _stw_add(w, _nm(L, "mlp.c_fc.bias"), pblk + _ru_o_bfc(cfg) * 8, _shp1(F), 1);
+        _stw_add(w, _nm(L, "mlp.c_proj.weight"), pblk + _ru_o_Wproj(cfg) * 8, _shp2(F, C), 2);
+        _stw_add(w, _nm(L, "mlp.c_proj.bias"), pblk + _ru_o_bproj(cfg) * 8, _shp1(C), 1);
+        L = L + 1;
+    }
+    _stw_add(w, "ln_f.weight", _p_lnfg(P, cfg), _shp1(C), 1);
+    _stw_add(w, "ln_f.bias", _p_lnfb(P, cfg), _shp1(C), 1);
+    return _stw_finish_dt(w, out_len, f32);
+}
+
+# ---- GPT-2 export -> import round-trip ---------------------------------------
+fn _t2d(src, rows_in, cols_out): i64 {
+    # rupantara [in, out] row-major -> ggml [out, in] row-major
+    var t = alloc(rows_in * cols_out * 8);
+    var o = 0;
+    while (o < cols_out) {
+        var i = 0;
+        while (i < rows_in) {
+            store64(t + (o * rows_in + i) * 8, load64(src + (i * cols_out + o) * 8));
+            i = i + 1;
+        }
+        o = o + 1;
+    }
+    return t;
+}
+fn _gnm(L, suffix): i64 { return _ggpt2_name(0, L, suffix); }
+
+fn _export_gguf(cfg, P, out_len): i64 {
+    var V = _cfg_V(cfg); var C = _cfg_C(cfg); var T = _cfg_T(cfg);
+    var NL = _cfg_NL(cfg); var F = _cfg_F(cfg);
+    var w = _ggw_new();
+    _ggw_add(w, "token_embd.weight", _p_tokemb(P), C, V, 2, 0);      # ne=[C,V]
+    _ggw_add(w, "position_embd.weight", _p_posemb(P, cfg), C, T, 2, 0);
+    var L = 0;
+    while (L < NL) {
+        var pblk = P + _ru_blk_base(cfg, L) * 8;
+        _ggw_add(w, _gnm(L, "attn_norm.weight"), pblk + _ru_o_ln1g(cfg) * 8, C, 0, 1, 0);
+        _ggw_add(w, _gnm(L, "attn_norm.bias"), pblk + _ru_o_ln1b(cfg) * 8, C, 0, 1, 0);
+        # fused qkv in ggml orientation: [3C, C] row-major, q rows then k then v
+        var tq = _t2d(pblk + _ru_o_Wq(cfg) * 8, C, C);
+        var tk = _t2d(pblk + _ru_o_Wk(cfg) * 8, C, C);
+        var tv = _t2d(pblk + _ru_o_Wv(cfg) * 8, C, C);
+        var cat = alloc(3 * C * C * 8);
+        t_copy(cat, tq, C * C);
+        t_copy(cat + C * C * 8, tk, C * C);
+        t_copy(cat + 2 * C * C * 8, tv, C * C);
+        _ggw_add(w, _gnm(L, "attn_qkv.weight"), cat, C, 3 * C, 2, 0); # ne=[C,3C]
+        var catb = alloc(3 * C * 8);
+        t_copy(catb, _bq(cfg, pblk), C);
+        t_copy(catb + C * 8, _bk(cfg, pblk), C);
+        t_copy(catb + 2 * C * 8, _bv(cfg, pblk), C);
+        _ggw_add(w, _gnm(L, "attn_qkv.bias"), catb, 3 * C, 0, 1, 0);
+        _ggw_add(w, _gnm(L, "attn_output.weight"), _t2d(pblk + _ru_o_Wo(cfg) * 8, C, C), C, C, 2, 0);
+        _ggw_add(w, _gnm(L, "attn_output.bias"), _bo(cfg, pblk), C, 0, 1, 0);
+        _ggw_add(w, _gnm(L, "ffn_norm.weight"), pblk + _ru_o_ln2g(cfg) * 8, C, 0, 1, 0);
+        _ggw_add(w, _gnm(L, "ffn_norm.bias"), pblk + _ru_o_ln2b(cfg) * 8, C, 0, 1, 0);
+        _ggw_add(w, _gnm(L, "ffn_up.weight"), _t2d(pblk + _ru_o_Wfc(cfg) * 8, C, F), C, F, 2, 0);
+        _ggw_add(w, _gnm(L, "ffn_up.bias"), pblk + _ru_o_bfc(cfg) * 8, F, 0, 1, 0);
+        _ggw_add(w, _gnm(L, "ffn_down.weight"), _t2d(pblk + _ru_o_Wproj(cfg) * 8, F, C), F, C, 2, 0);
+        _ggw_add(w, _gnm(L, "ffn_down.bias"), pblk + _ru_o_bproj(cfg) * 8, C, 0, 1, 0);
+        L = L + 1;
+    }
+    _ggw_add(w, "output_norm.weight", _p_lnfg(P, cfg), C, 0, 1, 0);
+    _ggw_add(w, "output_norm.bias", _p_lnfb(P, cfg), C, 0, 1, 0);
+    return _ggw_finish(w, cfg, 32, 1, out_len);
+}
+

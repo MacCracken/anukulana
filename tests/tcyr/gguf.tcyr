@@ -16,153 +16,7 @@
 include "src/lib.cyr"
 include "lib/assert.cyr"
 
-# ---- f64 -> f32/f16 bit narrowing (test values are exact + in range) ----------
-fn _n_f32(d): i64 {
-    var s = (d >> 63) & 1;
-    var e = (d >> 52) & 0x7FF;
-    var m = d & 0xFFFFFFFFFFFFF;
-    if (e == 0) { return s << 31; }                  # ±0 (no denormals in seeds)
-    return (s << 31) | ((e - 1023 + 127) << 23) | (m >> 29);
-}
-fn _n_f16(d): i64 {
-    var s = (d >> 63) & 1;
-    var e = (d >> 52) & 0x7FF;
-    var m = d & 0xFFFFFFFFFFFFF;
-    if (e == 0) { return s << 15; }
-    return (s << 15) | ((e - 1023 + 15) << 10) | (m >> 42);
-}
-
-# ---- a minimal GGUF WRITER ----------------------------------------------------
-# w: +0 buf | +8 off | +16 ntens | +24 tensor table (ntens × 48:
-#    name data(f64) ne0 ne1 ndim gtype)  — serialized by _ggw_finish.
-fn _ggw_new(): i64 {
-    var w = alloc(32 + 64 * 48);
-    store64(w, 0); store64(w + 8, 0); store64(w + 16, 0);
-    return w;
-}
-fn _ggw_add(w, name, data, ne0, ne1, ndim, gtype): i64 {
-    var t = w + 32 + load64(w + 16) * 48;
-    store64(t, name); store64(t + 8, data);
-    store64(t + 16, ne0); store64(t + 24, ne1);
-    store64(t + 32, ndim); store64(t + 40, gtype);
-    store64(w + 16, load64(w + 16) + 1);
-    return 0;
-}
-fn _ggw_u8(buf, offp, v): i64 {
-    store8(buf + load64(offp), v & 0xFF);
-    store64(offp, load64(offp) + 1);
-    return 0;
-}
-fn _ggw_u32(buf, offp, v): i64 {
-    var i = 0;
-    while (i < 4) { _ggw_u8(buf, offp, v >> (i * 8)); i = i + 1; }
-    return 0;
-}
-fn _ggw_u64(buf, offp, v): i64 {
-    var i = 0;
-    while (i < 8) { _ggw_u8(buf, offp, v >> (i * 8)); i = i + 1; }
-    return 0;
-}
-fn _ggw_str(buf, offp, s): i64 {
-    var n = strlen(s);
-    _ggw_u64(buf, offp, n);
-    var i = 0;
-    while (i < n) { _ggw_u8(buf, offp, load8(s + i)); i = i + 1; }
-    return 0;
-}
-fn _ggw_kv_u32(buf, offp, key, v): i64 {
-    _ggw_str(buf, offp, key); _ggw_u32(buf, offp, 4); _ggw_u32(buf, offp, v);
-    return 0;
-}
-fn _ggw_kv_str(buf, offp, key, v): i64 {
-    _ggw_str(buf, offp, key); _ggw_u32(buf, offp, 8); _ggw_str(buf, offp, v);
-    return 0;
-}
-fn _ggw_tne(t, k): i64 { if (k == 0) { return load64(t + 16); } return load64(t + 24); }
-fn _ggw_tnelems(t): i64 {
-    var n = load64(t + 16);
-    if (load64(t + 32) == 2) { n = n * load64(t + 24); }
-    return n;
-}
-
-# serialize: header + KVs (arch/dims/alignment + skip-fodder) + infos + data.
-# kvmode 1 = the GPT-2 metadata set; 0 = minimal (arch only + alignment 64).
-fn _ggw_finish(w, cfg, alignment, kvmode, out_len): i64 {
-    var ntens = load64(w + 16);
-    var buf = alloc(4 * 1024 * 1024);
-    var offp = alloc(8);
-    store64(offp, 0);
-    var n_kv = 4;                                    # arch + alignment + arr + str
-    if (kvmode == 1) { n_kv = 8; }                   # + C/NL/nh/F
-    _ggw_u32(buf, offp, GGUF_MAGIC());
-    _ggw_u32(buf, offp, 3);                          # version 3
-    _ggw_u64(buf, offp, ntens);
-    _ggw_u64(buf, offp, n_kv);
-    _ggw_kv_str(buf, offp, "general.architecture", "gpt2");
-    _ggw_kv_u32(buf, offp, "general.alignment", alignment);
-    # skip-fodder: an array KV and a string KV the importer never reads —
-    # the walk must skip them structurally
-    _ggw_str(buf, offp, "test.skip_array");
-    _ggw_u32(buf, offp, 9);                          # vtype array
-    _ggw_u32(buf, offp, 4);                          # elem type u32
-    _ggw_u64(buf, offp, 3);
-    _ggw_u32(buf, offp, 11); _ggw_u32(buf, offp, 22); _ggw_u32(buf, offp, 33);
-    _ggw_kv_str(buf, offp, "test.skip_str", "ignored");
-    if (kvmode == 1) {
-        _ggw_kv_u32(buf, offp, "gpt2.embedding_length", _cfg_C(cfg));
-        _ggw_kv_u32(buf, offp, "gpt2.block_count", _cfg_NL(cfg));
-        _ggw_kv_u32(buf, offp, "gpt2.attention.head_count", _cfg_nh(cfg));
-        _ggw_kv_u32(buf, offp, "gpt2.feed_forward_length", _cfg_F(cfg));
-    }
-    # tensor infos (data offsets assigned sequentially, each alignment-aligned)
-    var doff = 0;
-    var i = 0;
-    while (i < ntens) {
-        var t = w + 32 + i * 48;
-        var gtype = load64(t + 40);
-        var esz = 4;
-        if (gtype == 1) { esz = 2; }
-        _ggw_str(buf, offp, load64(t));
-        _ggw_u32(buf, offp, load64(t + 32));         # n_dims
-        var k = 0;
-        while (k < load64(t + 32)) { _ggw_u64(buf, offp, _ggw_tne(t, k)); k = k + 1; }
-        _ggw_u32(buf, offp, gtype);
-        doff = doff + (alignment - (doff % alignment)) % alignment;
-        _ggw_u64(buf, offp, doff);
-        doff = doff + _ggw_tnelems(t) * esz;
-        i = i + 1;
-    }
-    # pad header to alignment, then write data blobs at their offsets
-    var hend = load64(offp);
-    var dstart = hend + (alignment - (hend % alignment)) % alignment;
-    while (load64(offp) < dstart) { _ggw_u8(buf, offp, 0); }
-    doff = 0;
-    i = 0;
-    while (i < ntens) {
-        var t2 = w + 32 + i * 48;
-        var gtype2 = load64(t2 + 40);
-        var esz2 = 4;
-        if (gtype2 == 1) { esz2 = 2; }
-        doff = doff + (alignment - (doff % alignment)) % alignment;
-        store64(offp, dstart + doff);
-        var src = load64(t2 + 8);
-        var ne = _ggw_tnelems(t2);
-        var j = 0;
-        while (j < ne) {
-            var d = load64(src + j * 8);
-            if (gtype2 == 0) { _ggw_u32(buf, offp, _n_f32(d)); }
-            else {
-                var h = _n_f16(d);
-                _ggw_u8(buf, offp, h); _ggw_u8(buf, offp, h >> 8);
-            }
-            j = j + 1;
-        }
-        doff = doff + ne * esz2;
-        i = i + 1;
-    }
-    store64(out_len, dstart + doff);
-    return buf;
-}
+include "tests/common.cyr"
 
 # ---- minimal-file test: KVs, F32 + F16 widen, directed rejects ---------------
 fn test_gguf_minimal(): i64 {
@@ -230,63 +84,6 @@ fn test_gguf_minimal(): i64 {
     store8(buf + 4, 3);
     assert_nonnull(gg_open(buf, len), "restored file accepted again");
     return 0;
-}
-
-# ---- GPT-2 export -> import round-trip ---------------------------------------
-fn _t2d(src, rows_in, cols_out): i64 {
-    # rupantara [in, out] row-major -> ggml [out, in] row-major
-    var t = alloc(rows_in * cols_out * 8);
-    var o = 0;
-    while (o < cols_out) {
-        var i = 0;
-        while (i < rows_in) {
-            store64(t + (o * rows_in + i) * 8, load64(src + (i * cols_out + o) * 8));
-            i = i + 1;
-        }
-        o = o + 1;
-    }
-    return t;
-}
-fn _gnm(L, suffix): i64 { return _ggpt2_name(0, L, suffix); }
-
-fn _export_gguf(cfg, P, out_len): i64 {
-    var V = _cfg_V(cfg); var C = _cfg_C(cfg); var T = _cfg_T(cfg);
-    var NL = _cfg_NL(cfg); var F = _cfg_F(cfg);
-    var w = _ggw_new();
-    _ggw_add(w, "token_embd.weight", _p_tokemb(P), C, V, 2, 0);      # ne=[C,V]
-    _ggw_add(w, "position_embd.weight", _p_posemb(P, cfg), C, T, 2, 0);
-    var L = 0;
-    while (L < NL) {
-        var pblk = P + _ru_blk_base(cfg, L) * 8;
-        _ggw_add(w, _gnm(L, "attn_norm.weight"), pblk + _ru_o_ln1g(cfg) * 8, C, 0, 1, 0);
-        _ggw_add(w, _gnm(L, "attn_norm.bias"), pblk + _ru_o_ln1b(cfg) * 8, C, 0, 1, 0);
-        # fused qkv in ggml orientation: [3C, C] row-major, q rows then k then v
-        var tq = _t2d(pblk + _ru_o_Wq(cfg) * 8, C, C);
-        var tk = _t2d(pblk + _ru_o_Wk(cfg) * 8, C, C);
-        var tv = _t2d(pblk + _ru_o_Wv(cfg) * 8, C, C);
-        var cat = alloc(3 * C * C * 8);
-        t_copy(cat, tq, C * C);
-        t_copy(cat + C * C * 8, tk, C * C);
-        t_copy(cat + 2 * C * C * 8, tv, C * C);
-        _ggw_add(w, _gnm(L, "attn_qkv.weight"), cat, C, 3 * C, 2, 0); # ne=[C,3C]
-        var catb = alloc(3 * C * 8);
-        t_copy(catb, _bq(cfg, pblk), C);
-        t_copy(catb + C * 8, _bk(cfg, pblk), C);
-        t_copy(catb + 2 * C * 8, _bv(cfg, pblk), C);
-        _ggw_add(w, _gnm(L, "attn_qkv.bias"), catb, 3 * C, 0, 1, 0);
-        _ggw_add(w, _gnm(L, "attn_output.weight"), _t2d(pblk + _ru_o_Wo(cfg) * 8, C, C), C, C, 2, 0);
-        _ggw_add(w, _gnm(L, "attn_output.bias"), _bo(cfg, pblk), C, 0, 1, 0);
-        _ggw_add(w, _gnm(L, "ffn_norm.weight"), pblk + _ru_o_ln2g(cfg) * 8, C, 0, 1, 0);
-        _ggw_add(w, _gnm(L, "ffn_norm.bias"), pblk + _ru_o_ln2b(cfg) * 8, C, 0, 1, 0);
-        _ggw_add(w, _gnm(L, "ffn_up.weight"), _t2d(pblk + _ru_o_Wfc(cfg) * 8, C, F), C, F, 2, 0);
-        _ggw_add(w, _gnm(L, "ffn_up.bias"), pblk + _ru_o_bfc(cfg) * 8, F, 0, 1, 0);
-        _ggw_add(w, _gnm(L, "ffn_down.weight"), _t2d(pblk + _ru_o_Wproj(cfg) * 8, F, C), F, C, 2, 0);
-        _ggw_add(w, _gnm(L, "ffn_down.bias"), pblk + _ru_o_bproj(cfg) * 8, C, 0, 1, 0);
-        L = L + 1;
-    }
-    _ggw_add(w, "output_norm.weight", _p_lnfg(P, cfg), C, 0, 1, 0);
-    _ggw_add(w, "output_norm.bias", _p_lnfb(P, cfg), C, 0, 1, 0);
-    return _ggw_finish(w, cfg, 32, 1, out_len);
 }
 
 # f32-EXACT fill: small ints over 32 (lossless through the f32 narrow/widen)
@@ -386,13 +183,123 @@ fn test_gguf_hostile_head_count(): i64 {
     return 0;
 }
 
+# a 1-layer GPT-2 GGUF whose attn_qkv.weight has `qkv_rows` output rows (3C is
+# right); every other tensor has its proper shape
+fn _gg_model(cfg, qkv_rows, out_len): i64 {
+    var V = _cfg_V(cfg); var C = _cfg_C(cfg); var T = _cfg_T(cfg); var F = _cfg_F(cfg);
+    var w = _ggw_new();
+    _ggw_add(w, "token_embd.weight", t_alloc(V * C), C, V, 2, 0);
+    _ggw_add(w, "position_embd.weight", t_alloc(T * C), C, T, 2, 0);
+    _ggw_add(w, "blk.0.attn_norm.weight", t_alloc(C), C, 0, 1, 0);
+    _ggw_add(w, "blk.0.attn_norm.bias", t_alloc(C), C, 0, 1, 0);
+    _ggw_add(w, "blk.0.attn_qkv.weight", t_alloc(qkv_rows * C), C, qkv_rows, 2, 0);
+    _ggw_add(w, "blk.0.attn_qkv.bias", t_alloc(3 * C), 3 * C, 0, 1, 0);
+    _ggw_add(w, "blk.0.attn_output.weight", t_alloc(C * C), C, C, 2, 0);
+    _ggw_add(w, "blk.0.attn_output.bias", t_alloc(C), C, 0, 1, 0);
+    _ggw_add(w, "blk.0.ffn_norm.weight", t_alloc(C), C, 0, 1, 0);
+    _ggw_add(w, "blk.0.ffn_norm.bias", t_alloc(C), C, 0, 1, 0);
+    _ggw_add(w, "blk.0.ffn_up.weight", t_alloc(F * C), C, F, 2, 0);
+    _ggw_add(w, "blk.0.ffn_up.bias", t_alloc(F), F, 0, 1, 0);
+    _ggw_add(w, "blk.0.ffn_down.weight", t_alloc(F * C), F, C, 2, 0);
+    _ggw_add(w, "blk.0.ffn_down.bias", t_alloc(C), C, 0, 1, 0);
+    _ggw_add(w, "output_norm.weight", t_alloc(C), C, 0, 1, 0);
+    _ggw_add(w, "output_norm.bias", t_alloc(C), C, 0, 1, 0);
+    return _ggw_finish(w, cfg, 32, 1, out_len);
+}
+fn _gg_pack_rc(cfg, qkv_rows): i64 {
+    var lp = alloc(8);
+    var buf = _gg_model(cfg, qkv_rows, lp);
+    var r = gg_open(buf, load64(lp));
+    if (r == 0) { return 0 - 9; }
+    var cfg2 = alloc(64);
+    var rc = anuk_ggpt2_infer_cfg(r, cfg2, _cfg_T(cfg));
+    if (rc != 0) { return rc; }
+    return anuk_ggpt2_pack(r, cfg2, t_alloc(ru_params_count(cfg2)));
+}
+
+# 1.2.2: weights are checked against their exact shape. Through 1.2.1 an attn_qkv
+# with more out-rows than F was widened whole into an F*C scratch (SIGSEGV), and
+# one with 4C rows was accepted.
+fn test_gguf_qkv_shape(): i64 {
+    var cfg = alloc(64);
+    ru_cfg_init(cfg, 13, 8, 6, 2, 2, 1, 32, 1);
+    assert_eq(_gg_pack_rc(cfg, 24), 0, "attn_qkv with 3C rows packs");
+    assert_eq(_gg_pack_rc(cfg, 32 + 4096), 0 - 1, "attn_qkv with F + 4096 rows rejected (no overflow)");
+    assert_eq(_gg_pack_rc(cfg, 32), 0 - 1, "attn_qkv with 4C rows rejected");
+    return 0;
+}
+
+# GGUF header + `nkv` KVs + `nt` tensors written by the caller after this
+fn _gg_head(buf, offp, nt, nkv): i64 {
+    _ggw_u32(buf, offp, GGUF_MAGIC()); _ggw_u32(buf, offp, 3);
+    _ggw_u64(buf, offp, nt); _ggw_u64(buf, offp, nkv);
+    return 0;
+}
+
+# 1.2.2: dims are multiplied with an overflow check
+fn test_gguf_dims_wrap(): i64 {
+    var buf = alloc(4096);
+    var offp = alloc(8); store64(offp, 0);
+    _gg_head(buf, offp, 1, 0);
+    _ggw_str(buf, offp, "t"); _ggw_u32(buf, offp, 4);
+    _ggw_u64(buf, offp, 4); _ggw_u64(buf, offp, 27905);         # 4 * 27905 * 429509837 * 384773
+    _ggw_u64(buf, offp, 429509837); _ggw_u64(buf, offp, 384773);   #   = 2^64 + 4
+    _ggw_u32(buf, offp, 0); _ggw_u64(buf, offp, 0);
+    var off = load64(offp);
+    var ds = off + (32 - (off % 32)) % 32;
+    assert_eq(gg_open(buf, ds + 16), 0, "4-D dims whose product wraps to 4 rejected");
+    return 0;
+}
+
+# 1.2.2: KV integers are read at their own width and sign-extended
+fn test_gguf_kv_width(): i64 {
+    # a buffer ending in a u16 general.alignment, flush against an unmapped page
+    var buf = alloc(8192);
+    var offp = alloc(8); store64(offp, 0);
+    _gg_head(buf, offp, 0, 2);
+    _ggw_str(buf, offp, "f"); _ggw_u32(buf, offp, 8);
+    var pad = alloc(4096);
+    var k = 0;
+    while (k < 4020) { store8(pad + k, 120); k = k + 1; }
+    store8(pad + 4020, 0);
+    _ggw_str(buf, offp, pad);
+    _ggw_str(buf, offp, "general.alignment"); _ggw_u32(buf, offp, 2);
+    _ggw_u8(buf, offp, 32); _ggw_u8(buf, offp, 0);
+    assert_eq(load64(offp), 4096, "the u16 KV ends the 4096-byte buffer");
+    var g = mmap_anon(8192);
+    cyr_munmap(g + 4096, 4096);
+    var j = 0;
+    while (j < 4096) { store8(g + j, load8(buf + j)); j = j + 1; }
+    var r = gg_open(g, 4096);
+    assert_nonnull(r, "a u16 alignment at the very end opens (no 4-byte over-read)");
+    var fnd = alloc(8);
+    assert_eq(gg_kv_int(r, "general.alignment", fnd), 32, "u16 alignment reads as 32");
+    # signed KVs: i8 / i16 / i32 holding -1
+    store64(offp, 0);
+    _gg_head(buf, offp, 0, 3);
+    _ggw_str(buf, offp, "a"); _ggw_u32(buf, offp, 1); _ggw_u8(buf, offp, 255);
+    _ggw_str(buf, offp, "b"); _ggw_u32(buf, offp, 3); _ggw_u8(buf, offp, 255); _ggw_u8(buf, offp, 255);
+    _ggw_str(buf, offp, "c"); _ggw_u32(buf, offp, 5); _ggw_u32(buf, offp, 4294967295);
+    var off = load64(offp);
+    while ((off % 32) != 0) { _ggw_u8(buf, offp, 0); off = off + 1; }
+    r = gg_open(buf, off);
+    assert_nonnull(r, "signed-KV file opens");
+    assert_eq(gg_kv_int(r, "a", fnd), 0 - 1, "i8 -1 reads as -1");
+    assert_eq(gg_kv_int(r, "b", fnd), 0 - 1, "i16 -1 reads as -1");
+    assert_eq(gg_kv_int(r, "c", fnd), 0 - 1, "i32 -1 reads as -1");
+    return 0;
+}
+
 fn main(): i64 {
     alloc_init();
     test_gguf_minimal();
     test_gguf_gpt2_roundtrip();
     test_gguf_hostile_head_count();
+    test_gguf_qkv_shape();
+    test_gguf_dims_wrap();
+    test_gguf_kv_width();
     return assert_summary();
 }
 
 var rc = main();
-syscall(60, rc);
+sys_exit(rc);
