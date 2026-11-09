@@ -129,18 +129,18 @@ fn st_open(buf, len): i64 {
     var i = 0;
     while (i < nobj) {
         var val = bayan_json_v_obj_val(root, i);
-        var dtype_v = bayan_json_v_obj_get(val, "dtype");
+        var dtype_v = bayan_json_v_obj_get_by_cstr(val, "dtype");
         if (dtype_v == 0) { i = i + 1; }                # __metadata__ / non-tensor: skip
         else {
             var key = bayan_json_v_obj_key(root, i);    # Str: tensor name
             var dstr = bayan_json_v_str(dtype_v);
             if (dstr == 0) { return 0; }
             var dt = _st_dtype_from_str(str_data(dstr), str_len(dstr));
-            var shape_v = bayan_json_v_obj_get(val, "shape");
+            var shape_v = bayan_json_v_obj_get_by_cstr(val, "shape");
             if (bayan_json_v_is_arr(shape_v) == 0) { return 0; }
             var ndim = bayan_json_v_arr_len(shape_v);
             if (ndim > 8) { return 0; }
-            var off_v = bayan_json_v_obj_get(val, "data_offsets");
+            var off_v = bayan_json_v_obj_get_by_cstr(val, "data_offsets");
             if (bayan_json_v_is_arr(off_v) == 0) { return 0; }
             if (bayan_json_v_arr_len(off_v) != 2) { return 0; }
             var o0 = bayan_json_v_int(bayan_json_v_arr_get(off_v, 0));

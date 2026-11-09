@@ -6,6 +6,58 @@ moving, no API freeze until v1.0).
 
 ## [Unreleased]
 
+## [1.1.4] - 2026-11-09
+
+A toolchain and dependency realign to the cyrius 6.6.20 set. No behavior change.
+
+### Changed
+
+- **Toolchain `6.6.2` → `6.6.20`.**
+- **Dependencies moved to the releases built against 6.6.20.** 1.1.3 moved the toolchain but
+  left all four dep tags where 1.1.2 set them.
+  - `sigil` `3.12.16` → `3.13.10`. This is the sigil bundled in cyrius 6.6.20, and the last
+    sigil tag pinned within 6.6.x (it pins 6.6.18; 3.13.11 moves to 6.7.5). It is also the one
+    tula 1.0.3 pins.
+  - `tula` `1.0.1` → `1.0.3`.
+  - `rosnet` `1.1.1` → `1.1.3`. tyche comes in transitively at `1.1.1` (was `1.0.1`). Its
+    `rng_normal` moves 0.011% of x86_64 draws by 1–3 ulp, and `t_randn` inherits that. The
+    suite never draws: `lora_init` (the only `t_randn` caller) is reached only from the
+    `gpt2-lora` / `gpt2-qlora` / `gpt2-tula` demos, whose seeded A-init can move by those ulps.
+  - `rupantara` `0.4.2` → `0.4.4`. It pins rosnet `1.1.3` too, so the graph resolves a single
+    rosnet.
+- **`[deps].stdlib` gains `sys`.** sigil 3.13.10's `dist/sigil.deps` lists it, and tula 1.0.3
+  added the same leaf. tula 1.0.3 no longer ships `dist/tula.deps`, so the manifest comment now
+  points at tula's `[deps].stdlib` plus sigil's sidecar instead.
+- **`src/safetensors.cyr`: `bayan_json_v_obj_get` → `bayan_json_v_obj_get_by_cstr`** (3 call
+  sites: `dtype`, `shape`, `data_offsets`). bayan 1.5.10 deprecated the old name, and 6.6.20
+  bundles bayan 1.5.12, so every build warned at all three sites. The old name only forwards to
+  `_by_cstr`, so the lookup and its answers are the same.
+- **`anukulana_version()` `10103` → `10104`.** The `smoke.tcyr` assertion moves with it.
+
+### Verified
+
+- **Against the tagged graph, the one CI builds.** Under 6.6.20 a `path` still shadows its
+  `tag` (git-first only arrives in 6.7.6), and every `../` checkout runs ahead on a 6.7.x
+  release. So the run used a copy of the tree with the four `path` lines dropped. `cyrius deps`
+  commit-pinned all five deps: sigil `6d065da`, tula `ad2a39c`, rosnet `5aa4ad7`,
+  rupantara `8a41767`, tyche `68bb5db`. Every vendored `lib/<dep>.cyr` header was confirmed at
+  its new version.
+- Suite **129/129** across 9 files, the same count as 1.1.3. Lint has 0 `warn ` lines, fmt and
+  vet are clean, and the DCE binary (715,728 B) builds and runs. The only compiler warnings
+  left come from inside sigil's bundle (a 256 KiB static array local) and the static-data size
+  note.
+- **Not run: `make fidelity` or the checkpoint demos.** The GPT-2 checkpoint was not staged on
+  the verification host. rupantara 0.4.4 reports no forward change, and rosnet's CPU bundle
+  changed only in whitespace between 1.1.1 and 1.1.3, but the HF-logit gate itself has not
+  been re-run at this pin.
+
+### Known
+
+- **The in-tree build fails while the `path` overrides point at 6.7.x checkouts.** With
+  `../tula` at 1.6.1 (pins 6.7.18), `cyrius build` stops at `lib/tula.cyr:445:10: expected '=',
+  got '{'`. CI is unaffected because it resolves the tags. Local work needs the sibling
+  checkouts at the 6.6.20-era tags, or the overrides dropped, until the pin reaches 6.7.6.
+
 ## [1.1.3] - 2026-09-11
 
 ### Changed
