@@ -132,6 +132,7 @@ CHANGELOG.
 
 ## Next
 
-Still open from 1.3.x: the first `realweights.yml` run on GitHub and the first `bounds` / `aarch64` runs.
-Then `convert` at source precision (1.5.x), rupantara 0.6–0.7 (1.6.x, gated), quantized GGUF (1.7.x) and
-the llama architecture (1.8.x, gated on rupantara). See [`roadmap.md`](roadmap.md).
+The 1.3.x follow-through is confirmed on GitHub: `realweights.yml` ran green, and the 1.4.0 release passed
+its CI gate, `bounds` and the native `aarch64` job included. Next: `convert` at source precision (1.5.x),
+then rupantara 0.6–0.7 (1.6.x, gated), quantized GGUF (1.7.x) and the llama architecture (1.8.x, gated on
+rupantara). See [`roadmap.md`](roadmap.md).

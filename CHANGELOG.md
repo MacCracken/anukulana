@@ -6,6 +6,13 @@ moving, no API freeze until v1.0).
 
 ## [Unreleased]
 
+### Changed
+
+- **Roadmap:** the 1.3.x follow-through section is removed, now that GitHub has confirmed it:
+  `realweights.yml` ran green, and the 1.4.0 release passed its CI gate, which includes the `bounds` and
+  native `aarch64` (`ubuntu-26.04-arm`) jobs. Whether to schedule `realweights.yml` moves to the 1.x.x list.
+  tula's two cross-repo asks are marked met. `state.md`'s Next section is updated to match.
+
 ## [1.4.0] - 2026-11-09
 
 The roadmap's 1.4.x line: anukulana writes and reads tula files with the calls tula 1.2–1.6 added for

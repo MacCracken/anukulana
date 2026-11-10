@@ -9,8 +9,9 @@
 > checkpoint: import (safetensors and GGUF, bit-identical across both), run, match HF
 > (`gpt2-oracle`), adapt (LoRA, QLoRA/NF4) and persist (signed tula files). All seven commands were
 > re-proven at the current pin in 1.3.0, and 1.4.0 shipped the tula 1.2–1.6 surface (checked adds,
-> signed metadata and provenance, `inspect --pk`, big-file reads, streaming writes). The API froze at
-> 1.0.0. This file lists **remaining work only**. Shipped work is in the
+> signed metadata and provenance, `inspect --pk`, big-file reads, streaming writes). On GitHub, the
+> real-weights workflow has run green, and so has the 1.4.0 release, which gates on the `bounds` and
+> native `aarch64` CI jobs. The API froze at 1.0.0. This file lists **remaining work only**. Shipped work is in the
 > [CHANGELOG](../../CHANGELOG.md), [`state.md`](state.md) and the audits
 > ([2026-07-04](../audit/2026-07-04-audit.md), [2026-11-09](../audit/2026-11-09-audit.md)).
 
@@ -51,19 +52,6 @@
   reproduction; anukulana carries at most a documented guard, never a patched copy.
 
 ---
-
-## 1.3.x — follow-through on GitHub
-
-1.3.0 re-proved every real-checkpoint gate locally, added the CI jobs below and froze the 1.2.2 helpers
-(see the CHANGELOG). What is left can only be confirmed on GitHub:
-
-- **The first `realweights.yml` run** (manual trigger; it fetches the 548 MB checkpoint once, then
-  caches it). ⚠ The maintainer's call whether to add a schedule. It covers five of the seven commands;
-  `gpt2-gguf` / `gpt2-cross` stay local because their GGUF comes from a Python converter.
-- **The first runs of the `bounds` and `aarch64` CI jobs.** Both suites were green by hand (aarch64
-  under qemu). The native runner label `ubuntu-26.04-arm` is taken from tula's CI and hasn't run
-  for anukulana yet; if it isn't available, the job (and the release gate, which calls `ci.yml`) fails
-  until it's changed.
 
 ## 1.5.x — keep the source precision (`convert`)
 
@@ -156,6 +144,8 @@ missing is the forward and the mapping.
 - **Duplicate tensor names in a safetensors header.** The first match wins today. Detecting duplicates
   needs a hash index to stay linear on hostile headers.
 - **Pin CI's cyrius installer to the release** instead of `main`: an ecosystem-wide decision.
+- **Schedule `realweights.yml`.** It is manual today, because each uncached run fetches the 548 MB
+  checkpoint. Adding a `schedule:` trigger (the workflow's header shows one) is the maintainer's call.
 
 ## 2.0.0 — backlog (only what 1.x can't carry)
 
@@ -182,10 +172,9 @@ additive path. Nothing here is scheduled.
 - **Upstream gates on this plan:** rupantara 0.6 / 0.7 / 1.0 (1.6.x), rupantara's architecture breadth
   (1.8.x), tula 1.8 int4 (1.7.x), rosnet quantized linears (1.x.x). Larger models will want rosnet's
   mabda GPU profile (deferred).
-- **Outstanding cross-repo asks addressed to anukulana:** tula — the real-weights gate in CI (the
-  workflow landed in 1.3.0; its first run is pending, 1.3.x). Its 1.2–1.6 calls (checked adds, strict
-  reads, streaming writes, metadata, long-name lookups) are adopted as of 1.4.0. rupantara —
-  drop the repack and be the 1.0 consumer gate (1.6.x).
+- **Outstanding cross-repo asks addressed to anukulana:** rupantara — drop the repack and be the 1.0
+  consumer gate (1.6.x). tula's two asks are met: the real-weights gate runs in CI (`realweights.yml`,
+  1.3.0, green on GitHub), and its 1.2–1.6 calls are adopted (1.4.0).
   Already done in 1.2.2: decode on `ru_model_fwd_row_s`, `RU_ERR_*` checked, off rupantara 0.4.2.
 - **Boundary:** training/backward → attn11 · QAT → tentib · the format → tula · the forward →
   rupantara · sampling beyond greedy → the Type-2 reference. Rotation-PTQ and one-shot sparsity stay
