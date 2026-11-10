@@ -6,6 +6,72 @@ moving, no API freeze until v1.0).
 
 ## [Unreleased]
 
+## [1.5.1] - 2026-11-09
+
+Onto rupantara 0.6.1: the run-length repack is gone (the roadmap's 1.6.x item). One import at the
+file's full context now serves every run length through rupantara's variable-length forward. Every
+existing call keeps its behaviour, and every result is bit-identical.
+
+**Cut as a patch by the maintainer's call.** It also adds `anuk_decode_check_n` and the `T_run = 0`
+mode, and STABILITY.md files additions under minors. Both are additive: no frozen signature, gate or
+exit code changed.
+
+### Added
+
+- **`T_run = 0` keeps the file's own context** in all three importers: `anuk_gpt2_import`,
+  `anuk_ggpt2_import` (and `anuk_ggpt2_infer_cfg`) and `anuk_tula_import`.
+  - **The context comes from the file:** `wpe`'s rows, `position_embd`'s rows, or the converted
+    file's `cfg`.
+  - **One import, every run length.** It serves every `n` up to that context through
+    `ru_model_fwd_n(_s)`.
+  - **Bits:** at each `n` the rows are bit-identical to a `T_run = n` import run by `ru_model_fwd`,
+    the 1.5.0 path.
+  - **Additive:** `T_run = 0` was refused before (STABILITY.md: additive minors).
+  - **Why it mattered:** through 1.5.0 the context was always overridden to `T_run`, so the pack,
+    about 1 GB for GPT-2 small, was redone for every run length.
+- **`anuk_decode_check_n(cfg, params, tokens, n, Lb)`.** The batch-versus-decode check over the
+  first `n` positions (`1 <= n <= T`), with the batch on `ru_model_fwd_n_s`. It returns
+  `RU_ERR_POS` for `n > T` and `RU_ERR_ARG` for `n < 1`. `anuk_decode_check` is now its `n = T`
+  case.
+
+### Changed
+
+- **`[deps.rupantara]` `0.5.3` → `0.6.1`.**
+  - 0.6.0 adds the variable-length forward and drops the attention-probability scratch from the
+    model forward; 0.6.1 adds `ru_gelu_fwd_t`.
+  - No output anukulana computes changes.
+  - The fetched bundle is byte-identical to rupantara's `dist/rupantara.cyr` at the tag.
+  - `cyrius.lock` was re-pinned. It kept 0.5.3's commit, fail-closed, until it was deleted.
+- **The real-model commands import once at the full context:** `gpt2`, `gpt2-gguf`, `gpt2-load`,
+  `gpt2-cross`, the `convert` self-check and `gpt2-oracle`.
+  - **The runs are unchanged:** the `gpt2*` checks run their 8 positions through
+    `anuk_decode_check_n`, and the oracle runs the fixture's `T` through `ru_model_fwd_n`.
+  - **The two bit-identity gates now compare every position row.** `gpt2-cross` (safetensors ==
+    GGUF) and `convert` (reload == direct import) cover all 1,024 position rows, where they
+    compared 8.
+  - **The run line names the context:** `T_run=8 (context 1024)`.
+
+### Tests
+
+- **`tests/tcyr/convert.tcyr`: `test_full_context`.**
+  - All three doors at `T_run = 0` return the file's context and bit-identical params.
+  - At every `n` from 1 to `T`, `ru_model_fwd_n` on the one full-context import equals the
+    per-length repack's `ru_model_fwd`.
+  - `anuk_decode_check_n` passes at `n = 3`, and returns `RU_ERR_POS` / `RU_ERR_ARG` out of range.
+- **The old "`T_run` 0 is rejected" case now checks that a negative `T_run` is rejected.**
+- **Totals:** 297 assertions in 10 suites. fmt, lint (0 warnings), vet and doc are clean.
+- **Real-checkpoint gates, run on the staged GPT-2** (`~/models/gpt2`, safetensors and GGUF) on
+  rupantara 0.6.1. All nine commands pass:
+  - **`gpt2-oracle`** (`make fidelity`): argmax exact at all 48 positions. The worst last-row
+    maxrel is **1.049e-6**, the 1.3.0 figure exactly, so the forward's numbers did not move.
+  - **`gpt2` / `gpt2-gguf`:** `T_run=8 (context 1024)`, batch == decode with 0 differing logits.
+  - **`gpt2-cross`:** all **124,439,808** full-context params bit-identical (safetensors == GGUF),
+    and 0 differing logits.
+  - **`convert`** (78 s) and **`gpt2-load`** (27 s): the reload is bit-identical to the direct
+    import over every position row, and batch == decode.
+  - **`gpt2-lora` / `gpt2-qlora`:** each adapts to 8/8 with the base frozen.
+  - **`gpt2-tula`:** the checkpoint + adapter round-trip is bit-identical and signed, task 8/8.
+
 ## [1.5.0] - 2026-11-09
 
 The roadmap's 1.5.x line: `convert`, a foreign GPT-2 as a signed tula file at its source precision, and

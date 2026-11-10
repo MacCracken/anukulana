@@ -82,7 +82,7 @@ fn anuk_gpt2_oracle(model_path, fix_path): i64 {
     var T = load64(tb);
     var Vf = load64(vb);
     var cfg = alloc(64);
-    var params = anuk_gpt2_import(model_path, 12, T, cfg);
+    var params = anuk_gpt2_import(model_path, 12, 0, cfg);   # full context (1.5.1)
     if (params == 0) { _anuk_eput("oracle: import failed (open / infer / pack)\n"); return 1; }
     var V = _cfg_V(cfg);
     if (V != Vf) {
@@ -106,7 +106,7 @@ fn anuk_gpt2_oracle(model_path, fix_path): i64 {
         var ref = hfam + T * 8;
         # a rejected forward (a fixture token outside [0, V)) leaves Lb untouched,
         # so it must not be scored (1.2.2: the return code was ignored)
-        var frc = ru_model_fwd(cfg, params, toks, Lb, 0);
+        var frc = ru_model_fwd_n(cfg, params, toks, T, Lb, 0);   # the fixture's T positions
         if (frc != RU_OK()) {
             _anuk_eput("oracle: forward rejected the fixture sequence (code ");
             _anuk_eput_int(frc); _anuk_eput(")\n");

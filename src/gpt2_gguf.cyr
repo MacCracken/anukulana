@@ -85,7 +85,8 @@ fn _ggpt2_mat_t(r, name, dst, insz, osz, obase, outs, rowbuf): i64 {
     return 0;
 }
 
-# infer cfg from GGUF KV metadata (mirrors anuk_gpt2_infer_cfg). Returns 0 | -1.
+# infer cfg from GGUF KV metadata (mirrors anuk_gpt2_infer_cfg). T_run = 0 takes the
+# file's own context, position_embd's row count (1.5.1). Returns 0 | -1.
 fn anuk_ggpt2_infer_cfg(r, cfg, T_run): i64 {
     var lenp = alloc(8);
     var arch = gg_kv_str(r, "general.architecture", lenp);
@@ -109,7 +110,14 @@ fn anuk_ggpt2_infer_cfg(r, cfg, T_run): i64 {
     if (gg_entry_ndim(te) != 2) { return 0 - 1; }
     if (gg_entry_dim(te, 0) != C) { return 0 - 1; }
     var V = gg_entry_dim(te, 1);
-    ru_cfg_init(cfg, V, C, T_run, nh, nh, NL, F, 1);
+    var Tc = T_run;
+    if (T_run == 0) {
+        var pe = gg_find(r, "position_embd.weight");
+        if (pe == 0) { return 0 - 1; }
+        if (gg_entry_ndim(pe) != 2) { return 0 - 1; }
+        Tc = gg_entry_dim(pe, 1);                            # ne [C, T]: the rows
+    }
+    ru_cfg_init(cfg, V, C, Tc, nh, nh, NL, F, 1);
     # head_count / block_count / feed_forward_length are raw KV values from the
     # file: head_count = 0 used to reach C / nh inside ru_params_count.
     if (ru_cfg_check(cfg) != RU_OK()) { return 0 - 1; }
@@ -176,8 +184,8 @@ fn anuk_ggpt2_pack(r, cfg, params): i64 {
     return 0;
 }
 
-# One-shot: mmap a GGUF, infer config (context overridden to T_run), pack a
-# fresh params buffer. Returns the params ptr, or 0.
+# One-shot: mmap a GGUF, infer config (context overridden to T_run; 0 keeps the
+# file's, 1.5.1), pack a fresh params buffer. Returns the params ptr, or 0.
 fn anuk_ggpt2_import(path, T_run, cfg): i64 {
     var r = gg_open_mmap(path);
     if (r == 0) { return 0; }

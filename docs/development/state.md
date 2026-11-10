@@ -1,9 +1,19 @@
 # anukulana — Current State
 
-> **Last refresh**: 2026-11-09 (1.5.0) | **Cadence**: every release.
+> **Last refresh**: 2026-11-09 (1.5.1) | **Cadence**: every release.
 > `CLAUDE.md` is preferences/process; this file is volatile state.
 
 ## Version
+
+**1.5.1 — 2026-11-09 (onto rupantara 0.6.1; no repack per run length).**
+- **What changed:** `T_run = 0` imports at the file's full context through all three doors. One
+  import then serves every run length through rupantara's `ru_model_fwd_n`, and
+  `anuk_decode_check_n` checks the first `n` positions.
+- **The real-model commands now import once at the full context.** `gpt2-cross` and `convert`
+  compare all 1,024 position rows.
+- **Real weights:** all nine real-checkpoint commands pass on GPT-2 through rupantara 0.6.1. The
+  worst fidelity maxrel is **1.049e-6**, unchanged since 1.3.0.
+- **Suite:** **297**.
 
 **1.5.0 — 2026-11-09 (`convert` at source precision).** `convert` writes a foreign GPT-2 as a signed tula
 file in HF GPT-2's names and shapes at its source dtype (GGUF weights transposed back), with metadata and
@@ -113,7 +123,8 @@ Suite **219** (1.2.2); lint/fmt/vet/doc clean. Every version since 0.1.0 is in t
 ## Toolchain
 
 Cyrius pin and dependency tags: see `cyrius.cyml` (1.2.2: cyrius 6.7.18 with sigil
-3.13.15, tula 1.6.1, rosnet 1.4.1, rupantara 0.5.3; tyche 1.2.2 transitively).
+3.13.15, tula 1.6.1, rosnet 1.4.1, rupantara 0.5.3; tyche 1.2.2 transitively;
+1.5.1 moves rupantara to 0.6.1).
 Since 6.7.6 every build resolves the tags (git first); the `path = "../x"` lines
 are dev overrides used only under `CYRIUS_LOCAL=1`. The history of each pin move,
 including the 6.5.27 bump that took the suite from 0/9 to 9/9, is in the
@@ -130,9 +141,12 @@ CHANGELOG.
 
 - **tula 1.6.1** (format v1 frozen) — anukulana **M1 DONE** (consumed); 1.2.2 uses
   its strict validator on every signed file it reads.
-- **rupantara 0.5.3** (forward + KV-cache decode, validated entries) — consumed by
-  the import path; **M2 DONE** on it. 1.2.2 decodes on its allocation-free `_s`
-  entries, closing the cross-repo item its 2026-11-09 audit filed.
+- **rupantara 0.6.1** (1.5.1; 0.5.3 through 1.5.0) (forward + KV-cache
+  decode, validated entries) — consumed by the import path; **M2 DONE** on it. 1.2.2
+  decodes on its allocation-free `_s` entries, closing the cross-repo item its
+  2026-11-09 audit filed. 1.5.1 imports at the full context (`T_run = 0`)
+  and runs short windows on its variable-length `ru_model_fwd_n`, so nothing is
+  repacked per run length.
 - **rosnet 1.4.1 / sigil 3.13.15** — consumed (tensors / Ed25519).
 - **akshara** — not yet wired (the oracle uses integer token patterns; a real
   tokenizer enters with the LoRA fine-tune data path if needed).

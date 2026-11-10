@@ -50,13 +50,21 @@ config (heads passed in; NOT in safetensors) → pack onto rupantara's layout
 (fused-QKV column split, **no transpose**). `anuk_gpt2_infer_cfg` /
 `anuk_gpt2_pack` are the two halves. *(1.2.1)* The inferred config, and again the
 config with `T_run` applied, must pass rupantara's `ru_cfg_check`, or import
-returns 0 and `anuk_gpt2_infer_cfg` returns -1. *(1.2.2)* Every tensor must have
+returns 0 and `anuk_gpt2_infer_cfg` returns -1. *(1.5.1)* `T_run = 0` keeps the
+file's own context (`wpe`'s rows, 1024 for GPT-2): one import then serves every run
+length through rupantara's `ru_model_fwd_n(_s)` (rupantara 0.6), so nothing is
+repacked per length, and its rows are bit-identical to a `T_run = n` import's
+`ru_model_fwd`. *(1.2.2)* Every tensor must have
 exactly HF GPT-2's shape (`wte` [V,C], `wpe` [≥T,C], `c_attn.weight` [C,3C], …),
 not just its element count; `anuk_gpt2_pack` returns -2 otherwise.
 *(1.3.0)* `anuk_decode_check(cfg, params, tokens, Lb)` → the number of differing
 logits | a negative `RU_ERR_*` — the batch forward over `T` tokens into `Lb`
 (`T`×`V`), then the KV-cache decode token by token, compared bit for bit;
-allocation-free per token (the `gpt2` / `gpt2-gguf` gate) ·
+allocation-free per token (the `gpt2` / `gpt2-gguf` gate) · *(1.5.1)*
+`anuk_decode_check_n(cfg, params, tokens, n, Lb)` — the same over the first `n`
+positions (`1 <= n <= T`; `Lb` is `n`×`V`), so a full-context import checks a short
+run: the batch is `ru_model_fwd_n_s`; `RU_ERR_POS` for `n > T`, `RU_ERR_ARG` for
+`n < 1`. `anuk_decode_check` is its `n = T` case ·
 `anuk_argmax_matches(logits, targets, T, V)` → how many of the `T` rows have
 their argmax at `targets[t]`.
 
@@ -83,6 +91,8 @@ pack onto rupantara's layout (ggml `[out, in]` **transposed back** to
 for a config `ru_cfg_check` rejects (e.g. `head_count = 0`, or one not dividing
 `embedding_length`). *(1.2.2)* Every tensor must have exactly its expected
 `ne` (an `attn_qkv` with more or fewer than 3C output rows is rejected).
+*(1.5.1)* `T_run = 0` keeps the file's own context (`position_embd`'s rows), as for
+the safetensors door; `anuk_ggpt2_infer_cfg` reads it the same way.
 
 ### Fidelity — `src/oracle.cyr`
 `anuk_gpt2_oracle(model_path, fix_path)` → 0 | 1. Fixture format v1 documented
@@ -118,8 +128,9 @@ metadata (`anukulana.kind = model`, `anukulana.layout = hf-gpt2`, `.config`,
 byte-identical files. -1 for a source the importer would refuse or a failed write.
 `anuk_tula_import(path, pk, T_run, cfg)` → params | 0 — open a converted file
 (strict validation, Ed25519 under `pk` required, kind/layout checked, `T_run` ≤
-the file's context) and pack it through the same mapping as the safetensors door,
-so it lands bit-identical to the direct import. `anuk_hf_n_head(text, fallback)`
+the file's context; *(1.5.1)* `T_run = 0` is the file's context) and pack it
+through the same mapping as the safetensors door, so it lands bit-identical to the
+direct import. `anuk_hf_n_head(text, fallback)`
 (`n_head` from a `config.json` text). The pack's tensor source is shared:
 `GSRC_ST()` / `GSRC_TULA()` and `anuk_tula_read_f64_range(r, e, start, n, dst)` (in
 `src/gpt2.cyr`). Loading verifies the whole file's signature every time: about 27 s

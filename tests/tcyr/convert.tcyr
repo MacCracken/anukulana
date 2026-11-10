@@ -155,7 +155,8 @@ fn test_convert_rejects(): i64 {
     while (k < 32) { store8(bad + k, (k + 61) & 0xFF); k = k + 1; }
     assert_eq(anuk_tula_import(out_st, bad, 4, cfg2), 0, "a wrong key is rejected");
     assert_eq(anuk_tula_import(out_st, pk, 7, cfg2), 0, "T_run past the file's context is rejected");
-    assert_eq(anuk_tula_import(out_st, pk, 0, cfg2), 0, "T_run 0 is rejected");
+    # 1.5.1: T_run = 0 is the file's full context (test_full_context); below 0 is refused
+    assert_eq(anuk_tula_import(out_st, pk, 0 - 1, cfg2), 0, "a negative T_run is rejected");
     # an NF4 checkpoint is not a converted model
     var cfg = _cv_cfg();
     var np = ru_params_count(cfg);
@@ -193,9 +194,59 @@ fn test_convert_rejects(): i64 {
     return 0;
 }
 
+# 1.5.1: T_run = 0 imports at the file's own context through every door, and that one
+# import serves every run length through rupantara 0.6's ru_model_fwd_n: at each n its
+# rows are bit-identical to the 1.5.0 path, a repack for T_run = n run by ru_model_fwd.
+# Uses the files test_convert_doors wrote.
+fn test_full_context(): i64 {
+    var sk = alloc(64);
+    var pk = alloc(32);
+    anuk_demo_keypair(sk, pk);
+    var stp = "/tmp/anuk_cv_st/model.safetensors";
+    var cS = alloc(64);
+    var pS = anuk_gpt2_import(stp, 2, 0, cS);
+    var cG = alloc(64);
+    var pG = anuk_ggpt2_import("/tmp/anuk_cv_gg/model.gguf", 0, cG);
+    var cT = alloc(64);
+    var pT = anuk_tula_import("/tmp/anuk_cv_st.tula", pk, 0, cT);
+    assert(pS != 0 && pG != 0 && pT != 0, "T_run = 0 imports through all three doors");
+    if (pS == 0 || pG == 0 || pT == 0) { return 0; }
+    assert_eq(_cfg_T(cS), _cv_T, "safetensors: T_run = 0 keeps the file's context");
+    assert_eq(_cfg_T(cG), _cv_T, "GGUF: T_run = 0 keeps the file's context");
+    assert_eq(_cfg_T(cT), _cv_T, "tula: T_run = 0 keeps the file's context");
+    var np = ru_params_count(cS);
+    assert_eq(_cv_same_params(pS, pG, np) + _cv_same_params(pS, pT, np), 0,
+      "the three full-context imports are bit-identical, every position row included");
+    var V = _cv_V;
+    var tokens = _anuk_demo_tokens(_cv_T, V);
+    var diffs = 0;
+    var rcs = 0;
+    var n = 1;
+    while (n <= _cv_T) {
+        var cN = alloc(64);
+        var pN = anuk_gpt2_import(stp, 2, n, cN);         # the 1.5.0 per-length repack
+        var LN = alloc(n * V * 8);
+        var LF = alloc(n * V * 8);
+        rcs = rcs + ru_model_fwd(cN, pN, tokens, LN, 0);
+        rcs = rcs + ru_model_fwd_n(cS, pS, tokens, n, LF, 0);
+        var i = 0;
+        while (i < n * V) { if (load64(LN + i * 8) != load64(LF + i * 8)) { diffs = diffs + 1; } i = i + 1; }
+        n = n + 1;
+    }
+    assert_eq(rcs, 0, "both forwards ran at every run length");
+    assert_eq(diffs, 0, "one full-context import + ru_model_fwd_n == a repack per run length, bit for bit");
+    var Lb = alloc(_cv_T * V * 8);
+    assert_eq(anuk_decode_check_n(cS, pS, tokens, 3, Lb), 0, "decode check over 3 of the 6 positions");
+    assert_eq(anuk_decode_check_n(cS, pS, tokens, _cv_T + 1, Lb), RU_ERR_POS(), "n past the context -> RU_ERR_POS");
+    assert_eq(anuk_decode_check_n(cS, pS, tokens, 0, Lb), RU_ERR_ARG(), "n = 0 -> RU_ERR_ARG");
+    assert_eq(anuk_decode_check(cS, pS, tokens, Lb), 0, "the whole-window decode check, unchanged");
+    return 0;
+}
+
 fn main(): i64 {
     alloc_init();
     test_convert_doors();
+    test_full_context();
     test_convert_rejects();
     return assert_summary();
 }

@@ -39,10 +39,11 @@ fn usage(fd): i64 {
 # forward against the KV-cache incremental decode (they must be bit-identical) on
 # a short fixed input. Proves the importer + wideners + mapping on a real model.
 # (Exact HF-reference-logit match is the separate `gpt2-oracle` gate.) One copy
-# for both doors (1.2.2: two near-identical copies).
-fn _anuk_run_check(label, cfg, params): i64 {
+# for both doors (1.2.2: two near-identical copies). The model is imported at its
+# full context and the check runs the first T_run positions (1.5.1: rupantara 0.6's
+# variable-length forward; through 1.5.0 the import repacked for T_run).
+fn _anuk_run_check(label, cfg, params, T_run): i64 {
     var V = _cfg_V(cfg);
-    var T_run = _cfg_T(cfg);
     # weight sanity: are the widened params finite? (localizes NaN: weights vs forward)
     var np = ru_params_count(cfg);
     var nanp = 0;
@@ -53,10 +54,11 @@ fn _anuk_run_check(label, cfg, params): i64 {
     _anuk_sput(" C="); _anuk_puti(_cfg_C(cfg));
     _anuk_sput(" NL="); _anuk_puti(_cfg_NL(cfg));
     _anuk_sput(" heads="); _anuk_puti(_cfg_nh(cfg));
-    _anuk_sput(" T_run="); _anuk_puti(T_run); _anuk_sput("\n");
+    _anuk_sput(" T_run="); _anuk_puti(T_run);
+    _anuk_sput(" (context "); _anuk_puti(_cfg_T(cfg)); _anuk_sput(")\n");
     var tokens = _anuk_demo_tokens(T_run, V);
     var Lb = alloc(T_run * V * 8);
-    var diffs = anuk_decode_check(cfg, params, tokens, Lb);
+    var diffs = anuk_decode_check_n(cfg, params, tokens, T_run, Lb);
     if (diffs < 0) {
         _anuk_eput("forward rejected the input (rupantara code "); _anuk_eput_int(diffs); _anuk_eput(")\n");
         return 1;
@@ -86,31 +88,33 @@ fn _anuk_run_check(label, cfg, params): i64 {
 # safetensors doesn't carry them) and run the batch-vs-decode check.
 fn _gpt2_run(path): i64 {
     var cfg = alloc(64);
-    var params = anuk_gpt2_import(path, 12, 8, cfg);       # mmap (past alloc cap)
+    var params = anuk_gpt2_import(path, 12, 0, cfg);       # mmap (past alloc cap); full context
     if (params == 0) { _anuk_eput("gpt2: import failed (open / infer / pack)\n"); return 1; }
-    return _anuk_run_check("safetensors", cfg, params);
+    return _anuk_run_check("safetensors", cfg, params, 8);
 }
 
 # `gpt2-gguf <model.gguf>` — the same check through the GGUF door (KV-driven
 # config, blk.N.* mapping, transpose-back).
 fn _ggpt2_run(path): i64 {
     var cfg = alloc(64);
-    var params = anuk_ggpt2_import(path, 8, cfg);
+    var params = anuk_ggpt2_import(path, 0, cfg);           # full context
     if (params == 0) { _anuk_eput("gpt2-gguf: import failed (open / infer / pack)\n"); return 1; }
-    return _anuk_run_check("GGUF", cfg, params);
+    return _anuk_run_check("GGUF", cfg, params, 8);
 }
 
 # `gpt2-cross <model.safetensors> <model.gguf>` — THE cross-format gate: the
 # same checkpoint imported through both foreign doors must land on IDENTICAL
 # packed params (both fp32 sources widen deterministically) and hence identical
-# logits. Any orientation/naming/widening slip in either mapping shows here.
+# logits. Any orientation/naming/widening slip in either mapping shows here. Both
+# import at the file's full context (1.5.1), so the params check covers every
+# position row, and the logits run the first T_run positions (ru_model_fwd_n).
 fn _gpt2_cross(st_path, gg_path): i64 {
     var cfgA = alloc(64);
     var T_run = 8;
-    var pA = anuk_gpt2_import(st_path, 12, T_run, cfgA);
+    var pA = anuk_gpt2_import(st_path, 12, 0, cfgA);
     if (pA == 0) { _anuk_eput("gpt2-cross: safetensors import failed\n"); return 1; }
     var cfgB = alloc(64);
-    var pB = anuk_ggpt2_import(gg_path, T_run, cfgB);
+    var pB = anuk_ggpt2_import(gg_path, 0, cfgB);
     if (pB == 0) { _anuk_eput("gpt2-cross: gguf import failed\n"); return 1; }
     # every field (1.2.2: nh and T weren't compared, so a GGUF with other heads
     # passed the params check and only failed later, on logits)
@@ -132,8 +136,8 @@ fn _gpt2_cross(st_path, gg_path): i64 {
     var tokens = _anuk_demo_tokens(T_run, V);
     var LA = alloc(T_run * V * 8);
     var LB = alloc(T_run * V * 8);
-    var ra = ru_model_fwd(cfgA, pA, tokens, LA, 0);
-    var rb = ru_model_fwd(cfgB, pB, tokens, LB, 0);
+    var ra = ru_model_fwd_n(cfgA, pA, tokens, T_run, LA, 0);
+    var rb = ru_model_fwd_n(cfgB, pB, tokens, T_run, LB, 0);
     if (ra != RU_OK() || rb != RU_OK()) {
         _anuk_eput("gpt2-cross: forward rejected the input\n");
         return 1;
@@ -201,8 +205,9 @@ fn _anuk_convert(src, out, sk_path): i64 {
     }
     if (rc != 0) { _anuk_eput("convert: failed (a tensor missing or misshapen, or the write failed)\n"); return 1; }
     _anuk_sput("converted: "); _anuk_sput(out); _anuk_sput("\n");
-    # self-check: the converted file loads onto exactly the directly imported params
-    var T_run = 8;
+    # self-check: the converted file loads onto exactly the directly imported params,
+    # both at the full context (1.5.1: every position row compared; it was 8)
+    var T_run = 0;
     var cfgA = alloc(64);
     var pA = 0;
     if (gguf == 1) { pA = anuk_ggpt2_import(src, T_run, cfgA); } else { pA = anuk_gpt2_import(src, nh, T_run, cfgA); }
@@ -248,9 +253,9 @@ fn _anuk_load_run(path, pk_path): i64 {
         _anuk_sput("verifying with the demo key (pass --pk for an operator key)\n");
     }
     var cfg = alloc(64);
-    var params = anuk_tula_import(path, pk, 8, cfg);
+    var params = anuk_tula_import(path, pk, 0, cfg);       # full context
     if (params == 0) { _anuk_eput("gpt2-load: import failed\n"); return 1; }
-    return _anuk_run_check("converted tula", cfg, params);
+    return _anuk_run_check("converted tula", cfg, params, 8);
 }
 
 # 1 iff the command has at least `n` argv entries; otherwise prints `msg` to

@@ -5,14 +5,15 @@
 > **reference binary**: it consumes tula (format), rupantara (forward), rosnet (tensors) and
 > sigil (Ed25519), and does not reinvent them.
 >
-> **Where it stands (1.5.0, 2026-11-09).** The whole charter is built and gated on the real GPT-2
+> **Where it stands (1.5.1, 2026-11-09).** The whole charter is built and gated on the real GPT-2
 > checkpoint: import (safetensors and GGUF, bit-identical across both), run, match HF
 > (`gpt2-oracle`), adapt (LoRA, QLoRA/NF4) and persist (signed tula files). All seven commands were
 > re-proven at the current pin in 1.3.0, and 1.4.0 shipped the tula 1.2–1.6 surface (checked adds,
 > signed metadata and provenance, `inspect --pk`, big-file reads, streaming writes). On GitHub, the
 > real-weights workflow has run green, and so has the 1.4.0 release, which gates on the `bounds` and
 > native `aarch64` CI jobs. 1.5.0 shipped `convert` (a signed tula copy at source precision, both doors
-> bit-identical) and `gpt2-load`. The API froze at 1.0.0. This file lists **remaining work only**. Shipped work is in the
+> bit-identical) and `gpt2-load`. 1.5.1 moved onto rupantara 0.6.1: one full-context import serves every
+> run length, and all nine real-checkpoint commands pass through it. The API froze at 1.0.0. This file lists **remaining work only**. Shipped work is in the
 > [CHANGELOG](../../CHANGELOG.md), [`state.md`](state.md) and the audits
 > ([2026-07-04](../audit/2026-07-04-audit.md), [2026-11-09](../audit/2026-11-09-audit.md)).
 
@@ -59,8 +60,6 @@
 Each item lands when rupantara ships it (its roadmap, 0.6.x and 0.7.x, lists these as cross-repo
 items for anukulana).
 
-- **Drop the run-length repack.** `anuk_gpt2_import` re-packs the whole parameter buffer (about 1 GB
-  for GPT-2 small) for every `T_run`. Move onto `ru_model_fwd_n` / `_n_s` once they land.
 - **The config descriptor's growth path.** anukulana sizes every `cfg` at 64 bytes, stores it in
   checkpoints as F64 `[8]`, and its public entries take a caller-allocated `cfg`. If rupantara grows
   the descriptor:
@@ -72,11 +71,13 @@ items for anukulana).
   `_ru_o_*`, `_p_*`, `_b?`, `_ru_blk_base`) as its layout API (counted at 1.2.2; rupantara's audit
   counted 22 before `_cfg_bias` and a few others were in use). Move onto public names if rupantara
   adds them, or record the frozen underscore set.
-- **The allocating entries.** `gpt2-oracle` and `gpt2-cross` still call the allocating
-  `ru_model_fwd`: 3 and 2 calls, bounded. Move them to `ru_model_fwd_s` if rupantara deprecates it.
+- **The allocating entries.** `gpt2-oracle` and `gpt2-cross` call the allocating `ru_model_fwd_n`
+  (`ru_model_fwd` through 1.5.0): 3 and 2 calls, bounded. Move them to `ru_model_fwd_n_s` if rupantara
+  deprecates the allocating entries.
 - **Be rupantara's 1.0 consumer gate.** Run the fidelity gate and `gpt2-tula` against each
   `1.0.0-rc.N` (rupantara's 1.0 criterion: "≥1 downstream consumer green on a real model").
-- **Acceptance:** no repack per run length; anukulana green on rupantara's release candidate.
+- **Acceptance:** anukulana green on rupantara's release candidate. (The other half, no repack per run
+  length, landed in 1.5.1 on rupantara 0.6.1: `T_run = 0` imports the full context once.)
 
 ## 1.7.x — quantized GGUF payloads
 

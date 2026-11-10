@@ -94,9 +94,11 @@ modules = ["dist/rosnet.cyr"]
 # rupantara — the sovereign transformer FORWARD (ru_model_fwd). M2 maps an
 # imported GPT-2 checkpoint onto rupantara's packed layout and runs it. CPU-only
 # (no mabda/gpu). rosnet MUST be included before rupantara (rupantara calls it).
-# 0.5.3 is rupantara's latest tag, built against cyrius 6.7.18.
+# 0.6.1 is rupantara's latest tag, built against cyrius 6.7.18. 0.6.0's variable-length
+# forward (ru_model_fwd_n / _n_s) lets one full-context import serve every run length,
+# so the importers no longer have to repack per T_run (1.5.1).
 [deps.rupantara]
 git = "https://github.com/MacCracken/rupantara.git"
 path = "../rupantara"
-tag = "0.5.3"
+tag = "0.6.1"
 modules = ["dist/rupantara.cyr"]

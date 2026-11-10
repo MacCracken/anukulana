@@ -282,12 +282,16 @@ fn _gpt2_lit(buf, s): i64 {
 # One-shot: read a GPT-2 safetensors from `path` (up to maxbytes), infer config
 # (heads = nh — NOT in safetensors), OVERRIDE the context to T_run (a short window
 # for a run; only pos_emb truncates, blocks are unchanged), and pack a fresh params
-# buffer. Fills cfg (caller's 64B). Returns the params ptr, or 0 on any failure.
+# buffer. T_run = 0 keeps the file's own context (1.5.1): one import then serves
+# every run length through rupantara's ru_model_fwd_n(_s), with no repack per
+# length. Fills cfg (caller's 64B). Returns the params ptr, or 0 on any failure.
 fn anuk_gpt2_import(path, nh, T_run, cfg): i64 {
     var r = st_open_mmap(path);              # zero-copy; file is well past the alloc cap
     if (r == 0) { return 0; }
     if (anuk_gpt2_infer_cfg(r, cfg, nh) != 0) { return 0; }
-    ru_cfg_init(cfg, _cfg_V(cfg), _cfg_C(cfg), T_run, nh, nh, _cfg_NL(cfg), _cfg_F(cfg), 1);
+    var Tc = T_run;
+    if (T_run == 0) { Tc = _cfg_T(cfg); }   # the file's context (wpe rows)
+    ru_cfg_init(cfg, _cfg_V(cfg), _cfg_C(cfg), Tc, nh, nh, _cfg_NL(cfg), _cfg_F(cfg), 1);
     if (ru_cfg_check(cfg) != RU_OK()) { return 0; }       # T_run re-checked
     var np = ru_params_count(cfg);
     var params = mmap_anon(np * 8);          # ~1 GB for GPT-2-small -> bypass ALLOC_MAX
@@ -334,7 +338,18 @@ fn anuk_argmax_matches(logits, targets, T, V): i64 {
 # 2026-11-09 audit measured about 107 KB per token at GPT-2 widths), and ignored
 # every return code.
 fn anuk_decode_check(cfg, params, tokens, Lb): i64 {
-    var T = _cfg_T(cfg);
+    if (cfg == 0) { return RU_ERR_CFG(); }
+    return anuk_decode_check_n(cfg, params, tokens, _cfg_T(cfg), Lb);
+}
+
+# anuk_decode_check over the first n positions of the window (1 <= n <= T), so a model
+# imported at its full context checks a short run without a repack (1.5.1): the batch
+# is rupantara's variable-length ru_model_fwd_n_s over tokens[0..n) into Lb (n x V),
+# then the cached decode of positions 0..n-1. Returns the differing logits, or a
+# negative RU_ERR_* code (RU_ERR_POS for n > T, RU_ERR_ARG for n < 1).
+fn anuk_decode_check_n(cfg, params, tokens, n, Lb): i64 {
+    if (cfg == 0) { return RU_ERR_CFG(); }
+    var T = n;
     var V = _cfg_V(cfg);
     var nsc = ru_model_scratch_count(cfg);
     var ndc = ru_decode_scratch_count(cfg);
@@ -347,7 +362,7 @@ fn anuk_decode_check(cfg, params, tokens, Lb): i64 {
     var row = alloc(V * 8);
     var rc = RU_ERR_ARG();
     if (scratch != 0 && kv != 0 && row != 0) {
-        rc = ru_model_fwd_s(cfg, params, tokens, Lb, 0, scratch);
+        rc = ru_model_fwd_n_s(cfg, params, tokens, n, Lb, 0, scratch);
     }
     var diffs = 0;
     var pos = 0;

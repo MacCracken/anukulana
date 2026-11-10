@@ -271,7 +271,7 @@ fn anuk_convert_gguf(src_path, out_path, sk): i64 {
 # ---- loading a converted file ------------------------------------------------------
 # Open the converted model at `path`, check it (tula's strict validator, the
 # Ed25519 signature under pk, kind "model" with layout "hf-gpt2", an F64 [8] cfg),
-# set the context to T_run (at most the file's), and pack a fresh params buffer
+# set the context to T_run (at most the file's; 0 = the file's, 1.5.1), and pack a fresh params buffer
 # through the same mapping as the safetensors door. Fills cfg (caller's 64 B).
 # Returns the params ptr, or 0. The file's mapping is released before returning.
 fn anuk_tula_import(path, pk, T_run, cfg): i64 {
@@ -295,6 +295,7 @@ fn _cv_load(r, pk, T_run, cfg): i64 {
     if (ec == 0) { _anuk_eput("tula-import: no F64 [8] cfg tensor\n"); return 0; }
     var cv = tula_entry_data(r, ec);
     var Tf = f64_to(load64(cv + 16));
+    if (T_run == 0) { T_run = Tf; }
     if (T_run < 1 || T_run > Tf) { _anuk_eput("tula-import: T_run outside the file's context\n"); return 0; }
     ru_cfg_init(cfg, f64_to(load64(cv)), f64_to(load64(cv + 8)), T_run,
       f64_to(load64(cv + 24)), f64_to(load64(cv + 32)), f64_to(load64(cv + 40)),
