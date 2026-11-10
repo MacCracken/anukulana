@@ -38,11 +38,9 @@ fn anuk_gpt2_tula(model_path, ckpt_path, adapter_path, sk_path): i64 {
         _anuk_sput("signing with operator key: "); _anuk_sput(sk_path); _anuk_sput("\n");
     } else {
         # ephemeral demo keypair (the pre-1.1.1 default, unchanged)
-        var seed = alloc(32);
-        while (i < 32) { store8(seed + i, (i * 7 + 41) & 0xFF); i = i + 1; }
         sk = alloc(64);
         pk = alloc(32);
-        ed25519_keypair(seed, sk, pk);
+        anuk_demo_keypair(sk, pk);
     }
 
     # ---- 1. quantize + save the signed checkpoint -----------------------------

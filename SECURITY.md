@@ -65,7 +65,16 @@ their defenses:
    checked: `head_count = 0`, or `nh = 0` in a correctly signed checkpoint,
    divided by zero inside `ru_params_count` (SIGFPE). Gated in
    `tests/tcyr/gguf.tcyr`, `gpt2.tcyr` and `nf4_store.tcyr`.
-7. **The GPT-2 mapping's shape contract** (added 1.2.2). Both mappings check every
+7. **Converted model files** (added 1.5.0). `anuk_tula_import` treats a converted
+   file like every other signed input: tula's strict validator, then the Ed25519
+   signature (`tula_verify_required` — an unsigned file is rejected), then the
+   file's `anukulana.kind` / `.layout` and its `"cfg"` (through `ru_cfg_check`),
+   then the same exact-shape mapping as the safetensors door. Files that
+   `convert` signs with the demo key (no `--sk`) prove integrity, not authorship:
+   the key's seed is in the source. The signature is checked on every load
+   (about 27 s for GPT-2 small at sigil's current SHA-512 speed); no faster path
+   skips it.
+8. **The GPT-2 mapping's shape contract** (added 1.2.2). Both mappings check every
    tensor's exact rank and dims, not just its element count, so a transposed or
    re-shaped weight is rejected instead of being imported as garbage.
 

@@ -1,9 +1,16 @@
 # anukulana — Current State
 
-> **Last refresh**: 2026-11-09 (1.4.0) | **Cadence**: every release.
+> **Last refresh**: 2026-11-09 (1.5.0) | **Cadence**: every release.
 > `CLAUDE.md` is preferences/process; this file is volatile state.
 
 ## Version
+
+**1.5.0 — 2026-11-09 (`convert` at source precision).** `convert` writes a foreign GPT-2 as a signed tula
+file in HF GPT-2's names and shapes at its source dtype (GGUF weights transposed back), with metadata and
+provenance, and self-checks: the reload is bit-identical to a direct import. `gpt2-load` runs from the
+file. On the real checkpoint both doors reload bit-identical and their files hold byte-identical tensors
+(148, 497.8 MB). `convert` ~86 s and `gpt2-load` ~29 s, nearly all Ed25519 over sigil's 18.4 MB/s
+SHA-512 (upstream). Suite **286**.
 
 **1.4.0 — 2026-11-09 (the tula 1.2–1.6 surface).** Every checkpoint and adapter carries signed metadata
 (`anukulana.*`: kind, version, layout, config, and with the `_src` savers the source model's or base
@@ -132,7 +139,6 @@ CHANGELOG.
 
 ## Next
 
-The 1.3.x follow-through is confirmed on GitHub: `realweights.yml` ran green, and the 1.4.0 release passed
-its CI gate, `bounds` and the native `aarch64` job included. Next: `convert` at source precision (1.5.x),
-then rupantara 0.6–0.7 (1.6.x, gated), quantized GGUF (1.7.x) and the llama architecture (1.8.x, gated on
-rupantara). See [`roadmap.md`](roadmap.md).
+rupantara 0.6–0.7 (1.6.x, gated on rupantara), quantized GGUF payloads (1.7.x) and the llama architecture
+(1.8.x, gated on rupantara). The 1.x.x list holds the digest-pinned load (the maintainer's call) and
+sigil's SHA-512 speed (upstream). See [`roadmap.md`](roadmap.md).

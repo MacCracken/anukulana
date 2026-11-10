@@ -40,6 +40,8 @@ rosnet 1.4.1, rupantara 0.5.3). Every gate passed in both captures.
 | `gpt2-lora` | 13.3 s | **26.60 s** | import + frozen forward (features once) + **800 Adam steps** of head-adapter training + gates |
 | `gpt2-qlora` | 53.5 s | **35.22 s** | import + NF4-quantize all 123.6M params + double-quant + dequant + 2 full forwards + 800 adapter steps |
 | `gpt2-tula` | 79.5 s | **50.15 s** | the qlora pipeline + signed 63.8 MB checkpoint write/read/verify + adapter write/read/verify + bit-compares |
+| `convert` *(1.5.0)* | — | **86.8 s** | import + write the 497.8 MB F32 file (source SHA-256 1.7 s, Ed25519 sign ~54 s) + reload (verify ~27 s) + bit-compare |
+| `gpt2-load` *(1.5.0)* | — | **29.3 s** | verify the converted file's signature (~27 s) + pack + the batch == decode check |
 
 Fidelity at 1.3.0: argmax exact at all 48 positions, worst last-row maxrel **1.049e-6** (1.0: 1.05e-6), so
 the GELU `tanh` change at cyrius 6.6.13 (up to 2 ulp) did not move the gate.

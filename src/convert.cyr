@@ -1,0 +1,312 @@
+# @public — 1.5.0: `convert`, a foreign GPT-2 checkpoint as a signed tula file at
+# its SOURCE precision, and the loader that runs from that file.
+#
+# tula ADR 0005's premise: "the Type-3 import path (anukulana) needs to keep the
+# source precision". Through 1.4.0 anukulana could only write an NF4 checkpoint.
+# A converted file holds the model as it came, so a foreign file is parsed once and
+# every later run starts from the signed sovereign copy.
+#
+# File layout (anukulana.kind = "model", anukulana.layout = "hf-gpt2"):
+#   - HF GPT-2's tensor set (gpt2.cyr's _gpt2_spec) under its HF names and shapes,
+#     each in its source dtype: F64 / F32 / F16 / BF16. From safetensors the payloads
+#     are copied byte for byte. From GGUF, llama.cpp's [out, in] weights are
+#     transposed back to HF's [in, out] element by element, which is exact, so both
+#     doors give the same tensors.
+#   - "cfg" F64 [8]: V, C, T (the full context), nh, nkv, NL, F, attn_bias, as the
+#     NF4 checkpoint stores it. The loader reads the config from this tensor.
+#   - metadata: anukulana.kind / .version / .layout / .config, the source as
+#     anukulana.source.{name,bytes,format,sha256}, and, when a config.json sits
+#     beside the source, its text as hf.config (tula ADR 0008's suggested key).
+#
+# Loading verifies the signature every time, as every anukulana loader does. Ed25519
+# hashes the whole file with sigil's SHA-512, about 18 MB/s today, so a ~500 MB
+# GPT-2 small takes ~27 s to verify (and ~54 s to sign at convert time). That cost
+# is sigil's to cut (roadmap, 1.x.x).
+
+# safetensors / GGUF dtype -> tula dtype; -1 when it has no tula float dtype
+fn _cv_dtype_st(dt): i64 {
+    if (dt == ST_DT_F64) { return TULA_DT_F64; }
+    if (dt == ST_DT_F32) { return TULA_DT_F32; }
+    if (dt == ST_DT_F16) { return TULA_DT_F16; }
+    if (dt == ST_DT_BF16) { return TULA_DT_BF16; }
+    return 0 - 1;
+}
+fn _cv_dtype_gg(gt): i64 {
+    if (gt == 0) { return TULA_DT_F32; }
+    if (gt == 1) { return TULA_DT_F16; }
+    return 0 - 1;
+}
+
+# a fresh copy of a NUL-terminated string
+fn _cv_dup(s): i64 {
+    var n = strlen(s);
+    var d = alloc(n + 1);
+    memcpy(d, s, n + 1);
+    return d;
+}
+
+# the path of `name` in the directory holding `path` (".../model.safetensors" ->
+# ".../config.json")
+fn _cv_sibling(path, name): i64 {
+    var cut = 0;
+    var i = 0;
+    while (load8(path + i) != 0) { if (load8(path + i) == 47) { cut = i + 1; } i = i + 1; }
+    var nl = strlen(name);
+    var out = alloc(cut + nl + 1);
+    memcpy(out, path, cut);
+    memcpy(out + cut, name, nl + 1);
+    return out;
+}
+
+# The text of the config.json beside `src_path`, NUL-terminated, or 0 if there is
+# none (or it is empty or over tula's 16 MiB value cap).
+fn _cv_hf_config(src_path): i64 {
+    var cap = 16 * 1024 * 1024;
+    var buf = alloc(cap + 1);
+    if (buf == 0) { return 0; }
+    var n = file_read_all(_cv_sibling(src_path, "config.json"), buf, cap + 1);
+    if (n <= 0 || n > cap) { return 0; }
+    store8(buf + n, 0);
+    return buf;
+}
+
+# n_head from the HF config.json text, or `fallback` when absent or unreadable.
+fn anuk_hf_n_head(text, fallback): i64 {
+    if (text == 0) { return fallback; }
+    var root = bayan_json_v_parse_buf(text, strlen(text));
+    if (root == 0) { return fallback; }
+    var v = bayan_json_v_obj_get_by_cstr(root, "n_head");
+    if (bayan_json_v_is_int(v) == 0) { return fallback; }
+    return bayan_json_v_int(v);
+}
+
+# The tail both doors share: the "cfg" tensor, the metadata, and the signed,
+# streamed write. Returns 0 or -1.
+fn _cv_finish(b, cfg, src_path, out_path, sk): i64 {
+    var cfgv = t_alloc(8);
+    store64(cfgv + 0 * 8, f64_from(_cfg_V(cfg)));
+    store64(cfgv + 1 * 8, f64_from(_cfg_C(cfg)));
+    store64(cfgv + 2 * 8, f64_from(_cfg_T(cfg)));
+    store64(cfgv + 3 * 8, f64_from(_cfg_nh(cfg)));
+    store64(cfgv + 4 * 8, f64_from(_cfg_nkv(cfg)));
+    store64(cfgv + 5 * 8, f64_from(_cfg_NL(cfg)));
+    store64(cfgv + 6 * 8, f64_from(_cfg_F(cfg)));
+    store64(cfgv + 7 * 8, f64_from(_cfg_bias(cfg)));
+    var e = tula_builder_add_checked(b, "cfg", TULA_DT_F64, _nfs_shp1(8), 1, cfgv, 64);
+    if (e == 0) { e = _nfs_common_meta(b, "model"); }
+    if (e == 0) { e = tula_builder_set_meta(b, "anukulana.layout", "hf-gpt2"); }
+    if (e == 0) { e = tula_builder_set_meta(b, "anukulana.config", _nfs_cfg_json(cfg)); }
+    if (e == 0) { e = _nfs_file_meta(b, "anukulana.source", src_path); }
+    if (e != 0) { return 0 - 1; }
+    var hf = _cv_hf_config(src_path);
+    if (hf != 0) {
+        # a config.json tula refuses as a value (not UTF-8, say) is left out, not fatal
+        if (tula_builder_set_meta(b, "hf.config", hf) != 0) {
+            _anuk_eput("convert: config.json beside the source isn't valid metadata text; not recorded\n");
+        }
+    }
+    if (tula_builder_write_file_signed(b, out_path, sk) <= 0) { return 0 - 1; }
+    return 0;
+}
+
+# a builder sized for the GPT-2 tensor set plus cfg, the metadata and names tables
+fn _cv_builder(cfg): i64 { return tula_builder_new_cap(4 + 12 * _cfg_NL(cfg) + 4); }
+
+# ---- the safetensors door ------------------------------------------------------
+# Convert the HF GPT-2 safetensors at `src_path` (nh heads: safetensors doesn't
+# carry them) into a signed tula file at `out_path`, every tensor in its source
+# dtype, byte for byte. The full context is kept (wpe's every row). Returns 0, or
+# -1: the source doesn't open, a tensor is missing, not exactly HF GPT-2's shape or
+# not a float dtype, or the write fails.
+fn anuk_convert_safetensors(src_path, nh, out_path, sk): i64 {
+    var r = st_open_mmap(src_path);
+    if (r == 0) { return 0 - 1; }
+    var cfg = alloc(64);
+    if (anuk_gpt2_infer_cfg(r, cfg, nh) != 0) { return 0 - 1; }
+    var src = _gsrc(GSRC_ST(), r);
+    var b = _cv_builder(cfg);
+    if (b == 0) { return 0 - 1; }
+    var name = alloc(64);
+    var dims = alloc(16);
+    var n = 4 + 12 * _cfg_NL(cfg);
+    var i = 0;
+    while (i < n) {
+        _gpt2_spec(cfg, i, name, dims);
+        var e = st_find(r, name);
+        if (e == 0) { return 0 - 1; }
+        if (_gpt2_shape_ok(src, e, load64(dims), load64(dims + 8)) == 0) { return 0 - 1; }
+        var dt = _cv_dtype_st(st_entry_dtype(e));
+        if (dt < 0) { return 0 - 1; }
+        var nd = 1;
+        var shp = _nfs_shp1(load64(dims));
+        if (load64(dims + 8) != 0) { nd = 2; shp = _nfs_shp2(load64(dims), load64(dims + 8)); }
+        if (tula_builder_add_checked(b, _cv_dup(name), dt, shp, nd, st_entry_data(r, e), st_entry_nbytes(e)) != 0) {
+            return 0 - 1;
+        }
+        i = i + 1;
+    }
+    return _cv_finish(b, cfg, src_path, out_path, sk);
+}
+
+# ---- the GGUF door -------------------------------------------------------------
+# llama.cpp's name for HF GPT-2 tensor i of block layout k (see _gpt2_spec), and
+# whether its 2-D data must be transposed back from ggml's [out, in].
+fn _cv_gg_name(cfg, i, buf, tr_out): i64 {
+    store64(tr_out, 0);
+    if (i == 0) { return _gpt2_lit(buf, "token_embd.weight"); }
+    if (i == 1) { return _gpt2_lit(buf, "position_embd.weight"); }
+    var j = i - 2;
+    var NL = _cfg_NL(cfg);
+    if (j >= 12 * NL) {
+        if (j - 12 * NL == 0) { return _gpt2_lit(buf, "output_norm.weight"); }
+        return _gpt2_lit(buf, "output_norm.bias");
+    }
+    var L = j / 12;
+    var k = j % 12;
+    if (k == 2 || k == 4 || k == 8 || k == 10) { store64(tr_out, 1); }
+    if (k == 0) { return _ggpt2_name(buf, L, "attn_norm.weight"); }
+    if (k == 1) { return _ggpt2_name(buf, L, "attn_norm.bias"); }
+    if (k == 2) { return _ggpt2_name(buf, L, "attn_qkv.weight"); }
+    if (k == 3) { return _ggpt2_name(buf, L, "attn_qkv.bias"); }
+    if (k == 4) { return _ggpt2_name(buf, L, "attn_output.weight"); }
+    if (k == 5) { return _ggpt2_name(buf, L, "attn_output.bias"); }
+    if (k == 6) { return _ggpt2_name(buf, L, "ffn_norm.weight"); }
+    if (k == 7) { return _ggpt2_name(buf, L, "ffn_norm.bias"); }
+    if (k == 8) { return _ggpt2_name(buf, L, "ffn_up.weight"); }
+    if (k == 9) { return _ggpt2_name(buf, L, "ffn_up.bias"); }
+    if (k == 10) { return _ggpt2_name(buf, L, "ffn_down.weight"); }
+    return _ggpt2_name(buf, L, "ffn_down.bias");
+}
+
+# dst [d0, d1] (row-major) = the transpose of src [d1, d0], elements of esz bytes
+fn _cv_transpose(src, dst, d0, d1, esz): i64 {
+    var o = 0;
+    while (o < d1) {
+        var i = 0;
+        while (i < d0) {
+            var from = src + (o * d0 + i) * esz;
+            var to = dst + (i * d1 + o) * esz;
+            if (esz == 4) { store32(to, load32(from)); }
+            else { store16(to, load16(from)); }
+            i = i + 1;
+        }
+        o = o + 1;
+    }
+    return 0;
+}
+
+# Convert a llama.cpp GPT-2 GGUF at `src_path` into a signed tula file at
+# `out_path`, in HF GPT-2's names and shapes: 2-D weights transposed back from
+# [out, in], everything in its source dtype (F32 / F16). The full context is kept.
+# Returns 0, or -1 as for anuk_convert_safetensors.
+fn anuk_convert_gguf(src_path, out_path, sk): i64 {
+    var r = gg_open_mmap(src_path);
+    if (r == 0) { return 0 - 1; }
+    var pe = gg_find(r, "position_embd.weight");
+    if (pe == 0) { return 0 - 1; }
+    var cfg = alloc(64);
+    if (anuk_ggpt2_infer_cfg(r, cfg, gg_entry_dim(pe, 1)) != 0) { return 0 - 1; }
+    var b = _cv_builder(cfg);
+    if (b == 0) { return 0 - 1; }
+    var name = alloc(64);
+    var gname = alloc(96);
+    var dims = alloc(16);
+    var tr = alloc(8);
+    var n = 4 + 12 * _cfg_NL(cfg);
+    var bufs = alloc(n * 16);                 # (ptr, bytes) of each transposed copy
+    var nbufs = 0;
+    var rc = 0;
+    var i = 0;
+    while (i < n && rc == 0) {
+        _gpt2_spec(cfg, i, name, dims);
+        _cv_gg_name(cfg, i, gname, tr);
+        var d0 = load64(dims);
+        var d1 = load64(dims + 8);
+        var e = gg_find(r, gname);
+        var dt = 0 - 1;
+        if (e != 0) { dt = _cv_dtype_gg(gg_entry_gtype(e)); }
+        if (e == 0 || dt < 0) { rc = 0 - 1; }
+        # ggml ne-order: ne0 is the innermost dim. HF [d0, d1] row-major is ne = [d1, d0]
+        # for an embedding, and a transposed weight [in = d0, out = d1] is ne = [d0, d1].
+        if (rc == 0) {
+            if (d1 == 0) {
+                if (gg_entry_ndim(e) != 1 || gg_entry_dim(e, 0) != d0) { rc = 0 - 1; }
+            } elif (load64(tr) == 1) {
+                if (gg_entry_ndim(e) != 2 || gg_entry_dim(e, 0) != d0 || gg_entry_dim(e, 1) != d1) { rc = 0 - 1; }
+            } else {
+                if (gg_entry_ndim(e) != 2 || gg_entry_dim(e, 0) != d1 || gg_entry_dim(e, 1) != d0) { rc = 0 - 1; }
+            }
+        }
+        if (rc == 0) {
+            var esz = 4;
+            if (dt == TULA_DT_F16) { esz = 2; }
+            var nbytes = gg_entry_nelems(e) * esz;
+            var data = gg_entry_data(r, e);
+            if (load64(tr) == 1) {
+                var t = mmap_anon(nbytes);
+                if (t == 0) { rc = 0 - 1; }
+                else {
+                    _cv_transpose(data, t, d0, d1, esz);
+                    store64(bufs + nbufs * 16, t);
+                    store64(bufs + nbufs * 16 + 8, nbytes);
+                    nbufs = nbufs + 1;
+                    data = t;
+                }
+            }
+            if (rc == 0) {
+                var nd = 1;
+                var shp = _nfs_shp1(d0);
+                if (d1 != 0) { nd = 2; shp = _nfs_shp2(d0, d1); }
+                if (tula_builder_add_checked(b, _cv_dup(name), dt, shp, nd, data, nbytes) != 0) { rc = 0 - 1; }
+            }
+        }
+        i = i + 1;
+    }
+    if (rc == 0) { rc = _cv_finish(b, cfg, src_path, out_path, sk); }
+    var k = 0;
+    while (k < nbufs) { cyr_munmap(load64(bufs + k * 16), load64(bufs + k * 16 + 8)); k = k + 1; }
+    return rc;
+}
+
+# ---- loading a converted file ------------------------------------------------------
+# Open the converted model at `path`, check it (tula's strict validator, the
+# Ed25519 signature under pk, kind "model" with layout "hf-gpt2", an F64 [8] cfg),
+# set the context to T_run (at most the file's), and pack a fresh params buffer
+# through the same mapping as the safetensors door. Fills cfg (caller's 64 B).
+# Returns the params ptr, or 0. The file's mapping is released before returning.
+fn anuk_tula_import(path, pk, T_run, cfg): i64 {
+    var r = tula_open_mmap(path);
+    if (r == 0) { _anuk_eput("tula-import: open/validate failed\n"); return 0; }
+    var params = _cv_load(r, pk, T_run, cfg);
+    tula_close_mmap(r);
+    return params;
+}
+
+fn _cv_load(r, pk, T_run, cfg): i64 {
+    if (_nfs_check(r, pk, "tula-import") != 0) { return 0; }
+    var kind = tula_meta_get(r, "anukulana.kind");
+    var layout = tula_meta_get(r, "anukulana.layout");
+    if (kind == 0 || layout == 0) { _anuk_eput("tula-import: not a converted model (no anukulana.kind)\n"); return 0; }
+    if (streq(kind, "model") == 0 || streq(layout, "hf-gpt2") == 0) {
+        _anuk_eput("tula-import: not a converted model (kind "); _anuk_eput(kind); _anuk_eput(")\n");
+        return 0;
+    }
+    var ec = _nfs_tensor(r, "cfg", TULA_DT_F64, 8, 0 - 1);
+    if (ec == 0) { _anuk_eput("tula-import: no F64 [8] cfg tensor\n"); return 0; }
+    var cv = tula_entry_data(r, ec);
+    var Tf = f64_to(load64(cv + 16));
+    if (T_run < 1 || T_run > Tf) { _anuk_eput("tula-import: T_run outside the file's context\n"); return 0; }
+    ru_cfg_init(cfg, f64_to(load64(cv)), f64_to(load64(cv + 8)), T_run,
+      f64_to(load64(cv + 24)), f64_to(load64(cv + 32)), f64_to(load64(cv + 40)),
+      f64_to(load64(cv + 48)), f64_to(load64(cv + 56)));
+    if (ru_cfg_check(cfg) != RU_OK()) { _anuk_eput("tula-import: bad cfg\n"); return 0; }
+    var np = ru_params_count(cfg);
+    var params = mmap_anon(np * 8);
+    if (params == 0) { return 0; }
+    if (_gpt2_pack_src(_gsrc(GSRC_TULA(), r), cfg, params) != 0) {
+        _anuk_eput("tula-import: a tensor is missing or not HF GPT-2's shape/dtype\n");
+        cyr_munmap(params, np * 8);
+        return 0;
+    }
+    return params;
+}

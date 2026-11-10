@@ -1,0 +1,204 @@
+# tests/tcyr/convert.tcyr — 1.5.0: `convert` at source precision, and the loader.
+#
+# A tiny GPT-2 exported through both foreign doors (tests/common.cyr), converted to
+# a signed tula file, and loaded back:
+#   * each door's converted file loads onto params bit-identical to that door's
+#     direct import (the roadmap's acceptance gate)
+#   * the two doors' files hold byte-identical tensors (GGUF's [out, in] weights
+#     transposed back exactly), in their source dtype
+#   * the metadata, the provenance digest, hf.config and n_head from config.json
+#   * same inputs -> byte-identical files
+#   * the loader rejects a wrong key, an unsigned file, an NF4 checkpoint, a T_run
+#     past the file's context and a misshapen tensor; convert rejects a misshapen
+#     source
+include "src/lib.cyr"
+include "lib/assert.cyr"
+include "tests/common.cyr"
+
+# f32-exact fill (small ints over 32)
+fn _cv_fill(p, n, seed): i64 {
+    var i = 0;
+    while (i < n) {
+        var m = ((i * 131 + seed * 17 + 7) % 101) - 50;
+        store64(p + i * 8, f64_div(f64_from(m), f64_from(32)));
+        i = i + 1;
+    }
+    return 0;
+}
+fn _cv_slurp(path, out_len): i64 {
+    var cap = 16 * 1024 * 1024;
+    var buf = alloc(cap);
+    store64(out_len, file_read_all(path, buf, cap));
+    return buf;
+}
+fn _cv_meta_is(path, key, want): i64 {
+    var r = tula_read_file(path);
+    if (r == 0) { return 0; }
+    var v = tula_meta_get(r, key);
+    if (v == 0) { return 0; }
+    return streq(v, want);
+}
+fn _cv_same_params(a, b, n): i64 {
+    if (a == 0 || b == 0) { return n + 1; }          # a failed load: never "identical"
+    var d = 0;
+    var i = 0;
+    while (i < n) { if (load64(a + i * 8) != load64(b + i * 8)) { d = d + 1; } i = i + 1; }
+    return d;
+}
+
+var _cv_V = 7;
+var _cv_C = 8;
+var _cv_T = 6;
+var _cv_NH = 2;
+var _cv_NL = 2;
+
+fn _cv_cfg(): i64 {
+    var cfg = alloc(64);
+    ru_cfg_init(cfg, _cv_V, _cv_C, _cv_T, _cv_NH, _cv_NH, _cv_NL, 4 * _cv_C, 1);
+    return cfg;
+}
+
+fn test_convert_doors(): i64 {
+    var sk = alloc(64);
+    var pk = alloc(32);
+    anuk_demo_keypair(sk, pk);
+    var cfg = _cv_cfg();
+    var np = ru_params_count(cfg);
+    var P = t_alloc(np);
+    _cv_fill(P, np, 3);
+    sys_mkdir("/tmp/anuk_cv_st", 448);
+    sys_mkdir("/tmp/anuk_cv_gg", 448);
+    # the safetensors door (F32), with a config.json beside it
+    var lp = alloc(8);
+    var st = _export_gpt2_dt(cfg, P, lp, 1);
+    file_write_all("/tmp/anuk_cv_st/model.safetensors", st, load64(lp));
+    var cj = "{\"n_head\": 2, \"n_layer\": 2, \"model_type\": \"gpt2\"}";
+    file_write_all("/tmp/anuk_cv_st/config.json", cj, strlen(cj));
+    var hf = _cv_hf_config("/tmp/anuk_cv_st/model.safetensors");
+    assert_nonnull(hf, "config.json beside the model is read");
+    assert_eq(anuk_hf_n_head(hf, 12), 2, "n_head read from config.json");
+    assert_eq(anuk_hf_n_head(0, 12), 12, "no config.json: the fallback");
+    var out_st = "/tmp/anuk_cv_st.tula";
+    assert_eq(anuk_convert_safetensors("/tmp/anuk_cv_st/model.safetensors", 2, out_st, sk), 0,
+      "safetensors door converts");
+    # the converted file loads onto exactly the directly imported params
+    var cA = alloc(64);
+    var pA = anuk_gpt2_import("/tmp/anuk_cv_st/model.safetensors", 2, 4, cA);
+    var cB = alloc(64);
+    var pB = anuk_tula_import(out_st, pk, 4, cB);
+    assert_nonnull(pB, "the converted file loads");
+    assert_eq(_cv_same_params(pA, pB, ru_params_count(cA)), 0, "safetensors door: reload bit-identical");
+    var r = tula_read_file(out_st);
+    assert_eq(tula_validate_strict(r, tula_total_len(r)), TULA_OK, "converted file is strictly valid");
+    assert_eq(tula_entry_dtype(tula_find_name(r, "h.1.mlp.c_fc.weight")), TULA_DT_F32, "source dtype kept (F32)");
+    assert_eq(_cv_meta_is(out_st, "anukulana.kind", "model"), 1, "meta kind model");
+    assert_eq(_cv_meta_is(out_st, "anukulana.layout", "hf-gpt2"), 1, "meta layout hf-gpt2");
+    assert_eq(_cv_meta_is(out_st, "hf.config", cj), 1, "hf.config holds config.json's text");
+    var sl = alloc(8);
+    var sb = _cv_slurp("/tmp/anuk_cv_st/model.safetensors", sl);
+    assert_eq(_cv_meta_is(out_st, "anukulana.source.sha256", sha256_hex(sb, load64(sl))), 1,
+      "meta source sha256 = sha256 of the source");
+    assert_eq(_cv_meta_is(out_st, "anukulana.config",
+        "{\"V\":7,\"C\":8,\"T\":6,\"nh\":2,\"nkv\":2,\"NL\":2,\"F\":32,\"attn_bias\":1}"), 1,
+      "meta config keeps the full context (T = 6)");
+    # the GGUF door
+    var gb = _export_gguf(cfg, P, lp);
+    file_write_all("/tmp/anuk_cv_gg/model.gguf", gb, load64(lp));
+    var out_gg = "/tmp/anuk_cv_gg.tula";
+    assert_eq(anuk_convert_gguf("/tmp/anuk_cv_gg/model.gguf", out_gg, sk), 0, "GGUF door converts");
+    var cG = alloc(64);
+    var pG = anuk_ggpt2_import("/tmp/anuk_cv_gg/model.gguf", 4, cG);
+    var cH = alloc(64);
+    var pH = anuk_tula_import(out_gg, pk, 4, cH);
+    assert_nonnull(pH, "the GGUF-converted file loads");
+    assert_eq(_cv_same_params(pG, pH, ru_params_count(cG)), 0, "GGUF door: reload bit-identical");
+    assert_eq(_cv_meta_is(out_gg, "anukulana.source.format", "gguf"), 1, "meta source format gguf");
+    # both doors: the same tensors, byte for byte
+    var ra = tula_read_file(out_st);
+    var rb = tula_read_file(out_gg);
+    var name = alloc(64);
+    var dims = alloc(16);
+    var diff = 0;
+    var i = 0;
+    while (i < 4 + 12 * _cv_NL) {
+        _gpt2_spec(cfg, i, name, dims);
+        var ea = tula_find_name(ra, name);
+        var eb = tula_find_name(rb, name);
+        if (ea == 0 || eb == 0) { diff = diff + 1; }
+        elif (tula_entry_data_len(ea) != tula_entry_data_len(eb)) { diff = diff + 1; }
+        elif (memeq(tula_entry_data(ra, ea), tula_entry_data(rb, eb), tula_entry_data_len(ea)) != 1) {
+            diff = diff + 1;
+        }
+        i = i + 1;
+    }
+    assert_eq(diff, 0, "the two doors' files hold byte-identical tensors");
+    # same inputs, same bytes
+    var out2 = "/tmp/anuk_cv_st2.tula";
+    anuk_convert_safetensors("/tmp/anuk_cv_st/model.safetensors", 2, out2, sk);
+    var l1 = alloc(8);
+    var l2 = alloc(8);
+    var f1 = _cv_slurp(out_st, l1);
+    var f2 = _cv_slurp(out2, l2);
+    assert_eq(load64(l1), load64(l2), "two converts: same length");
+    assert_eq(memeq(f1, f2, load64(l1)), 1, "two converts of the same source are byte-identical");
+    return 0;
+}
+
+fn test_convert_rejects(): i64 {
+    var sk = alloc(64);
+    var pk = alloc(32);
+    anuk_demo_keypair(sk, pk);
+    var cfg2 = alloc(64);
+    var out_st = "/tmp/anuk_cv_st.tula";
+    var bad = alloc(32);
+    var k = 0;
+    while (k < 32) { store8(bad + k, (k + 61) & 0xFF); k = k + 1; }
+    assert_eq(anuk_tula_import(out_st, bad, 4, cfg2), 0, "a wrong key is rejected");
+    assert_eq(anuk_tula_import(out_st, pk, 7, cfg2), 0, "T_run past the file's context is rejected");
+    assert_eq(anuk_tula_import(out_st, pk, 0, cfg2), 0, "T_run 0 is rejected");
+    # an NF4 checkpoint is not a converted model
+    var cfg = _cv_cfg();
+    var np = ru_params_count(cfg);
+    var P = t_alloc(np);
+    _cv_fill(P, np, 4);
+    anuk_nf4_save("/tmp/anuk_cv_nf4.tula", cfg, P, sk);
+    assert_eq(anuk_tula_import("/tmp/anuk_cv_nf4.tula", pk, 4, cfg2), 0, "an NF4 checkpoint is rejected");
+    # an unsigned file that claims to be a converted model
+    var b = tula_builder_new();
+    var cfgv = t_alloc(8);
+    tula_builder_add_checked(b, "cfg", TULA_DT_F64, _shp1(8), 1, cfgv, 64);
+    tula_builder_set_meta(b, "anukulana.kind", "model");
+    tula_builder_set_meta(b, "anukulana.layout", "hf-gpt2");
+    tula_builder_write_file(b, "/tmp/anuk_cv_unsigned.tula");
+    assert_eq(anuk_tula_import("/tmp/anuk_cv_unsigned.tula", pk, 4, cfg2), 0, "an unsigned file is rejected");
+    # a signed "model" whose wte has the wrong shape
+    var b2 = tula_builder_new();
+    store64(cfgv, f64_from(7)); store64(cfgv + 8, f64_from(8)); store64(cfgv + 16, f64_from(6));
+    store64(cfgv + 24, f64_from(2)); store64(cfgv + 32, f64_from(2)); store64(cfgv + 40, f64_from(2));
+    store64(cfgv + 48, f64_from(32)); store64(cfgv + 56, f64_from(1));
+    tula_builder_add_checked(b2, "cfg", TULA_DT_F64, _shp1(8), 1, cfgv, 64);
+    tula_builder_add_checked(b2, "wte.weight", TULA_DT_F64, _shp2(8, 7), 2, t_alloc(56), 448);
+    tula_builder_set_meta(b2, "anukulana.kind", "model");
+    tula_builder_set_meta(b2, "anukulana.layout", "hf-gpt2");
+    tula_builder_write_file_signed(b2, "/tmp/anuk_cv_misshapen.tula", sk);
+    assert_eq(anuk_tula_import("/tmp/anuk_cv_misshapen.tula", pk, 4, cfg2), 0,
+      "a signed model with a misshapen tensor is rejected");
+    # convert refuses a source the importer would refuse
+    assert_eq(anuk_convert_safetensors("/tmp/anuk_cv_no_such.safetensors", 2, "/tmp/anuk_cv_x.tula", sk), 0 - 1,
+      "a missing source fails the convert");
+    assert_eq(anuk_convert_safetensors("/tmp/anuk_cv_st/model.safetensors", 3, "/tmp/anuk_cv_x.tula", sk), 0 - 1,
+      "nh not dividing C fails the convert");
+    assert_eq(anuk_convert_gguf("/tmp/anuk_cv_st/model.safetensors", "/tmp/anuk_cv_x.tula", sk), 0 - 1,
+      "a safetensors file given to the GGUF door fails");
+    return 0;
+}
+
+fn main(): i64 {
+    alloc_init();
+    test_convert_doors();
+    test_convert_rejects();
+    return assert_summary();
+}
+
+var rc = main();
+sys_exit(rc);

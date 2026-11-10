@@ -331,6 +331,18 @@ fn anuk_adapter_load(path, pk, A_out, B_out, C, r, V, out_s): i64 {
     return 0;
 }
 
+# ---- the demo signing key (1.5.0: shared by gpt2-tula and convert) -----------
+# The deterministic keypair the demos sign with when no --sk is given. Its seed is
+# in this source, so its signatures prove a file is intact, never who wrote it:
+# for authenticity pass a real operator key (--sk).
+fn anuk_demo_keypair(sk, pk): i64 {
+    var seed = alloc(32);
+    var i = 0;
+    while (i < 32) { store8(seed + i, (i * 7 + 41) & 0xFF); i = i + 1; }
+    ed25519_keypair(seed, sk, pk);
+    return 0;
+}
+
 # ---- operator-key loading (ifran Lane 2) --------------------------------------
 # Load a 64 B Ed25519 secret key file — sigil's `ed25519_keypair` sk layout
 # (seed||pk), which is exactly what ifran writes as `~/.ifran/operator.sk`.

@@ -28,6 +28,9 @@ fn usage(fd): i64 {
     _u(fd, "                                         — e.g. ifran's ~/.ifran/operator.sk)\n");
     _u(fd, "  gpt2-gguf <model.gguf>                import via GGUF + run (batch==decode gate)\n");
     _u(fd, "  gpt2-cross <model.safetensors> <model.gguf>   cross-format bit-identity gate\n");
+    _u(fd, "  convert <model.{safetensors,gguf}> <out.tula> [--sk <operator.sk>]\n");
+    _u(fd, "                                        signed tula copy at source precision (self-checked)\n");
+    _u(fd, "  gpt2-load <model.tula> [--pk <key>]   run from a converted file (batch==decode gate)\n");
     _u(fd, "  (all Type-3 charter commands built)\n");
     return 0;
 }
@@ -148,6 +151,108 @@ fn _gpt2_cross(st_path, gg_path): i64 {
     return 1;
 }
 
+# The signing key for convert: the operator key at sk_path, or the demo key when
+# sk_path is 0. Writes the 64-byte sk into sk_out's cell and pk (sk + 32) into
+# pk_out's. Returns 0, or -1 for an unusable key file.
+fn _anuk_signing_key(sk_path, sk_out, pk_out): i64 {
+    if (sk_path != 0) {
+        var sk = anuk_sk_load(sk_path);
+        if (sk == 0) { return 0 - 1; }
+        store64(sk_out, sk);
+        store64(pk_out, sk + 32);
+        _anuk_sput("signing with operator key: "); _anuk_sput(sk_path); _anuk_sput("\n");
+        return 0;
+    }
+    var dsk = alloc(64);
+    var dpk = alloc(32);
+    anuk_demo_keypair(dsk, dpk);
+    store64(sk_out, dsk);
+    store64(pk_out, dpk);
+    _anuk_sput("signing with the demo key (integrity only; pass --sk for an operator key)\n");
+    return 0;
+}
+
+# `convert <model.{safetensors,gguf}> <out.tula> [--sk <operator.sk>]` (1.5.0): write
+# the model as a signed tula file at its source precision, then reload that file
+# and require its packed params bit-identical to a direct import of the source.
+fn _anuk_convert(src, out, sk_path): i64 {
+    var skc = alloc(8);
+    var pkc = alloc(8);
+    if (_anuk_signing_key(sk_path, skc, pkc) != 0) {
+        _anuk_eput("convert: cannot use operator key (need exactly 64 B, seed||pk): ");
+        _anuk_eput(sk_path); _anuk_eput("\n");
+        return 1;
+    }
+    var head = alloc(16);
+    var hn = file_read_all(src, head, 16);
+    if (hn <= 0) { _anuk_eput("convert: cannot read "); _anuk_eput(src); _anuk_eput("\n"); return 1; }
+    var gguf = streq(_nfs_sniff(head, hn), "gguf");
+    var nh = 0;
+    var rc = 0;
+    if (gguf == 1) {
+        _anuk_sput("source: GGUF\n");
+        rc = anuk_convert_gguf(src, out, load64(skc));
+    } else {
+        var hf = _cv_hf_config(src);
+        nh = anuk_hf_n_head(hf, 12);
+        _anuk_sput("source: safetensors, heads "); _anuk_puti(nh);
+        if (hf != 0) { _anuk_sput(" (config.json n_head)\n"); } else { _anuk_sput(" (no config.json: GPT-2's 12)\n"); }
+        rc = anuk_convert_safetensors(src, nh, out, load64(skc));
+    }
+    if (rc != 0) { _anuk_eput("convert: failed (a tensor missing or misshapen, or the write failed)\n"); return 1; }
+    _anuk_sput("converted: "); _anuk_sput(out); _anuk_sput("\n");
+    # self-check: the converted file loads onto exactly the directly imported params
+    var T_run = 8;
+    var cfgA = alloc(64);
+    var pA = 0;
+    if (gguf == 1) { pA = anuk_ggpt2_import(src, T_run, cfgA); } else { pA = anuk_gpt2_import(src, nh, T_run, cfgA); }
+    var cfgB = alloc(64);
+    var pB = anuk_tula_import(out, load64(pkc), T_run, cfgB);
+    if (pA == 0 || pB == 0) { _anuk_eput("convert: self-check import failed\n"); return 1; }
+    var k = 0;
+    while (k < 8) {
+        if (load64(cfgA + k * 8) != load64(cfgB + k * 8)) {
+            _anuk_eput("convert: config mismatch at field "); _anuk_eput_int(k); _anuk_eput("\n");
+            return 1;
+        }
+        k = k + 1;
+    }
+    var np = ru_params_count(cfgA);
+    var diffs = 0;
+    var i = 0;
+    while (i < np) { if (load64(pA + i * 8) != load64(pB + i * 8)) { diffs = diffs + 1; } i = i + 1; }
+    _anuk_sput("reloaded vs direct import: params "); _anuk_puti(np);
+    _anuk_sput(", diffs="); _anuk_puti(diffs); _anuk_sput("\n");
+    if (diffs == 0) {
+        _anuk_sput("RESULT: converted at source precision, signed; reload BIT-IDENTICAL to the direct import\n");
+        return 0;
+    }
+    _anuk_sput("RESULT: convert mismatch — investigate\n");
+    return 1;
+}
+
+# `gpt2-load <model.tula> [--pk <key file>]` (1.5.0): import a converted file
+# (signature verified) and run the batch-vs-decode check.
+fn _anuk_load_run(path, pk_path): i64 {
+    var pk = 0;
+    if (pk_path != 0) {
+        pk = anuk_pk_load(pk_path);
+        if (pk == 0) {
+            _anuk_eput("gpt2-load: --pk: not a 32-byte public key or a consistent 64-byte seed||pk\n");
+            return 1;
+        }
+    } else {
+        var dsk = alloc(64);
+        pk = alloc(32);
+        anuk_demo_keypair(dsk, pk);
+        _anuk_sput("verifying with the demo key (pass --pk for an operator key)\n");
+    }
+    var cfg = alloc(64);
+    var params = anuk_tula_import(path, pk, 8, cfg);
+    if (params == 0) { _anuk_eput("gpt2-load: import failed\n"); return 1; }
+    return _anuk_run_check("converted tula", cfg, params);
+}
+
 # 1 iff the command has at least `n` argv entries; otherwise prints `msg` to
 # stderr and returns 0.
 fn _need(n, msg): i64 {
@@ -212,6 +317,34 @@ fn main(): i64 {
     if (streq(cmd, "gpt2-cross") == 1) {
         if (_need(4, "anukulana: gpt2-cross needs <model.safetensors> <model.gguf>\n") == 0) { return 1; }
         return _gpt2_cross(argv(2), argv(3));
+    }
+    if (streq(cmd, "convert") == 1) {
+        if (_need(4, "anukulana: convert needs <model.{safetensors,gguf}> <out.tula> [--sk <key>]\n") == 0) {
+            return 1;
+        }
+        var csk = 0;
+        if (argc() >= 5) {
+            if (streq(argv(4), "--sk") == 0 || argc() > 6) {
+                _anuk_eput("anukulana: convert: unknown option (only --sk <operator.sk>)\n");
+                return 2;
+            }
+            if (_need(6, "anukulana: --sk needs a <operator.sk> path\n") == 0) { return 1; }
+            csk = argv(5);
+        }
+        return _anuk_convert(argv(2), argv(3), csk);
+    }
+    if (streq(cmd, "gpt2-load") == 1) {
+        if (_need(3, "anukulana: gpt2-load needs a <model.tula> [--pk <key file>]\n") == 0) { return 1; }
+        var lpk = 0;
+        if (argc() >= 4) {
+            if (streq(argv(3), "--pk") == 0 || argc() > 5) {
+                _anuk_eput("anukulana: gpt2-load: unknown option (only --pk <key file>)\n");
+                return 2;
+            }
+            if (_need(5, "anukulana: --pk needs a <key file>\n") == 0) { return 1; }
+            lpk = argv(4);
+        }
+        return _anuk_load_run(argv(2), lpk);
     }
     if (streq(cmd, "gpt2-tula") == 1) {
         var e1 = "anukulana: gpt2-tula needs <model.safetensors> <ckpt.tula> <adapter.tula>";

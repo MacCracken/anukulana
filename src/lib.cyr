@@ -67,3 +67,4 @@ include "src/nf4_store.cyr"     # M4 tail: NF4-checkpoint + adapter persistence 
 include "src/tula_demo.cyr"     # M4 tail: gpt2-tula — the full save/load round-trip demo
 include "src/gguf.cyr"          # post-1.0: sovereign GGUF v2/v3 parser (2nd foreign source)
 include "src/gpt2_gguf.cyr"     # post-1.0: GPT-2-from-GGUF mapping (blk.N.*, transpose-back)
+include "src/convert.cyr"       # 1.5.0: convert at source precision + load from the tula copy

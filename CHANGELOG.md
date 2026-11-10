@@ -6,12 +6,61 @@ moving, no API freeze until v1.0).
 
 ## [Unreleased]
 
+## [1.5.0] - 2026-11-09
+
+The roadmap's 1.5.x line: `convert`, a foreign GPT-2 as a signed tula file at its source precision, and
+the loader that runs from it (tula ADR 0005: "the Type-3 import path (anukulana) needs to keep the
+source precision"). Toolchain and dependencies are unchanged (cyrius 6.7.18; sigil 3.13.15, tula 1.6.1,
+rosnet 1.4.1, rupantara 0.5.3).
+
+### Added
+
+- **`convert <model.{safetensors,gguf}> <out.tula> [--sk <operator.sk>]`** (`src/convert.cyr`,
+  `anuk_convert_safetensors` / `anuk_convert_gguf`). It writes HF GPT-2's tensor set under its HF names
+  and shapes, each in its source dtype: safetensors payloads are copied byte for byte, and GGUF's
+  `[out, in]` weights are transposed back element by element. The file also holds the full context, a
+  `"cfg"` tensor and metadata (`anukulana.kind = model`, `.layout = hf-gpt2`, `.config`, `.source.*`,
+  and `hf.config` from the `config.json` beside the source). It then **reloads its own output and
+  requires the packed params bit-identical to a direct import**. Safetensors heads come from
+  `config.json`'s `n_head` when present (`anuk_hf_n_head`), else 12. Without `--sk` the file is signed
+  with the demo key (integrity, not authorship), as in `gpt2-tula`.
+- **`gpt2-load <model.tula> [--pk <key file>]`** and `anuk_tula_import(path, pk, T_run, cfg)`: run from
+  a converted file. It is strictly validated, its signature verified, its kind and layout checked, and
+  `T_run` must be within the file's context.
+
 ### Changed
+
+- **The GPT-2 pack reads through a tensor source** (`GSRC_ST` / `GSRC_TULA`, `anuk_tula_read_f64_range`
+  in `src/gpt2.cyr`). The safetensors door and the converted-tula door share every shape check and
+  widener, which is what makes a converted file load bit-identical. `anuk_gpt2_pack` keeps its
+  signature, and its output is unchanged (the round-trip suites are still bit-identical).
+- The demo signing key is one shared helper (`anuk_demo_keypair`), used by `gpt2-tula` and `convert`.
+- `realweights.yml` also runs `convert` (safetensors door) and `gpt2-load`.
+- **`anukulana_version()` `10400` → `10500`.** Files written by this release record
+  `anukulana.version = 1.5.0`.
 
 - **Roadmap:** the 1.3.x follow-through section is removed, now that GitHub has confirmed it:
   `realweights.yml` ran green, and the 1.4.0 release passed its CI gate, which includes the `bounds` and
   native `aarch64` (`ubuntu-26.04-arm`) jobs. Whether to schedule `realweights.yml` moves to the 1.x.x list.
   tula's two cross-repo asks are marked met. `state.md`'s Next section is updated to match.
+
+### Verified
+
+- **On the real checkpoint, both doors:** `convert` from the safetensors file and from the GGUF file each
+  reload **bit-identical** to their direct import (123,659,520 params, 0 diffs), and the two converted
+  files hold **byte-identical tensors** (all 148, 497,759,232 bytes). The 497.8 MB file records the
+  source's SHA-256 (HF's `248dfc39…`), the full context (`T` = 1024) and `hf.config`. `gpt2-load` passes
+  batch == decode with 0 diffs.
+- **Timings:** `convert` about 86 s and `gpt2-load` about 29 s. Nearly all of it is Ed25519 over the
+  ~500 MB file: sigil's SHA-512 runs at 18.4 MB/s here (64 MB in 3.49 s), so signing costs about 54 s
+  (two passes) and verifying about 27 s, on every load. That is sigil's to cut. A digest-pinned load
+  that skips it would change the trust model, so it is left as the maintainer's call (roadmap, 1.x.x).
+- New suite `tests/tcyr/convert.tcyr` (29): each door's reload bit-identical, the doors' files
+  byte-identical, source dtype kept, the metadata, provenance digest and `hf.config`, `n_head` from
+  `config.json`, byte-identical re-converts, and rejections (wrong key, unsigned, an NF4 checkpoint,
+  `T_run` past the context or 0, a misshapen tensor, a missing or misshapen source). Mutants that skip
+  the GGUF transpose or mislabel F32 as F64 are both caught. Suite **257 → 286**; lint, fmt, vet and
+  `doc --check` clean.
 
 ## [1.4.0] - 2026-11-09
 

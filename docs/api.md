@@ -19,6 +19,8 @@
 | `gpt2-qlora <model.safetensors>` | QLoRA: NF4-quantize the whole base (tula codec + local double-quant), adapter recovers the task over the frozen 4-bit base |
 | `gpt2-tula <model> <ckpt.tula> <adapter.tula> [--sk <operator.sk>]` | signed persistence round-trip: save/load NF4 checkpoint + adapter, everything bit-identical, tamper/wrong-key rejected. `--sk` *(1.1.1)*: sign with a real 64 B seed\|\|pk operator key file (ifran's `keys init` layout) instead of the ephemeral demo key — a control plane's `store add` then records `verified` |
 | `gpt2-gguf <model.gguf>` *(1.1.0)* | import via the **GGUF door** (llama.cpp format), run the forward, cross-check batch == KV-cache decode (bit-identical) |
+| `convert <model.{safetensors,gguf}> <out.tula> [--sk <operator.sk>]` *(1.5.0)* | write the model as a **signed tula file at its source precision** (F64/F32/F16/BF16, HF GPT-2 names and shapes; GGUF weights transposed back), with metadata and provenance, then reload it and require its packed params **bit-identical** to a direct import. Without `--sk` it signs with the demo key (integrity only). Safetensors heads come from `config.json`'s `n_head` beside the model, else 12 |
+| `gpt2-load <model.tula> [--pk <key file>]` *(1.5.0)* | import a converted file (signature verified; without `--pk`, against the demo key) and run the batch == KV-cache decode check |
 | `gpt2-cross <model.safetensors> <model.gguf>` *(1.1.0)* | the **cross-format gate**: the same checkpoint through both foreign parsers must produce bit-identical packed params AND logits |
 
 Exit code 0 = all gates PASS; 1 = a gate failed or an argument is missing (each
@@ -104,6 +106,24 @@ massive-activation outlier dims).
 `nf4_dq_pack(scales, nblocks, q8, supers)` / `nf4_dq_unpack(...)` —
 superblock-256 double-quantization of the per-block scales (symmetric-u8;
 error ≤ 1/254 relative per scale).
+
+### Convert — `src/convert.cyr` (added 1.5.0)
+`anuk_convert_safetensors(src_path, nh, out_path, sk)` / `anuk_convert_gguf(src_path,
+out_path, sk)` → 0 | -1 — write a signed tula file holding HF GPT-2's tensor set
+under its HF names and shapes, each in its source dtype (safetensors payloads
+copied byte for byte; GGUF's `[out, in]` weights transposed back exactly, so both
+doors give byte-identical tensors), the full context, a `"cfg"` F64 [8] tensor and
+metadata (`anukulana.kind = model`, `anukulana.layout = hf-gpt2`, `.config`,
+`.source.*`, and `hf.config` from a `config.json` beside the source). Same inputs →
+byte-identical files. -1 for a source the importer would refuse or a failed write.
+`anuk_tula_import(path, pk, T_run, cfg)` → params | 0 — open a converted file
+(strict validation, Ed25519 under `pk` required, kind/layout checked, `T_run` ≤
+the file's context) and pack it through the same mapping as the safetensors door,
+so it lands bit-identical to the direct import. `anuk_hf_n_head(text, fallback)`
+(`n_head` from a `config.json` text). The pack's tensor source is shared:
+`GSRC_ST()` / `GSRC_TULA()` and `anuk_tula_read_f64_range(r, e, start, n, dst)` (in
+`src/gpt2.cyr`). Loading verifies the whole file's signature every time: about 27 s
+for GPT-2 small (~500 MB) at sigil's current SHA-512 speed.
 
 ### Inspection — `src/inspect.cyr`
 `anuk_inspect(path)` → tensor count | -1 · `anuk_enumerate(r)` · `anuk_verify(r,

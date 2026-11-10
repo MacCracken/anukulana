@@ -5,13 +5,14 @@
 > **reference binary**: it consumes tula (format), rupantara (forward), rosnet (tensors) and
 > sigil (Ed25519), and does not reinvent them.
 >
-> **Where it stands (1.4.0, 2026-11-09).** The whole charter is built and gated on the real GPT-2
+> **Where it stands (1.5.0, 2026-11-09).** The whole charter is built and gated on the real GPT-2
 > checkpoint: import (safetensors and GGUF, bit-identical across both), run, match HF
 > (`gpt2-oracle`), adapt (LoRA, QLoRA/NF4) and persist (signed tula files). All seven commands were
 > re-proven at the current pin in 1.3.0, and 1.4.0 shipped the tula 1.2–1.6 surface (checked adds,
 > signed metadata and provenance, `inspect --pk`, big-file reads, streaming writes). On GitHub, the
 > real-weights workflow has run green, and so has the 1.4.0 release, which gates on the `bounds` and
-> native `aarch64` CI jobs. The API froze at 1.0.0. This file lists **remaining work only**. Shipped work is in the
+> native `aarch64` CI jobs. 1.5.0 shipped `convert` (a signed tula copy at source precision, both doors
+> bit-identical) and `gpt2-load`. The API froze at 1.0.0. This file lists **remaining work only**. Shipped work is in the
 > [CHANGELOG](../../CHANGELOG.md), [`state.md`](state.md) and the audits
 > ([2026-07-04](../audit/2026-07-04-audit.md), [2026-11-09](../audit/2026-11-09-audit.md)).
 
@@ -52,20 +53,6 @@
   reproduction; anukulana carries at most a documented guard, never a patched copy.
 
 ---
-
-## 1.5.x — keep the source precision (`convert`)
-
-**Goal:** tula ADR 0005's premise, that "the Type-3 import path (anukulana) needs to keep the
-source precision", rather than only writing NF4.
-
-- **A `convert <model.{safetensors,gguf}> <out.tula> [--sk <key>]` command.** Write the imported
-  weights as a signed tula file in their source dtype (F32, F16 or BF16, tula 1.3.0), with the
-  architecture, config and provenance in its metadata (the `anukulana.*` keys the savers already write),
-  plus the Hugging Face `config.json` beside the model as `hf.config` (ADR 0008's suggested namespace).
-- **Load a converted file** straight into rupantara's packed layout, so a foreign file is parsed
-  once and every later run starts from the signed sovereign copy.
-- **Acceptance:** foreign file → `convert` → load lands on packed params bit-identical to the direct
-  foreign import, for both doors. The widen is exact, so this is a `gpt2-cross`-style 0-diff gate.
 
 ## 1.6.x — onto rupantara 0.6–0.7 (gated on rupantara)
 
@@ -139,8 +126,14 @@ missing is the forward and the mapping.
 - **Per-layer LoRA adapters** — consumes attn11's backward chain (see Standing decisions).
 - **A packed quantized forward** (dequantize inside the matmul). Needs quantized linears in rosnet;
   until then quantized weights widen at load.
-- **Big-file signing speed** is bound by sigil's SHA-512 (about 18 MB/s, per tula). That is sigil's
-  to fix; anukulana benefits with no change.
+- **Big-file signing speed** is bound by sigil's SHA-512 (18.4 MB/s, measured here). That is sigil's to
+  fix; anukulana benefits with no change. It is what makes `convert` take about 86 s and `gpt2-load`
+  about 29 s on GPT-2 small (sign ~54 s, verify ~27 s for ~500 MB): file it with sigil, with these
+  numbers.
+- **A digest-pinned load for converted files** — ⚠ the maintainer's call, because it changes the trust
+  model. For example, `gpt2-load --sha256 <hex>` would accept the file on a caller-pinned SHA-256
+  (about 1.6 s at sigil's SHA-NI speed) printed at convert time, instead of verifying the Ed25519
+  signature every run. Today every load verifies.
 - **Duplicate tensor names in a safetensors header.** The first match wins today. Detecting duplicates
   needs a hash index to stay linear on hostile headers.
 - **Pin CI's cyrius installer to the release** instead of `main`: an ecosystem-wide decision.

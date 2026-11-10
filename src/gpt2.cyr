@@ -35,39 +35,96 @@ fn _gpt2_name(buf, L, suffix): i64 {
     return buf;
 }
 
+# ---- a tensor source: a safetensors reader or a tula reader (1.5.0) ----------
+# The GPT-2 mapping reads through these four calls, so a foreign safetensors file
+# and anukulana's own converted tula copy (src/convert.cyr) go through the same
+# shape checks and the same wideners — which is what makes a converted file load
+# bit-identical to the direct import. tula's F32/F16/BF16 payloads are the same
+# IEEE little-endian encodings safetensors uses (tula ADR 0005).
+# Source kind: a safetensors reader (st_open).
+fn GSRC_ST(): i64 { return 0; }
+# Source kind: a tula reader (tula_open_mmap / tula_read_file).
+fn GSRC_TULA(): i64 { return 1; }
+fn _gsrc(kind, r): i64 {
+    var s = alloc(16);
+    store64(s, kind);
+    store64(s + 8, r);
+    return s;
+}
+fn _gs_find(src, name): i64 {
+    if (load64(src) == GSRC_TULA()) { return tula_find_name(load64(src + 8), name); }
+    return st_find(load64(src + 8), name);
+}
+fn _gs_ndim(src, e): i64 {
+    if (load64(src) == GSRC_TULA()) { return tula_entry_ndim(e); }
+    return st_entry_ndim(e);
+}
+fn _gs_dim(src, e, k): i64 {
+    if (load64(src) == GSRC_TULA()) {
+        if (k < 0 || k >= tula_entry_ndim(e)) { return 0; }
+        return tula_entry_dim(e, k);
+    }
+    return st_entry_dim(e, k);
+}
+fn _gs_read(src, e, start, n, dst): i64 {
+    if (load64(src) == GSRC_TULA()) { return anuk_tula_read_f64_range(load64(src + 8), e, start, n, dst); }
+    return st_read_f64_range(load64(src + 8), e, start, n, dst);
+}
+
+# Read elements [start, start + n) of tula entry e into dst as f64 (1.5.0): F64
+# copied, F32 / F16 / BF16 widened by the safetensors path's bulk wideners. Returns
+# 0, or -1 for a range outside the tensor or a dtype that isn't a float weight.
+# The payload's length is the reader's to have checked (tula_validate_strict
+# requires it to be exactly the dtype's size for the shape).
+fn anuk_tula_read_f64_range(r, e, start, n, dst): i64 {
+    var total = tula_entry_nelems(e);
+    if (start < 0 || n < 0) { return 0 - 1; }
+    if (n > total) { return 0 - 1; }
+    if (start > total - n) { return 0 - 1; }
+    var dt = tula_entry_dtype(e);
+    var src = tula_entry_data(r, e);
+    if (dt == TULA_DT_F64) { memcpy(dst, src + start * 8, n * 8); return 0; }
+    if (dt == TULA_DT_F32) { _st_widen_f32(src + start * 4, dst, n); return 0; }
+    if (dt == TULA_DT_F16) { _st_widen_f16(src + start * 2, dst, n); return 0; }
+    if (dt == TULA_DT_BF16) { _st_widen_bf16(src + start * 2, dst, n); return 0; }
+    return 0 - 1;
+}
+
 # 1 iff entry e has exactly the shape [d0] (d1 == 0) or [d0, d1] (1.2.2). Through
 # 1.2.1 only the element count was compared, so a transposed [3C, C] c_attn.weight
 # was accepted and split into garbage Q/K/V.
-fn _gpt2_shape_ok(e, d0, d1): i64 {
+fn _gpt2_shape_ok(src, e, d0, d1): i64 {
     if (d1 == 0) {
-        if (st_entry_ndim(e) != 1) { return 0; }
-        if (st_entry_dim(e, 0) != d0) { return 0; }
+        if (_gs_ndim(src, e) != 1) { return 0; }
+        if (_gs_dim(src, e, 0) != d0) { return 0; }
         return 1;
     }
-    if (st_entry_ndim(e) != 2) { return 0; }
-    if (st_entry_dim(e, 0) != d0) { return 0; }
-    if (st_entry_dim(e, 1) != d1) { return 0; }
+    if (_gs_ndim(src, e) != 2) { return 0; }
+    if (_gs_dim(src, e, 0) != d0) { return 0; }
+    if (_gs_dim(src, e, 1) != d1) { return 0; }
     return 1;
 }
 # copy tensor `name` of shape [d0] (d1 == 0) or [d0, d1] into dst, widening per
 # dtype. returns 0 | -1 missing | -2 shape mismatch | -3 unsupported dtype.
-fn _gpt2_copy(r, name, dst, d0, d1): i64 {
-    var e = st_find(r, name);
+fn _gpt2_copy(src, name, dst, d0, d1): i64 {
+    var e = _gs_find(src, name);
     if (e == 0) { return 0 - 1; }
-    if (_gpt2_shape_ok(e, d0, d1) == 0) { return 0 - 2; }
-    if (st_read_f64(r, e, dst) != 0) { return 0 - 3; }
+    if (_gpt2_shape_ok(src, e, d0, d1) == 0) { return 0 - 2; }
+    var n = d0;
+    if (d1 != 0) { n = d0 * d1; }
+    if (_gs_read(src, e, 0, n, dst) != 0) { return 0 - 3; }
     return 0;
 }
 # copy the first `rows` rows of a [rows_max, cols] tensor (wpe [1024, C] -> [T, C]),
 # reading only those rows (1.2.2: the whole tensor was widened into a scratch
 # buffer sized from the file, then copied). Same return codes as _gpt2_copy.
-fn _gpt2_copy_prefix(r, name, dst, rows, cols): i64 {
-    var e = st_find(r, name);
+fn _gpt2_copy_prefix(src, name, dst, rows, cols): i64 {
+    var e = _gs_find(src, name);
     if (e == 0) { return 0 - 1; }
-    if (st_entry_ndim(e) != 2) { return 0 - 2; }
-    if (st_entry_dim(e, 1) != cols) { return 0 - 2; }   # the row width must match
-    if (st_entry_dim(e, 0) < rows) { return 0 - 2; }
-    if (st_read_f64_range(r, e, 0, rows * cols, dst) != 0) { return 0 - 3; }
+    if (_gs_ndim(src, e) != 2) { return 0 - 2; }
+    if (_gs_dim(src, e, 1) != cols) { return 0 - 2; }   # the row width must match
+    if (_gs_dim(src, e, 0) < rows) { return 0 - 2; }
+    if (_gs_read(src, e, 0, rows * cols, dst) != 0) { return 0 - 3; }
     return 0;
 }
 
@@ -101,54 +158,58 @@ fn anuk_gpt2_infer_cfg(r, cfg, nh): i64 {
 # Pack an imported GPT-2 checkpoint into rupantara's packed `params` buffer
 # (sized ru_params_count(cfg)*8). cfg must be configured (anuk_gpt2_infer_cfg).
 # Returns 0, or a negative _gpt2_copy error (missing/mismatched tensor).
-fn anuk_gpt2_pack(r, cfg, params): i64 {
+fn anuk_gpt2_pack(r, cfg, params): i64 { return _gpt2_pack_src(_gsrc(GSRC_ST(), r), cfg, params); }
+
+# The pack over any tensor source with HF GPT-2's names and shapes (1.5.0: shared by
+# the safetensors door and the converted-tula door).
+fn _gpt2_pack_src(src, cfg, params): i64 {
     var V = _cfg_V(cfg);
     var C = _cfg_C(cfg);
     var T = _cfg_T(cfg);
     var NL = _cfg_NL(cfg);
     var F = _cfg_F(cfg);
-    var rc = _gpt2_copy(r, "wte.weight", _p_tokemb(params), V, C);
+    var rc = _gpt2_copy(src, "wte.weight", _p_tokemb(params), V, C);
     if (rc != 0) { return rc; }
-    rc = _gpt2_copy_prefix(r, "wpe.weight", _p_posemb(params, cfg), T, C);
+    rc = _gpt2_copy_prefix(src, "wpe.weight", _p_posemb(params, cfg), T, C);
     if (rc != 0) { return rc; }
     var namebuf = alloc(64);
     var L = 0;
     while (L < NL) {
         var pblk = params + _ru_blk_base(cfg, L) * 8;
-        rc = _gpt2_copy(r, _gpt2_name(namebuf, L, "ln_1.weight"), pblk + _ru_o_ln1g(cfg) * 8, C, 0);
+        rc = _gpt2_copy(src, _gpt2_name(namebuf, L, "ln_1.weight"), pblk + _ru_o_ln1g(cfg) * 8, C, 0);
         if (rc != 0) { return rc; }
-        rc = _gpt2_copy(r, _gpt2_name(namebuf, L, "ln_1.bias"), pblk + _ru_o_ln1b(cfg) * 8, C, 0);
+        rc = _gpt2_copy(src, _gpt2_name(namebuf, L, "ln_1.bias"), pblk + _ru_o_ln1b(cfg) * 8, C, 0);
         if (rc != 0) { return rc; }
-        rc = _gpt2_split_qkv(r, _gpt2_name(namebuf, L, "attn.c_attn.weight"),
+        rc = _gpt2_split_qkv(src, _gpt2_name(namebuf, L, "attn.c_attn.weight"),
           pblk + _ru_o_Wq(cfg) * 8, pblk + _ru_o_Wk(cfg) * 8, pblk + _ru_o_Wv(cfg) * 8, C, C);
         if (rc != 0) { return rc; }
-        rc = _gpt2_split_qkv(r, _gpt2_name(namebuf, L, "attn.c_attn.bias"),
+        rc = _gpt2_split_qkv(src, _gpt2_name(namebuf, L, "attn.c_attn.bias"),
           _bq(cfg, pblk), _bk(cfg, pblk), _bv(cfg, pblk), 1, C);
         if (rc != 0) { return rc; }
         # c_proj (Wo, bo)
-        rc = _gpt2_copy(r, _gpt2_name(namebuf, L, "attn.c_proj.weight"), pblk + _ru_o_Wo(cfg) * 8, C, C);
+        rc = _gpt2_copy(src, _gpt2_name(namebuf, L, "attn.c_proj.weight"), pblk + _ru_o_Wo(cfg) * 8, C, C);
         if (rc != 0) { return rc; }
-        rc = _gpt2_copy(r, _gpt2_name(namebuf, L, "attn.c_proj.bias"), _bo(cfg, pblk), C, 0);
+        rc = _gpt2_copy(src, _gpt2_name(namebuf, L, "attn.c_proj.bias"), _bo(cfg, pblk), C, 0);
         if (rc != 0) { return rc; }
         # ln_2
-        rc = _gpt2_copy(r, _gpt2_name(namebuf, L, "ln_2.weight"), pblk + _ru_o_ln2g(cfg) * 8, C, 0);
+        rc = _gpt2_copy(src, _gpt2_name(namebuf, L, "ln_2.weight"), pblk + _ru_o_ln2g(cfg) * 8, C, 0);
         if (rc != 0) { return rc; }
-        rc = _gpt2_copy(r, _gpt2_name(namebuf, L, "ln_2.bias"), pblk + _ru_o_ln2b(cfg) * 8, C, 0);
+        rc = _gpt2_copy(src, _gpt2_name(namebuf, L, "ln_2.bias"), pblk + _ru_o_ln2b(cfg) * 8, C, 0);
         if (rc != 0) { return rc; }
         # mlp
-        rc = _gpt2_copy(r, _gpt2_name(namebuf, L, "mlp.c_fc.weight"), pblk + _ru_o_Wfc(cfg) * 8, C, F);
+        rc = _gpt2_copy(src, _gpt2_name(namebuf, L, "mlp.c_fc.weight"), pblk + _ru_o_Wfc(cfg) * 8, C, F);
         if (rc != 0) { return rc; }
-        rc = _gpt2_copy(r, _gpt2_name(namebuf, L, "mlp.c_fc.bias"), pblk + _ru_o_bfc(cfg) * 8, F, 0);
+        rc = _gpt2_copy(src, _gpt2_name(namebuf, L, "mlp.c_fc.bias"), pblk + _ru_o_bfc(cfg) * 8, F, 0);
         if (rc != 0) { return rc; }
-        rc = _gpt2_copy(r, _gpt2_name(namebuf, L, "mlp.c_proj.weight"), pblk + _ru_o_Wproj(cfg) * 8, F, C);
+        rc = _gpt2_copy(src, _gpt2_name(namebuf, L, "mlp.c_proj.weight"), pblk + _ru_o_Wproj(cfg) * 8, F, C);
         if (rc != 0) { return rc; }
-        rc = _gpt2_copy(r, _gpt2_name(namebuf, L, "mlp.c_proj.bias"), pblk + _ru_o_bproj(cfg) * 8, C, 0);
+        rc = _gpt2_copy(src, _gpt2_name(namebuf, L, "mlp.c_proj.bias"), pblk + _ru_o_bproj(cfg) * 8, C, 0);
         if (rc != 0) { return rc; }
         L = L + 1;
     }
-    rc = _gpt2_copy(r, "ln_f.weight", _p_lnfg(params, cfg), C, 0);
+    rc = _gpt2_copy(src, "ln_f.weight", _p_lnfg(params, cfg), C, 0);
     if (rc != 0) { return rc; }
-    rc = _gpt2_copy(r, "ln_f.bias", _p_lnfb(params, cfg), C, 0);
+    rc = _gpt2_copy(src, "ln_f.bias", _p_lnfb(params, cfg), C, 0);
     if (rc != 0) { return rc; }
     return 0;
 }
@@ -158,22 +219,64 @@ fn anuk_gpt2_pack(r, cfg, params): i64 {
 # i of q/k/v, each [C, C]); rows = 1 for c_attn.bias [3C]. Each element is widened
 # once, directly into place: bit-identical to the 1.2.1 copy through a [C, 3C]
 # scratch, without the scratch or the second pass. Same codes as _gpt2_copy.
-fn _gpt2_split_qkv(r, name, q, k, v, rows, C): i64 {
-    var e = st_find(r, name);
+fn _gpt2_split_qkv(src, name, q, k, v, rows, C): i64 {
+    var e = _gs_find(src, name);
     if (e == 0) { return 0 - 1; }
     var d1 = 3 * C;
     var d0 = rows;
     if (rows == 1) { d0 = 3 * C; d1 = 0; }
-    if (_gpt2_shape_ok(e, d0, d1) == 0) { return 0 - 2; }
+    if (_gpt2_shape_ok(src, e, d0, d1) == 0) { return 0 - 2; }
     var i = 0;
     while (i < rows) {
         var base = i * 3 * C;
-        if (st_read_f64_range(r, e, base, C, q + i * C * 8) != 0) { return 0 - 3; }
-        if (st_read_f64_range(r, e, base + C, C, k + i * C * 8) != 0) { return 0 - 3; }
-        if (st_read_f64_range(r, e, base + 2 * C, C, v + i * C * 8) != 0) { return 0 - 3; }
+        if (_gs_read(src, e, base, C, q + i * C * 8) != 0) { return 0 - 3; }
+        if (_gs_read(src, e, base + C, C, k + i * C * 8) != 0) { return 0 - 3; }
+        if (_gs_read(src, e, base + 2 * C, C, v + i * C * 8) != 0) { return 0 - 3; }
         i = i + 1;
     }
     return 0;
+}
+
+# The HF GPT-2 tensor set, in pack order (1.5.0, for the converter): entry i in
+# [0, 4 + 12*NL) -> its name in namebuf and its expected dims at dims[0], dims[1]
+# (dims[1] = 0 for a 1-D tensor; wpe gets the cfg's T rows). Returns 0, or -1 for
+# i out of range.
+fn _gpt2_spec(cfg, i, namebuf, dims): i64 {
+    var C = _cfg_C(cfg);
+    var F = _cfg_F(cfg);
+    var NL = _cfg_NL(cfg);
+    store64(dims + 8, 0);
+    if (i < 0) { return 0 - 1; }
+    if (i == 0) { _gpt2_lit(namebuf, "wte.weight"); store64(dims, _cfg_V(cfg)); store64(dims + 8, C); return 0; }
+    if (i == 1) { _gpt2_lit(namebuf, "wpe.weight"); store64(dims, _cfg_T(cfg)); store64(dims + 8, C); return 0; }
+    var j = i - 2;
+    if (j < 12 * NL) {
+        var L = j / 12;
+        var k = j % 12;
+        if (k == 0) { _gpt2_name(namebuf, L, "ln_1.weight"); store64(dims, C); }
+        if (k == 1) { _gpt2_name(namebuf, L, "ln_1.bias"); store64(dims, C); }
+        if (k == 2) { _gpt2_name(namebuf, L, "attn.c_attn.weight"); store64(dims, C); store64(dims + 8, 3 * C); }
+        if (k == 3) { _gpt2_name(namebuf, L, "attn.c_attn.bias"); store64(dims, 3 * C); }
+        if (k == 4) { _gpt2_name(namebuf, L, "attn.c_proj.weight"); store64(dims, C); store64(dims + 8, C); }
+        if (k == 5) { _gpt2_name(namebuf, L, "attn.c_proj.bias"); store64(dims, C); }
+        if (k == 6) { _gpt2_name(namebuf, L, "ln_2.weight"); store64(dims, C); }
+        if (k == 7) { _gpt2_name(namebuf, L, "ln_2.bias"); store64(dims, C); }
+        if (k == 8) { _gpt2_name(namebuf, L, "mlp.c_fc.weight"); store64(dims, C); store64(dims + 8, F); }
+        if (k == 9) { _gpt2_name(namebuf, L, "mlp.c_fc.bias"); store64(dims, F); }
+        if (k == 10) { _gpt2_name(namebuf, L, "mlp.c_proj.weight"); store64(dims, F); store64(dims + 8, C); }
+        if (k == 11) { _gpt2_name(namebuf, L, "mlp.c_proj.bias"); store64(dims, C); }
+        return 0;
+    }
+    j = j - 12 * NL;
+    if (j == 0) { _gpt2_lit(namebuf, "ln_f.weight"); store64(dims, C); return 0; }
+    if (j == 1) { _gpt2_lit(namebuf, "ln_f.bias"); store64(dims, C); return 0; }
+    return 0 - 1;
+}
+fn _gpt2_lit(buf, s): i64 {
+    var i = 0;
+    while (load8(s + i) != 0) { store8(buf + i, load8(s + i)); i = i + 1; }
+    store8(buf + i, 0);
+    return buf;
 }
 
 # One-shot: read a GPT-2 safetensors from `path` (up to maxbytes), infer config

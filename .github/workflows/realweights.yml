@@ -11,10 +11,13 @@ name: Real weights
 #     - cron: '17 4 * * 1'
 # under `on:`.
 #
-# Not covered here: `gpt2-gguf` and `gpt2-cross`. Their GGUF file is made by
-# tests/oracle/gen_gguf.py in a disposable Python venv (llama.cpp's converter
-# conventions, so the cross gate checks against an independent writer), and
-# Python is never a build, run or test dependency. Run those two locally.
+# Since 1.5.0 it also runs `convert` (safetensors door) and `gpt2-load`; the
+# convert step's reload must be bit-identical to the direct import.
+#
+# Not covered here: `gpt2-gguf`, `gpt2-cross` and convert's GGUF door. Their GGUF
+# file is made by tests/oracle/gen_gguf.py in a disposable Python venv (llama.cpp's
+# converter conventions, so the cross gate checks against an independent writer),
+# and Python is never a build, run or test dependency. Run those three locally.
 
 on:
   workflow_dispatch:
@@ -85,3 +88,9 @@ jobs:
 
       - name: Signed persistence round trip (tula's real-weights gate)
         run: ./build/anukulana gpt2-tula "$GPT2_MODEL" "$RUNNER_TEMP/ckpt.tula" "$RUNNER_TEMP/adapter.tula"
+
+      - name: Convert at source precision (reload bit-identical to the direct import)
+        run: ./build/anukulana convert "$GPT2_MODEL" "$RUNNER_TEMP/gpt2.tula"
+
+      - name: Run from the converted file (batch == KV-cache decode)
+        run: ./build/anukulana gpt2-load "$RUNNER_TEMP/gpt2.tula"
