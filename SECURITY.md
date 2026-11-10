@@ -81,7 +81,10 @@ their defenses:
    `convert` signs with the demo key (no `--sk`) prove integrity, not authorship:
    the key's seed is in the source. The signature is checked on every load
    (about 27 s for GPT-2 small at sigil's current SHA-512 speed); no faster path
-   skips it.
+   skips it. *(1.6.1)* A packed Q8_0 tensor (INT8 codes) is read only with an F16
+   `<name>.scale` sidecar of exactly one of the convention's shapes; without one,
+   with another dtype, or with any other shape, the read is refused and the load
+   fails. Every index stays inside the strict-validated payloads.
 8. **The GPT-2 mapping's shape contract** (added 1.2.2). Both mappings check every
    tensor's exact rank and dims, not just its element count, so a transposed or
    re-shaped weight is rejected instead of being imported as garbage.

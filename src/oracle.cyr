@@ -161,3 +161,51 @@ fn anuk_gpt2_oracle(model_path, fix_path): i64 {
     _anuk_sput("/"); _anuk_puti(ns); _anuk_sput(" seqs\n");
     return 1;
 }
+
+# The fixture's argmax agreement for any imported model (1.6.1, `gpt2-qgguf
+# --fixture`): run every sequence of the fixture at fix_path and count the positions
+# whose argmax equals HF's. out (2 cells): out[0] the positions compared (n_seqs x
+# T), out[1] the worst last-row max |logit - HF's| as f64. Reported, not gated: a
+# quantized model is not expected to match HF exactly. Returns the matching count,
+# or -1 (an unreadable fixture, a vocab mismatch, a T past the model's context, a
+# rejected forward).
+fn anuk_oracle_agreement(fix_path, cfg, params, out): i64 {
+    var nsb = alloc(8);
+    var tb = alloc(8);
+    var vb = alloc(8);
+    var fb = _orc_read_fixture(fix_path, nsb, tb, vb);
+    if (fb == 0) { return 0 - 1; }
+    var ns = load64(nsb);
+    var T = load64(tb);
+    var V = _cfg_V(cfg);
+    if (load64(vb) != V) { return 0 - 1; }
+    if (T > _cfg_T(cfg)) { return 0 - 1; }
+    var Lb = alloc(T * V * 8);
+    var hits = 0;
+    var worst = f64_from(0);
+    var off = 16;
+    var s = 0;
+    while (s < ns) {
+        var toks = fb + off + 16;
+        var hfam = toks + T * 8;
+        var ref = hfam + T * 8;
+        if (ru_model_fwd_n(cfg, params, toks, T, Lb, 0) != RU_OK()) { return 0 - 1; }
+        var p = 0;
+        while (p < T) {
+            if (ru_argmax(Lb + p * V * 8, V) == load64(hfam + p * 8)) { hits = hits + 1; }
+            p = p + 1;
+        }
+        var last = Lb + (T - 1) * V * 8;
+        var v = 0;
+        while (v < V) {
+            var d = _orc_abs(f64_sub(load64(last + v * 8), load64(ref + v * 8)));
+            if (f64_gt(d, worst) == 1) { worst = d; }
+            v = v + 1;
+        }
+        off = off + 16 + T * 16 + V * 8;
+        s = s + 1;
+    }
+    store64(out, ns * T);
+    store64(out + 8, worst);
+    return hits;
+}

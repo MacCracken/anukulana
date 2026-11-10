@@ -280,7 +280,24 @@ fn _cv_quant_c(qt, lo, hi, qname, C): i64 {
     assert_eq(_cv_meta_is(out_s, "anukulana.source.quant", qname), 0, "an unquantized source has no source.quant");
     var ra = tula_read_file(out_q);
     var rb = tula_read_file(out_s);
-    assert_eq(tula_entry_dtype(tula_find_name(ra, "h.0.mlp.c_proj.weight")), TULA_DT_F32, "dequantized to F32");
+    var packed = 0;
+    if (qt == GG_T_Q8_0()) { packed = 1; }
+    if (packed == 1) {
+        # 1.6.1: Q8_0 stays packed, INT8 codes + an F16 .scale sidecar per weight
+        assert_eq(tula_entry_dtype(tula_find_name(ra, "h.0.mlp.c_proj.weight")), TULA_DT_INT8, "Q8_0 kept as INT8");
+        var sc = tula_find_name(ra, "h.0.mlp.c_proj.weight.scale");
+        assert_nonnull(sc, "with its .scale sidecar");
+        assert_eq(tula_entry_dtype(sc), TULA_DT_F16, "the sidecar is F16");
+        assert_eq(tula_entry_dim(sc, 0), 4 * C / 32, "c_proj [F, C]: blocks down dim 0 ([F / 32, C])");
+        assert_eq(tula_entry_dim(sc, 1), C, "and C wide");
+        var ws = tula_find_name(ra, "wte.weight.scale");
+        assert_eq(tula_entry_dim(ws, 1), C / 32, "wte [V, C]: blocks along dim 1 ([V, C / 32])");
+        assert_eq(tula_entry_dtype(tula_find_name(ra, "h.0.ln_1.weight")), TULA_DT_F32, "norms stay F32");
+        assert_eq(_cv_meta_is(out_q, "anukulana.packed", "Q8_0"), 1, "meta packed names Q8_0");
+    } else {
+        assert_eq(tula_entry_dtype(tula_find_name(ra, "h.0.mlp.c_proj.weight")), TULA_DT_F32, "dequantized to F32");
+        assert_eq(_cv_meta_is(out_q, "anukulana.packed", qname), 0, "nothing is packed");
+    }
     var name = alloc(64);
     var dims = alloc(16);
     var diff = 0;
@@ -289,7 +306,10 @@ fn _cv_quant_c(qt, lo, hi, qname, C): i64 {
         _gpt2_spec(cfg, i, name, dims);
         var ea = tula_find_name(ra, name);
         var eb = tula_find_name(rb, name);
+        var skip = 0;                                # packed: the reload check covers it
+        if (ea != 0 && tula_entry_dtype(ea) == TULA_DT_INT8) { skip = 1; }
         if (ea == 0 || eb == 0) { diff = diff + 1; }
+        elif (skip == 1) { skip = 0; }
         elif (tula_entry_data_len(ea) != tula_entry_data_len(eb)) { diff = diff + 1; }
         elif (memeq(tula_entry_data(ra, ea), tula_entry_data(rb, eb), tula_entry_data_len(ea)) != 1) {
             diff = diff + 1;
@@ -297,6 +317,77 @@ fn _cv_quant_c(qt, lo, hi, qname, C): i64 {
         i = i + 1;
     }
     assert_eq(diff, 0, "the quantized GGUF and the F32 safetensors convert to the same tensors");
+    return 0;
+}
+
+# 1.6.1: the packed Q8_0 convention read back directly: a [64, 4] INT8 code tensor
+# with one scale per 32 codes down dim 0 ([2, 4] scales), a [4, 64] one with them
+# along dim 1 ([4, 2]), and a [64] vector ([2]). Codes cycle -3..3 and scales are
+# 2^-(s + 1), so each value must be its code times its block's scale. Refused: no
+# sidecar, an F32 sidecar, a sidecar of neither shape.
+fn _pk_codes(n): i64 {
+    var c = alloc(n);
+    var i = 0;
+    while (i < n) { store8(c + i, ((i % 7) - 3) & 0xFF); i = i + 1; }
+    return c;
+}
+fn _pk_scales(n): i64 {
+    var h = alloc(n * 2);
+    var i = 0;
+    while (i < n) { store16(h + i * 2, 0x3C00 - (i + 1) * 0x400); i = i + 1; }   # 2^-(i+1)
+    return h;
+}
+# the value tensor `nm` should decode to: (k % 7 - 3) * 2^-(si + 1), si per axis
+fn _pk_bad(r, nm, d0, d1, axis): i64 {
+    var e = tula_find_name(r, nm);
+    var n = d0;
+    if (d1 != 0) { n = d0 * d1; }
+    var out = t_alloc(n);
+    if (anuk_tula_read_f64_range(r, e, 0, n, out) != 0) { return n + 1; }
+    var w = d1;
+    if (d1 == 0) { w = 1; }
+    var bad = 0;
+    var k = 0;
+    while (k < n) {
+        var i = k / w;
+        var j = k % w;
+        var si = (i / 32) * w + j;
+        if (axis == 1) { si = i * (w / 32) + j / 32; }
+        var want = f64_div(f64_from((k % 7) - 3), f64_from(1 << (si + 1)));
+        if (load64(out + k * 8) != want) { bad = bad + 1; }
+        k = k + 1;
+    }
+    var mid = t_alloc(5);                            # an unaligned sub-range
+    if (anuk_tula_read_f64_range(r, e, 30, 5, mid) != 0) { return n + 2; }
+    var m = 0;
+    while (m < 5) { if (load64(mid + m * 8) != load64(out + (30 + m) * 8)) { bad = bad + 1; } m = m + 1; }
+    return bad;
+}
+fn test_packed_q8_convention(): i64 {
+    var b = tula_builder_new_cap(16);
+    tula_builder_add_checked(b, "a0", TULA_DT_INT8, _nfs_shp2(64, 4), 2, _pk_codes(256), 256);
+    tula_builder_add_checked(b, "a0.scale", TULA_DT_F16, _nfs_shp2(2, 4), 2, _pk_scales(8), 16);
+    tula_builder_add_checked(b, "a1", TULA_DT_INT8, _nfs_shp2(4, 64), 2, _pk_codes(256), 256);
+    tula_builder_add_checked(b, "a1.scale", TULA_DT_F16, _nfs_shp2(4, 2), 2, _pk_scales(8), 16);
+    tula_builder_add_checked(b, "v", TULA_DT_INT8, _nfs_shp1(64), 1, _pk_codes(64), 64);
+    tula_builder_add_checked(b, "v.scale", TULA_DT_F16, _nfs_shp1(2), 1, _pk_scales(2), 4);
+    tula_builder_add_checked(b, "none", TULA_DT_INT8, _nfs_shp1(64), 1, _pk_codes(64), 64);
+    tula_builder_add_checked(b, "f32s", TULA_DT_INT8, _nfs_shp1(64), 1, _pk_codes(64), 64);
+    tula_builder_add_checked(b, "f32s.scale", TULA_DT_F32, _nfs_shp1(2), 1, _pk_scales(4), 8);
+    tula_builder_add_checked(b, "odd", TULA_DT_INT8, _nfs_shp2(64, 4), 2, _pk_codes(256), 256);
+    tula_builder_add_checked(b, "odd.scale", TULA_DT_F16, _nfs_shp2(4, 2), 2, _pk_scales(8), 16);
+    assert_gt(tula_builder_write_file(b, "/tmp/anuk_pk.tula"), 0, "the packed-convention file writes");
+    var r = tula_read_file("/tmp/anuk_pk.tula");
+    assert_nonnull(r, "and reads");
+    assert_eq(_pk_bad(r, "a0", 64, 4, 0), 0, "[64, 4] with [2, 4] scales: blocks down dim 0");
+    assert_eq(_pk_bad(r, "a1", 4, 64, 1), 0, "[4, 64] with [4, 2] scales: blocks along dim 1");
+    assert_eq(_pk_bad(r, "v", 64, 0, 0), 0, "a [64] vector with [2] scales");
+    var out = t_alloc(256);
+    assert_eq(anuk_tula_read_f64_range(r, tula_find_name(r, "none"), 0, 64, out), 0 - 1,
+      "INT8 without a sidecar is refused");
+    assert_eq(anuk_tula_read_f64_range(r, tula_find_name(r, "f32s"), 0, 64, out), 0 - 1, "an F32 sidecar is refused");
+    assert_eq(anuk_tula_read_f64_range(r, tula_find_name(r, "odd"), 0, 256, out), 0 - 1,
+      "a sidecar of neither shape is refused");
     return 0;
 }
 
@@ -315,8 +406,66 @@ fn test_convert_quant(): i64 {
     return 0;
 }
 
+# 1.6.1: _cv_gg_q8_pack against the GGUF reader, with a different scale per block
+# (the GPT-2 round trips use one fixed scale, which no ordering slip would show). A
+# raw Q8_0 tensor ne = [64, 3] (3 ggml rows of 64) packs as a Conv1D weight (tr = 1,
+# HF [64, 3], scales [2, 3]) and as an embedding (tr = 0, HF [3, 64], scales [3, 2]);
+# each must read back through the tula door as the GGUF door reads it.
+fn _pk_gg_check(r, e, d0, d1, tr): i64 {
+    var codes = alloc(192);
+    var scales = alloc(12);
+    _cv_gg_q8_pack(r, e, codes, scales, d0, d1, tr);
+    var b = tula_builder_new_cap(4);
+    tula_builder_add_checked(b, "w", TULA_DT_INT8, _nfs_shp2(d0, d1), 2, codes, 192);
+    var ssh = _nfs_shp2(d0 / 32, d1);
+    if (tr == 0) { ssh = _nfs_shp2(d0, d1 / 32); }
+    tula_builder_add_checked(b, "w.scale", TULA_DT_F16, ssh, 2, scales, 12);
+    tula_builder_write_file(b, "/tmp/anuk_pkgg.tula");
+    var t = tula_read_file("/tmp/anuk_pkgg.tula");
+    if (t == 0) { return 1000; }
+    var got = t_alloc(192);
+    if (anuk_tula_read_f64_range(t, tula_find_name(t, "w"), 0, 192, got) != 0) { return 1001; }
+    var gg = t_alloc(192);                           # ggml order: row o, element i
+    gg_read_f64(r, e, gg);
+    var bad = 0;
+    var i = 0;
+    while (i < d0) {
+        var j = 0;
+        while (j < d1) {
+            var want = load64(gg + (i * d1 + j) * 8);            # tr = 0: HF rows are ggml rows
+            if (tr == 1) { want = load64(gg + (j * d0 + i) * 8); } # tr = 1: HF (i, o) = ggml (o, i)
+            if (load64(got + (i * d1 + j) * 8) != want) { bad = bad + 1; }
+            j = j + 1;
+        }
+        i = i + 1;
+    }
+    return bad;
+}
+fn test_q8_pack_orders(): i64 {
+    var raw = alloc(6 * 34);
+    var bk = 0;
+    while (bk < 6) {                                 # scale 2^-(bk + 1), codes (bk * 5 + k) % 9 - 4
+        store16(raw + bk * 34, 0x3C00 - (bk + 1) * 0x400);
+        var k = 0;
+        while (k < 32) { store8(raw + bk * 34 + 2 + k, (((bk * 5 + k) % 9) - 4) & 0xFF); k = k + 1; }
+        bk = bk + 1;
+    }
+    var w = _ggw_new();
+    _ggw_add_raw(w, "w", raw, 64, 3, 2, GG_T_Q8_0(), 6 * 34);
+    var lp = alloc(8);
+    var buf = _ggw_finish(w, 0, 32, 0, lp);
+    var r = gg_open(buf, load64(lp));
+    assert_nonnull(r, "the raw Q8_0 tensor opens");
+    var e = gg_find(r, "w");
+    assert_eq(_pk_gg_check(r, e, 64, 3, 1), 0, "packed as a Conv1D weight, it reads as the GGUF door does");
+    assert_eq(_pk_gg_check(r, e, 3, 64, 0), 0, "packed as an embedding, likewise");
+    return 0;
+}
+
 fn main(): i64 {
     alloc_init();
+    test_q8_pack_orders();
+    test_packed_q8_convention();
     test_convert_quant();
     test_convert_doors();
     test_full_context();

@@ -14,13 +14,13 @@ name: Real weights
 # Since 1.5.0 it also runs `convert` (safetensors door) and `gpt2-load`; the
 # convert step's reload must be bit-identical to the direct import.
 #
-# Not covered here: `gpt2-gguf`, `gpt2-cross`, `gpt2-qgguf` (1.6.0) and convert's
-# GGUF door. Their GGUF files are made by tests/oracle/gen_gguf.py in a disposable
-# Python venv (llama.cpp's converter conventions, and gguf-py's quantizer for the
-# block types, so the gates check against an independent writer); the K-quant files
-# (1.6.1) by tests/oracle/gen_kquants.sh, which builds llama.cpp's llama-quantize at
-# a pinned tag. Neither Python nor llama.cpp is ever a build, run or test dependency.
-# Run those locally.
+# Since 1.6.1 the `gguf` job runs the GGUF door's gates: `gpt2-gguf`, `gpt2-cross`,
+# `gpt2-qgguf` and convert's GGUF door. Their files are made at test time, as they
+# are locally: tests/oracle/gen_gguf.py in a disposable Python venv (llama.cpp's
+# converter conventions, and gguf-py's quantizer for the legacy block types, so the
+# gates check against an independent writer) and tests/oracle/gen_kquants.sh, which
+# builds llama.cpp's llama-quantize at a pinned tag for the K-quants. Neither Python
+# nor llama.cpp is ever a build, run or test dependency of anukulana.
 
 on:
   workflow_dispatch:
@@ -97,3 +97,106 @@ jobs:
 
       - name: Run from the converted file (batch == KV-cache decode)
         run: ./build/anukulana gpt2-load "$RUNNER_TEMP/gpt2.tula"
+
+  gguf:
+    name: GGUF door (F32, legacy block types, K-quants)
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    env:
+      GPT2_REPO: openai-community/gpt2
+      GPT2_REV: 607a30d783dfa663caf39e06633721c8d4cfcd7e      # main as of 2026-11-09
+      GPT2_SHA256: 248dfc3911869ec493c76e65bf2fcf7f615828b0254c12b473182f0f81d3a707
+      GPT2_CONFIG_SHA256: 0daed7749b4f02b8f76240d5444551d7b08712dab4d0adb8239c56ba823bb7b4
+      GPT2_DIR: ${{ github.workspace }}/models/gpt2
+      GPT2_MODEL: ${{ github.workspace }}/models/gpt2/model.safetensors
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      - name: Install Cyrius toolchain
+        run: |
+          set -e
+          CYRIUS_VERSION="$(grep '^cyrius = ' cyrius.cyml | head -1 | sed 's/cyrius = "\(.*\)"/\1/')"
+          echo "Installing Cyrius $CYRIUS_VERSION"
+          curl -sSf https://raw.githubusercontent.com/MacCracken/cyrius/main/scripts/install.sh | \
+            CYRIUS_VERSION="$CYRIUS_VERSION" sh
+          echo "$HOME/.cyrius/bin" >> "$GITHUB_PATH"
+
+      - name: Resolve dependencies
+        run: |
+          rm -rf lib
+          mkdir lib
+          cyrius deps
+
+      - name: Cache the checkpoint (its own key; the gpt2 job caches the whole folder)
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: models/gpt2/model.safetensors
+          key: gpt2-safetensors-file-${{ env.GPT2_SHA256 }}
+
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: '3.13'
+
+      - name: Fetch the checkpoint and its config.json (pinned revision, sha256-checked)
+        run: |
+          set -e
+          mkdir -p "$GPT2_DIR"
+          if [ ! -f "$GPT2_MODEL" ]; then
+            curl -sSfL --retry 3 -o "$GPT2_MODEL" \
+              "https://huggingface.co/$GPT2_REPO/resolve/$GPT2_REV/model.safetensors"
+          fi
+          curl -sSfL --retry 3 -o "$GPT2_DIR/config.json" \
+            "https://huggingface.co/$GPT2_REPO/resolve/$GPT2_REV/config.json"
+          echo "$GPT2_SHA256  $GPT2_MODEL" | sha256sum -c -
+          echo "$GPT2_CONFIG_SHA256  $GPT2_DIR/config.json" | sha256sum -c -
+
+      - name: Write the F32 and legacy block-type GGUFs (disposable venv; gguf-py)
+        run: |
+          set -e
+          python3 -m venv "$RUNNER_TEMP/gguf-venv"
+          "$RUNNER_TEMP/gguf-venv/bin/pip" install -q gguf==0.19.0 numpy==2.5.4 safetensors==0.8.0
+          PY="$RUNNER_TEMP/gguf-venv/bin/python"
+          "$PY" -I tests/oracle/gen_gguf.py "$GPT2_DIR" "$GPT2_DIR/model.gguf"
+          for q in Q8_0 Q5_1 Q5_0 Q4_1 Q4_0; do
+            "$PY" -I tests/oracle/gen_gguf.py "$GPT2_DIR" "$GPT2_DIR/model-$(echo "$q" | tr 'A-Z' 'a-z').gguf" "$q"
+          done
+
+      - name: Cache the llama.cpp build
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: ${{ runner.temp }}/llama-work/llama.cpp
+          key: llama-cpp-b12242-${{ runner.os }}
+
+      - name: Write the K-quant GGUFs (llama.cpp's llama-quantize, built at its pinned tag)
+        run: bash tests/oracle/gen_kquants.sh "$GPT2_DIR" "$RUNNER_TEMP/llama-work"
+
+      - name: Build binary (DCE on)
+        run: make build
+
+      - name: GGUF door (F32), batch == KV-cache decode
+        run: ./build/anukulana gpt2-gguf "$GPT2_DIR/model.gguf"
+
+      - name: Cross-format gate (safetensors == GGUF, bit-identical)
+        run: ./build/anukulana gpt2-cross "$GPT2_MODEL" "$GPT2_DIR/model.gguf"
+
+      - name: Every quantized file equals ggml's own dequantization, then report its drift
+        run: |
+          set -e
+          Q="$RUNNER_TEMP/llama-work/llama.cpp/build/bin/llama-quantize"
+          for f in "$GPT2_DIR"/model-q*.gguf; do
+            base=$(basename "$f" .gguf)
+            echo "== $base"
+            ./build/anukulana gpt2-gguf "$f"
+            "$Q" --allow-requantize "$f" "$RUNNER_TEMP/$base-ggml-f32.gguf" F32 > /dev/null 2>&1
+            ./build/anukulana gpt2-qgguf "$RUNNER_TEMP/$base-ggml-f32.gguf" "$f" | tee "$RUNNER_TEMP/oracle.txt"
+            grep -q 'differing 0,' "$RUNNER_TEMP/oracle.txt"
+            rm -f "$RUNNER_TEMP/$base-ggml-f32.gguf"
+            ./build/anukulana gpt2-qgguf "$GPT2_MODEL" "$f" --fixture tests/fixtures/gpt2_oracle_v1.bin
+          done
+
+      - name: Convert a Q8_0 GGUF (kept packed) and run from the converted file
+        run: |
+          ./build/anukulana convert "$GPT2_DIR/model-q8_0.gguf" "$RUNNER_TEMP/q8_0.tula"
+          ./build/anukulana gpt2-load "$RUNNER_TEMP/q8_0.tula"

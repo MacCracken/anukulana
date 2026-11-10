@@ -1,19 +1,26 @@
 # anukulana — Current State
 
-> **Last refresh**: 2026-11-09 (1.6.0) | **Cadence**: every release.
+> **Last refresh**: 2026-11-09 (1.6.1) | **Cadence**: every release.
 > `CLAUDE.md` is preferences/process; this file is volatile state.
 
 ## Version
 
-**Unreleased — the K-quants (1.6.x), waiting for the cut.**
+**1.6.1 — 2026-11-09 (the K-quants; packed Q8_0; the GGUF door in CI).**
 - **What changed:** the GGUF door reads Q2_K, Q3_K, Q4_K, Q5_K and Q6_K, so llama.cpp's standard
   mixes (`Q2_K`, `Q3_K_M`, `Q4_K_M`, `Q5_K_M`, `Q6_K`) import.
 - **Checked against ggml itself:** `tests/oracle/gen_kquants.sh` builds llama.cpp's `llama-quantize`
   at tag `b12242` at test time. Its F32 dequantization of all ten quantized GPT-2 files (legacy and
   K) matches anukulana's import with 0 of 124,439,808 params differing.
 - **Drift on the demo input:** Q4_K_M agrees with the F32 import at 6/8 argmax positions, with a
-  weight relative RMS of 0.049 (Q4_0: 0.089, 3/8).
-- **Suite:** **628**.
+  weight relative RMS of 0.049 (Q4_0: 0.089, 3/8). Over the fixture's 48 positions
+  (`gpt2-qgguf --fixture`) it matches HF's argmax at 39/48, against Q8_0's 41/48. Those positions are
+  near-ties too: 38 have a top-2 margin under 1 logit.
+- **Packed Q8_0 in `convert`:** INT8 codes plus F16 `<name>.scale` sidecars, lossless. The real
+  file is 134.9 MB instead of 497.8 MB; `convert` 25.4 s, `gpt2-load` 10.6 s.
+- **CI:** a manual `gguf` job in `realweights.yml` builds the GGUF files (venv and `llama-quantize`)
+  and runs the GGUF door's gates, the ggml check included. Its loop was run locally as written;
+  it has not run on GitHub yet.
+- **Suite:** **652**.
 
 **1.6.0 — 2026-11-09 (the GGUF legacy block types).**
 - **What changed:** the GGUF door reads Q4_0, Q4_1, Q5_0, Q5_1 and Q8_0 and dequantizes them
@@ -174,13 +181,9 @@ CHANGELOG.
 
 ## Next
 
-Reprised after 1.5.1, with every dependency at its latest tag and rupantara's 0.7.x not started:
-
-1. **1.6.x — quantized GGUF payloads.** Nothing upstream blocks it. 1.6.0 shipped the legacy block
-   types and the K-quants are done (above); packed `convert` and a steadier drift measure remain.
-2. **1.7.x — onto rupantara 0.7 → 1.0.** It lands as rupantara ships.
-3. **1.8.x — the llama architecture.** It waits for rupantara's architecture breadth, after its 1.0.
-
-The 1.x.x list holds the digest-pinned load (the maintainer's call), text in, text out (gated on
-akshara), and the asks still to be filed with sigil, akshara, rupantara and ganita. See
-[`roadmap.md`](roadmap.md).
+1.6.x is complete. The numbered lines left both wait on rupantara: **1.7.x**, onto rupantara 0.7 → 1.0,
+and **1.8.x**, the llama architecture, after rupantara's 1.0. Until then the unblocked work is
+anukulana's own in 1.x.x: the bit-identical `lora_adam` hoist and duplicate-name detection in
+safetensors headers. Also there: packed 4-bit `convert` (gated on tula 1.8) and text in, text out
+(gated on akshara). The asks to other repos (sigil, rupantara and ganita, akshara, tula) need the
+maintainer's go. See [`roadmap.md`](roadmap.md).

@@ -22,7 +22,7 @@
 | `convert <model.{safetensors,gguf}> <out.tula> [--sk <operator.sk>]` *(1.5.0)* | write the model as a **signed tula file at its source precision** (F64/F32/F16/BF16, HF GPT-2 names and shapes; GGUF weights transposed back), with metadata and provenance, then reload it and require its packed params **bit-identical** to a direct import. Without `--sk` it signs with the demo key (integrity only). Safetensors heads come from `config.json`'s `n_head` beside the model, else 12 |
 | `gpt2-load <model.tula> [--pk <key file>]` *(1.5.0)* | import a converted file (signature verified; without `--pk`, against the demo key) and run the batch == KV-cache decode check |
 | `gpt2-cross <model.safetensors> <model.gguf>` *(1.1.0)* | the **cross-format gate**: the same checkpoint through both foreign parsers must produce bit-identical packed params AND logits |
-| `gpt2-qgguf <reference> <quantized.gguf>` *(1.6.0)* | a **llama.cpp-quantized GPT-2** (Q4_0 / Q4_1 / Q5_0 / Q5_1 / Q8_0; *(1.6.1)* the K-quants, e.g. `Q4_K_M`) against the unquantized import of the same checkpoint (HF safetensors, heads from a `config.json` beside it, or an F32 / F16 GGUF). Gates: same config, at least one block-typed tensor, NaN-free, batch == decode bit-identical, weights closer to the reference than zero is (relative RMS error < 1). Reported: the tensor types, the params that differ bit for bit *(1.6.1)*, the weight error (max, relative RMS), the logit drift and the argmax agreement over 8 positions |
+| `gpt2-qgguf <reference> <quantized.gguf>` *(1.6.0)* | a **llama.cpp-quantized GPT-2** (Q4_0 / Q4_1 / Q5_0 / Q5_1 / Q8_0; *(1.6.1)* the K-quants, e.g. `Q4_K_M`) against the unquantized import of the same checkpoint (HF safetensors, heads from a `config.json` beside it, or an F32 / F16 GGUF). Gates: same config, at least one block-typed tensor, NaN-free, batch == decode bit-identical, weights closer to the reference than zero is (relative RMS error < 1). Reported: the tensor types, the params that differ bit for bit *(1.6.1)*, the weight error (max, relative RMS), the logit drift and the argmax agreement over 8 positions. *(1.6.1)* `--fixture <fixture.bin>` adds the agreement with HF's argmax over the HF-oracle fixture's positions (48 for `tests/fixtures/gpt2_oracle_v1.bin`), for the file and for the reference |
 
 Exit code 0 = all gates PASS; 1 = a gate failed or an argument is missing (each
 command prints which); 2 = an unknown command or option *(1.2.2; an unknown
@@ -120,7 +120,11 @@ weights); the import holds ggml's dequantized values as f64.
 ### Fidelity — `src/oracle.cyr`
 `anuk_gpt2_oracle(model_path, fix_path)` → 0 | 1. Fixture format v1 documented
 at the module head; gate = exact argmax every position + last-row maxrel ≤
-`ORACLE_GATE_MAXREL()` (1e-5) + NaN-free.
+`ORACLE_GATE_MAXREL()` (1e-5) + NaN-free. *(1.6.1)*
+`anuk_oracle_agreement(fix_path, cfg, params, out)` → the positions whose argmax
+equals HF's | -1 — any imported model over the fixture's sequences; `out[0]` the
+positions compared, `out[1]` the worst last-row max |logit − HF's| (f64). Reported,
+not gated (`gpt2-qgguf --fixture`).
 
 ### LoRA — `src/lora.cyr`
 `lora_init(A, B, K, r, N, std)` (A gaussian via tyche, B zero) ·
@@ -152,7 +156,15 @@ byte-identical files. -1 for a source the importer would refuse or a failed writ
 *(1.6.0)* A block-typed GGUF tensor is written as **F32 holding exactly ggml's
 dequantized values** (each is an f32), so the file loads to what importing the
 GGUF gives; the source's block types are recorded as `anukulana.source.quant`
-(`"Q4_0"`, or a comma-separated list). Keeping the codes packed is later 1.6.x.
+(`"Q4_0"`, or a comma-separated list). *(1.6.1)* **Q8_0 is kept packed**, losslessly:
+the tensor is written as **INT8 codes** in HF's layout with an **F16 sidecar
+`<name>.scale`** holding ggml's block scales as they are, one per 32 codes along one
+axis. The sidecar's shape names the axis: `[d0/32, d1]` (blocks down dim 0, a
+Conv1D weight transposed back), `[d0, d1/32]` (along dim 1, an embedding) or
+`[d0/32]` (a vector); the two 2-D shapes can't coincide. A code `q` with scale `d`
+loads as `q × d`, exactly the GGUF import's value, so the reload stays
+bit-identical. Packed types are recorded as `anukulana.packed`. The other block
+types stay exact F32 until tula has a 4-bit dtype (tula 1.8).
 `anuk_tula_import(path, pk, T_run, cfg)` → params | 0 — open a converted file
 (strict validation, Ed25519 under `pk` required, kind/layout checked, `T_run` ≤
 the file's context; *(1.5.1)* `T_run = 0` is the file's context) and pack it
@@ -205,7 +217,8 @@ only, so the same inputs give byte-identical files:
 | `anukulana.adapter` | adapter | `{"C":…,"r":…,"V":…,"target":"lm_head"}` |
 | `anukulana.source.{name,bytes,format,sha256}` | checkpoint (`_src`) | the model file: basename, size, `safetensors` / `gguf` / `tula` / `unknown`, SHA-256 hex |
 | `anukulana.base.{name,bytes,format,sha256}` | adapter (`_src`) | the base checkpoint, likewise |
-| `anukulana.source.quant` *(1.6.0)* | converted model | the source GGUF's block types, dequantized to F32 (`Q8_0`, or a list such as `Q4_0,Q8_0`); absent for an unquantized source |
+| `anukulana.source.quant` *(1.6.0)* | converted model | the source GGUF's block types (`Q8_0`, or a list such as `Q4_K,Q6_K`); absent for an unquantized source |
+| `anukulana.packed` *(1.6.1)* | converted model | the block types kept packed (`Q8_0`: INT8 codes + an F16 `<name>.scale` sidecar); the rest of `source.quant` is exact F32; absent when nothing is packed |
 
 The key names are part of the file layout from 1.4.0; readers must tolerate keys
 they don't know. The loaders still read the `"cfg"` tensor, not the metadata.

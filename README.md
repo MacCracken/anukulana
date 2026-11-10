@@ -15,7 +15,7 @@ them: the weight **format** is `tula`; the transformer **forward** is `rupantara
 
 ## Status
 
-**1.6.0 — STABLE: the Type-3 reference, frozen at 1.0.0 + the GGUF door** ([`docs/api.md`](docs/api.md) +
+**1.6.1 — STABLE: the Type-3 reference, frozen at 1.0.0 + the GGUF door** ([`docs/api.md`](docs/api.md) +
 [`STABILITY.md`](STABILITY.md); parsers fuzz-gated, audited —
 [`SECURITY.md`](SECURITY.md) and the 2026-11-09 P(-1) sweep,
 [`docs/audit/2026-11-09-audit.md`](docs/audit/2026-11-09-audit.md); benchmarks captured). The charter (import → run →
@@ -36,7 +36,7 @@ plus the `blk.N.*` GPT-2 mapping; `gpt2-gguf` runs the real checkpoint through
 the second foreign door, and `gpt2-cross` proves **both doors bit-identical**
 (123.6M packed params / 402k logits, 0 diffs). The GGUF door now reads llama.cpp's
 quantized files: the legacy block types (Q4_0, Q4_1, Q5_0, Q5_1, Q8_0; 1.6.0) and the
-K-quants (Q2_K … Q6_K, so `Q4_K_M` and the other standard mixes; `[Unreleased]`),
+K-quants (Q2_K … Q6_K, so `Q4_K_M` and the other standard mixes; 1.6.1),
 each exactly as ggml dequantizes it; `gpt2-qgguf` reports the drift. The TinyLlama-class
 (llama-architecture) mapping is the next lane; see
 [`docs/development/roadmap.md`](docs/development/roadmap.md). The Cyrius pin and

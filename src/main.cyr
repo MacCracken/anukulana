@@ -28,7 +28,7 @@ fn usage(fd): i64 {
     _u(fd, "                                         — e.g. ifran's ~/.ifran/operator.sk)\n");
     _u(fd, "  gpt2-gguf <model.gguf>                import via GGUF + run (batch==decode gate)\n");
     _u(fd, "  gpt2-cross <model.safetensors> <model.gguf>   cross-format bit-identity gate\n");
-    _u(fd, "  gpt2-qgguf <reference> <quantized.gguf>\n");
+    _u(fd, "  gpt2-qgguf <reference> <quantized.gguf> [--fixture <fixture.bin>]\n");
     _u(fd, "                                        quantized GGUF: batch==decode gate + drift report\n");
     _u(fd, "  convert <model.{safetensors,gguf}> <out.tula> [--sk <operator.sk>]\n");
     _u(fd, "                                        signed tula copy at source precision (self-checked)\n");
@@ -167,8 +167,10 @@ fn _gpt2_cross(st_path, gg_path): i64 {
 #   decode is bit-identical; and its weights are closer to the reference than zero
 #   is (relative RMS error < 1; scrambled codes land near sqrt 2).
 #   Reported, not gated (as gpt2-qlora reports NF4): the tensor types, the weight
-#   error, the logit drift and the argmax agreement over T_run = 8 positions.
-fn _anuk_qgguf(ref_path, q_path): i64 {
+#   error, the logit drift and the argmax agreement over T_run = 8 positions; with
+#   fix_path (1.6.1, `--fixture`), the agreement with HF's argmax over the HF-oracle
+#   fixture's positions (48 for gpt2_oracle_v1.bin), a steadier measure than the 8.
+fn _anuk_qgguf(ref_path, q_path, fix_path): i64 {
     var r = gg_open_mmap(q_path);
     if (r == 0) { _anuk_eput("gpt2-qgguf: cannot open the quantized GGUF\n"); return 1; }
     var counts = alloc(32 * 8);                 # per ggml type id (gg_open admits < 32)
@@ -266,6 +268,16 @@ fn _anuk_qgguf(ref_path, q_path): i64 {
     _anuk_sput("logits vs reference (T_run=8): maxabs "); fmt_float(lmax, 4);
     _anuk_sput(", NaN "); _anuk_puti(lnan);
     _anuk_sput(", argmax agreement "); _anuk_puti(agree); _anuk_sput("/8\n");
+    if (fix_path != 0) {
+        var fo = alloc(16);
+        var qm = anuk_oracle_agreement(fix_path, cfgQ, pQ, fo);
+        if (qm < 0) { _anuk_eput("gpt2-qgguf: --fixture: unreadable, or not this model's\n"); return 1; }
+        var rm = anuk_oracle_agreement(fix_path, cfgR, pR, alloc(16));
+        _anuk_sput("fixture ("); _anuk_puti(load64(fo)); _anuk_sput(" positions): argmax == HF's at ");
+        _anuk_puti(qm); _anuk_sput("/"); _anuk_puti(load64(fo));
+        _anuk_sput(" (reference "); _anuk_puti(rm); _anuk_sput("/"); _anuk_puti(load64(fo));
+        _anuk_sput("), worst last-row maxabs vs HF "); fmt_float(load64(fo + 8), 4); _anuk_sput("\n");
+    }
     var ok = 1;
     if (load64(wd + 16) != 0 || lnan != 0) { _anuk_sput("FAIL: NaN in the quantized import or its logits\n"); ok = 0; }
     if (diffs != 0) { _anuk_sput("FAIL: batch != decode on the quantized import\n"); ok = 0; }
@@ -331,8 +343,13 @@ fn _anuk_convert(src, out, sk_path): i64 {
             cyr_munmap(load64(gr), load64(gr + 8));
         }
         _anuk_sput("source: GGUF");
-        if (dq != 0) {
-            _anuk_sput(", block types "); _anuk_sput(_cv_quant_list(dq)); _anuk_sput(" dequantized exactly to F32");
+        var pq = dq & (1 << GG_T_Q8_0());                # kept packed (1.6.1)
+        var fq = dq & ~(1 << GG_T_Q8_0());               # dequantized to F32
+        if (pq != 0) {
+            _anuk_sput(", "); _anuk_sput(_cv_quant_list(pq)); _anuk_sput(" kept packed (INT8 + F16 block scales)");
+        }
+        if (fq != 0) {
+            _anuk_sput(", block types "); _anuk_sput(_cv_quant_list(fq)); _anuk_sput(" dequantized exactly to F32");
         }
         _anuk_sput("\n");
         rc = anuk_convert_gguf(src, out, load64(skc));
@@ -370,7 +387,7 @@ fn _anuk_convert(src, out, sk_path): i64 {
     _anuk_sput(", diffs="); _anuk_puti(diffs); _anuk_sput("\n");
     if (diffs == 0) {
         if (dq != 0) {
-            _anuk_sput("RESULT: converted (block types as their exact F32 values), signed; ");
+            _anuk_sput("RESULT: converted (block types packed or as their exact F32 values), signed; ");
         } else {
             _anuk_sput("RESULT: converted at source precision, signed; ");
         }
@@ -470,7 +487,16 @@ fn main(): i64 {
     }
     if (streq(cmd, "gpt2-qgguf") == 1) {
         if (_need(4, "anukulana: gpt2-qgguf needs <reference model> <quantized.gguf>\n") == 0) { return 1; }
-        return _anuk_qgguf(argv(2), argv(3));
+        var qfix = 0;
+        if (argc() >= 5) {
+            if (streq(argv(4), "--fixture") == 0 || argc() > 6) {
+                _anuk_eput("anukulana: gpt2-qgguf: unknown option (only --fixture <fixture.bin>)\n");
+                return 2;
+            }
+            if (_need(6, "anukulana: --fixture needs a <fixture.bin>\n") == 0) { return 1; }
+            qfix = argv(5);
+        }
+        return _anuk_qgguf(argv(2), argv(3), qfix);
     }
     if (streq(cmd, "convert") == 1) {
         if (_need(4, "anukulana: convert needs <model.{safetensors,gguf}> <out.tula> [--sk <key>]\n") == 0) {

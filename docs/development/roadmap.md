@@ -5,7 +5,7 @@
 > **reference binary**: it consumes tula (format), rupantara (forward), rosnet (tensors) and
 > sigil (Ed25519), and does not reinvent them.
 >
-> **Where it stands (1.6.0, 2026-11-09).** The whole charter is built and gated on the real GPT-2
+> **Where it stands (1.6.1, 2026-11-09).** The whole charter is built and gated on the real GPT-2
 > checkpoint: import (safetensors and GGUF, bit-identical across both), run, match HF
 > (`gpt2-oracle`), adapt (LoRA, QLoRA/NF4) and persist (signed tula files). All seven commands were
 > re-proven at the current pin in 1.3.0, and 1.4.0 shipped the tula 1.2–1.6 surface (checked adds,
@@ -13,20 +13,22 @@
 > real-weights workflow has run green, and so has the 1.4.0 release, which gates on the `bounds` and
 > native `aarch64` CI jobs. 1.5.0 shipped `convert` (a signed tula copy at source precision, both doors
 > bit-identical) and `gpt2-load`. 1.5.1 moved onto rupantara 0.6.1: one full-context import serves every
-> run length, and all nine real-checkpoint commands pass through it. 1.6.0 reads GGUF's legacy
-> quantized block types (Q4_0 … Q8_0) exactly as ggml dequantizes them. The API froze at 1.0.0.
+> run length, and all nine real-checkpoint commands pass through it. 1.6.0 and 1.6.1 finished the
+> quantized GGUF door: the legacy block types and the K-quants, each matching ggml's own dequantization
+> on the real GPT-2 (0 params differing), packed Q8_0 in `convert`, and a manual CI job for the GGUF
+> gates. The API froze at 1.0.0.
 >
-> **What is next (reprised 2026-11-09, after 1.5.1).** Every dependency is at its latest tag (cyrius
-> 6.7.18; sigil 3.13.15, tula 1.6.1, rosnet 1.4.1, rupantara 0.6.1). rupantara's 0.6.x is complete, and
-> its 0.7.x, which the old 1.6.x line waited on, has not started. So the order is now:
+> **What is next (after 1.6.1).** 1.6.x is complete. Every dependency is at its latest tag (cyrius
+> 6.7.18; sigil 3.13.15, tula 1.6.1, rosnet 1.4.1, rupantara 0.6.1), and both numbered lines left wait
+> on rupantara:
 >
-> 1. **1.6.x, quantized GGUF payloads** (moved up from 1.7.x). Nothing upstream blocks it. 1.6.0
->    shipped the legacy block types and the K-quants are in `[Unreleased]`; packed `convert` and a
->    steadier drift measure remain.
-> 2. **1.7.x, onto rupantara 0.7 → 1.0.** What remains of the old 1.6.x line; it lands as rupantara
->    ships.
-> 3. **1.8.x, the llama architecture.** It waits for rupantara's architecture breadth, which rupantara
+> 1. **1.7.x, onto rupantara 0.7 → 1.0.** It lands as rupantara ships its 0.7.x, which hasn't started.
+> 2. **1.8.x, the llama architecture.** It waits for rupantara's architecture breadth, which rupantara
 >    schedules after its 1.0.
+>
+> Until then the unblocked work is anukulana's own in 1.x.x: the bit-identical `lora_adam` hoist and
+> duplicate-name detection in safetensors headers. The asks to other repos are in Gates / relations;
+> filing them needs the maintainer's go.
 >
 > This file lists **remaining work only**. Shipped work is in the [CHANGELOG](../../CHANGELOG.md),
 > [`state.md`](state.md) and the audits ([2026-07-04](../audit/2026-07-04-audit.md),
@@ -70,46 +72,11 @@
 
 ---
 
-## 1.6.x — quantized GGUF payloads (next: nothing upstream blocks it)
-
-**Goal:** the GGUF door reads llama.cpp's quantized files.
-
-**The decoders are done.** 1.6.0 shipped the legacy block types (Q4_0, Q4_1, Q5_0, Q5_1, Q8_0). The
-K-quants (Q2_K … Q6_K, so llama.cpp's standard mixes) are in `[Unreleased]`. Every type is checked
-three ways:
-
-- against gguf-py's `dequantize` on committed fixtures of random blocks;
-- against ggml's own dequantization on all 124,439,808 params of a real GPT-2: 0 differ in each of
-  the ten formats;
-- by fuzz rounds against the guard page.
-
-The real K-quant files come from llama.cpp's `llama-quantize`, built at test time at a pinned tag by
-`tests/oracle/gen_kquants.sh` (the maintainer's call, 2026-11-09). What remains:
-
-- **`convert` keeps the codes packed where tula can hold them.** Today it writes them as exact F32: the
-  converted GPT-2 is 497.8 MB whatever the type, 3.7× the Q8_0 file and 6.8× the Q4_0 one.
-  - **Q8_0:** tula `INT8` codes plus a per-block `w.scale` sidecar holding the f16 scales, which is
-    lossless. tula's ADR 0002 lists per-tensor and per-row int8 scales, and NF4's scales are already
-    per-block. The convention is the consumer's to own, so record it in `docs/api.md` and tell tula.
-    The loader then decodes it as the GGUF door does.
-  - **4-bit and K-quant data** waits for tula 1.8's int4 (gated on tula). Its ADR chooses between
-    inline f16 scales and a sidecar.
-- **A steadier drift measure.** `gpt2-qgguf` compares argmax over the 8-position demo input, whose
-  top-1 / top-2 margins are 0.02 to 1.1 logits, so even Q5_1 agrees on only 2 of 8 and Q4_K_M on 6.
-  Run it over the oracle fixture's 48 positions as well, and report the agreement with HF's argmax
-  there.
-- **The GGUF gates in CI (optional).** `gpt2-gguf`, `gpt2-cross` and `gpt2-qgguf` run locally only,
-  because their files come from a Python venv and, now, a llama.cpp build (about 2 minutes). A
-  `realweights.yml` job could make both. ⚠ The maintainer's call: it adds pip and cmake steps to a
-  workflow that has none today.
-- **Acceptance:** the Q8_0 convert is packed and lossless; the drift is reported over the 48 fixture
-  positions.
-
 ## 1.7.x — onto rupantara 0.7 → 1.0 (gated on rupantara)
 
 rupantara's 0.7.x settles the API shape that its 1.0 freeze will lock. It has not started: rupantara's
 latest tag is 0.6.1, and its roadmap names 0.7.x as next. Each item lands in whichever anukulana minor
-is current when rupantara ships it, so one that arrives during 1.6.x rides along there.
+is current when rupantara ships it.
 
 - **The config descriptor's growth path.** anukulana sizes every `cfg` at 64 bytes, stores it in
   checkpoints as F64 `[8]`, and its public entries take a caller-allocated `cfg`. If rupantara grows
@@ -148,6 +115,15 @@ missing is the forward and the mapping.
   adapt over the import.
 
 ## 1.x.x — later (unscheduled, demand-gated)
+
+- **Packed 4-bit and K-quant data in `convert`** — gated on tula 1.8's int4. 1.6.1 keeps Q8_0 packed
+  (INT8 + F16 block scales); the other block types are written as exact F32, so their converted
+  GPT-2 is 497.8 MB whatever the type. tula's int4 ADR chooses between inline f16 scales and a
+  sidecar; anukulana follows it.
+- **Text in, text out also gives quantization a real drift measure.** `gpt2-qgguf --fixture`
+  measures argmax agreement over 48 positions, but they are integer patterns, and 38 of them have a
+  top-2 margin under 1 logit. Text prompts would measure the drift properly (see the akshara item
+  below).
 
 - **The head-adapter training step: about 30 ms, 24 s for 800 steps** (1.3.0 profile, T=8, C=768,
   V=50257, r=8), so it is now most of `gpt2-lora` (26.6 s), `gpt2-qlora` and `gpt2-tula`. It is about
@@ -215,7 +191,7 @@ additive path. Nothing here is scheduled.
 - **Upstream gates on this plan:**
   - rupantara 0.7 / 0.8 / 1.0 (1.7.x);
   - rupantara's architecture breadth, after its 1.0 (1.8.x);
-  - tula 1.8 int4 (1.6.x, the 4-bit half of `convert`);
+  - tula 1.8 int4 (1.x.x, the 4-bit half of `convert`);
   - akshara, a pretrained vocabulary (1.x.x, text in, text out);
   - rosnet, quantized linears (1.x.x).
 
@@ -231,7 +207,8 @@ additive path. Nothing here is scheduled.
   - **rupantara and ganita:** the `ru_softmax_fwd` / `f64_exp` cost in the adapter step (1.x.x).
   - **akshara:** a pretrained-vocabulary mode for GPT-2 (1.x.x).
   - **rupantara:** the layout-helper count is 29, not the 22 its 0.7.x item says (1.7.x).
-  - **tula:** the per-block int8 scale convention, once 1.6.x uses it.
+  - **tula:** the per-block int8 scale convention, in use since 1.6.1: INT8 codes plus an F16
+    `<name>.scale` sidecar, one scale per 32 codes along one axis (`docs/api.md`, Convert).
 - **Boundary:** training/backward → attn11 · QAT → tentib · the format → tula · the forward →
   rupantara · sampling beyond greedy → the Type-2 reference. Rotation-PTQ and one-shot sparsity stay
   research-watch.

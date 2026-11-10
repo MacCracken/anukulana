@@ -71,11 +71,72 @@ fn _gs_read(src, e, start, n, dst): i64 {
     return st_read_f64_range(load64(src + 8), e, start, n, dst);
 }
 
+# A packed Q8_0 tensor's sidecar (1.6.1): for INT8 codes e (1-D or 2-D), the F16
+# tensor named `<e's name>.scale` holding one scale per 32 codes along one axis
+# (src/convert.cyr's _cv_gg_q8_pack). Its shape names the axis: [d0 / 32] for a
+# vector or [d0 / 32, d1] (axis 0), or [d0, d1 / 32] (axis 1); the two can't
+# coincide. Stores the axis in axis_out and returns the sidecar entry, or 0 when
+# there is none, it isn't F16, or its shape is neither.
+fn _anuk_q8_sidecar(r, e, axis_out): i64 {
+    var nm = tula_entry_full_name(r, e);
+    var n = strlen(nm);
+    var sn = alloc(n + 8);
+    memcpy(sn, nm, n);
+    memcpy(sn + n, ".scale", 7);
+    var s = tula_find_name(r, sn);
+    if (s == 0) { return 0; }
+    if (tula_entry_dtype(s) != TULA_DT_F16) { return 0; }
+    var nd = tula_entry_ndim(e);
+    if (tula_entry_ndim(s) != nd) { return 0; }
+    var d0 = tula_entry_dim(e, 0);
+    store64(axis_out, 0);
+    if (nd == 1) {
+        if (d0 % 32 == 0 && tula_entry_dim(s, 0) == d0 / 32) { return s; }
+        return 0;
+    }
+    if (nd != 2) { return 0; }
+    var d1 = tula_entry_dim(e, 1);
+    if (d0 % 32 == 0 && tula_entry_dim(s, 0) == d0 / 32 && tula_entry_dim(s, 1) == d1) { return s; }
+    store64(axis_out, 1);
+    if (d1 % 32 == 0 && tula_entry_dim(s, 0) == d0 && tula_entry_dim(s, 1) == d1 / 32) { return s; }
+    return 0;
+}
+# elements [start, start + n) of a packed Q8_0 tensor e -> dst: code q times its
+# block's f16 scale, the product _gg_deq_q8_0 forms, so the values are exactly the
+# GGUF import's. Returns 0, or -1 without a valid sidecar.
+fn _anuk_q8_read(r, e, start, n, dst): i64 {
+    var axc[8];
+    var s = _anuk_q8_sidecar(r, e, &axc);
+    if (s == 0) { return 0 - 1; }
+    var axis = load64(&axc);
+    var codes = tula_entry_data(r, e);
+    var sc = tula_entry_data(r, s);
+    var d1 = 1;
+    if (tula_entry_ndim(e) == 2) { d1 = tula_entry_dim(e, 1); }
+    var last = 0 - 1;
+    var d = 0;
+    var k = 0;
+    while (k < n) {
+        var f = start + k;
+        var i = f / d1;
+        var j = f % d1;
+        var si = (i / 32) * d1 + j;                  # axis 0 (and a vector, d1 = 1)
+        if (axis == 1) { si = i * (d1 / 32) + j / 32; }
+        if (si != last) { d = _gg_f16(sc + si * 2); last = si; }
+        var q = load8(codes + f);
+        if (q >= 128) { q = q - 256; }
+        store64(dst + k * 8, f64_mul(f64_from(q), d));
+        k = k + 1;
+    }
+    return 0;
+}
+
 # Read elements [start, start + n) of tula entry e into dst as f64 (1.5.0): F64
-# copied, F32 / F16 / BF16 widened by the safetensors path's bulk wideners. Returns
-# 0, or -1 for a range outside the tensor or a dtype that isn't a float weight.
-# The payload's length is the reader's to have checked (tula_validate_strict
-# requires it to be exactly the dtype's size for the shape).
+# copied, F32 / F16 / BF16 widened by the safetensors path's bulk wideners, and
+# (1.6.1) INT8 with a `.scale` sidecar decoded as packed Q8_0 (_anuk_q8_read).
+# Returns 0, or -1 for a range outside the tensor or a dtype that isn't a float
+# weight. The payload's length is the reader's to have checked
+# (tula_validate_strict requires it to be exactly the dtype's size for the shape).
 fn anuk_tula_read_f64_range(r, e, start, n, dst): i64 {
     var total = tula_entry_nelems(e);
     if (start < 0 || n < 0) { return 0 - 1; }
@@ -87,6 +148,7 @@ fn anuk_tula_read_f64_range(r, e, start, n, dst): i64 {
     if (dt == TULA_DT_F32) { _st_widen_f32(src + start * 4, dst, n); return 0; }
     if (dt == TULA_DT_F16) { _st_widen_f16(src + start * 2, dst, n); return 0; }
     if (dt == TULA_DT_BF16) { _st_widen_bf16(src + start * 2, dst, n); return 0; }
+    if (dt == TULA_DT_INT8) { return _anuk_q8_read(r, e, start, n, dst); }
     return 0 - 1;
 }
 

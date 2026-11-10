@@ -68,6 +68,57 @@ fn _cv_gg_dequant(r, e, dst, d0, d1, tr, rowbuf): i64 {
     return 0;
 }
 
+# A Q8_0 GGUF tensor e kept PACKED (1.6.1): its int8 codes into `codes` in HF's
+# layout ([d0, d1], or [d0] for a vector) and its f16 block scales into `scales`,
+# both copied as they are, so nothing is rounded. Each scale covers 32 codes along
+# one axis of the HF tensor, and the scale tensor's shape says which (the
+# convention anuk_tula_read_f64_range reads back):
+#   tr = 1, a Conv1D weight (ggml's [out, in] rows transposed back): code (i, o) is
+#     weight i of ggml row o, so blocks run down HF dim 0 and the scale of (i, o) is
+#     at [i / 32, o] in a [d0 / 32, d1] scale tensor;
+#   tr = 0, an embedding (ggml rows are HF rows): blocks run along dim 1, and the
+#     scale of (r, c) is at [r, c / 32] in a [d0, d1 / 32] scale tensor;
+#   a vector: the scale of i is at [i / 32] in a [d0 / 32] scale tensor.
+fn _cv_gg_q8_pack(r, e, codes, scales, d0, d1, tr): i64 {
+    var p = gg_entry_data(r, e);
+    if (d1 == 0 || tr == 0) {                        # ggml's order is HF's: copy block by block
+        var nb = gg_entry_nelems(e) / 32;
+        var b = 0;
+        while (b < nb) {
+            memcpy(scales + b * 2, p + b * 34, 2);
+            memcpy(codes + b * 32, p + b * 34 + 2, 32);
+            b = b + 1;
+        }
+        return 0;
+    }
+    var bpr = d0 / 32;                               # blocks per ggml row (d0 = in)
+    var o = 0;
+    while (o < d1) {
+        var c = 0;
+        while (c < bpr) {
+            var blk = p + (o * bpr + c) * 34;
+            memcpy(scales + (c * d1 + o) * 2, blk, 2);
+            var k = 0;
+            while (k < 32) {
+                store8(codes + (c * 32 + k) * d1 + o, load8(blk + 2 + k));
+                k = k + 1;
+            }
+            c = c + 1;
+        }
+        o = o + 1;
+    }
+    return 0;
+}
+
+# `name` + ".scale", the sidecar name of a packed tensor (a fresh string)
+fn _cv_scale_name(name): i64 {
+    var n = strlen(name);
+    var s = alloc(n + 8);
+    memcpy(s, name, n);
+    memcpy(s + n, ".scale", 7);
+    return s;
+}
+
 # The block types present in `mask` (bit t set for ggml type t), as text such as
 # "Q4_0,Q8_0", for anukulana.source.quant.
 fn _cv_quant_list(mask): i64 {
@@ -160,7 +211,8 @@ fn _cv_finish(b, cfg, src_path, out_path, sk): i64 {
 }
 
 # a builder sized for the GPT-2 tensor set plus cfg, the metadata and names tables
-fn _cv_builder(cfg): i64 { return tula_builder_new_cap(4 + 12 * _cfg_NL(cfg) + 4); }
+# (1.6.1: room for a .scale sidecar beside every tensor)
+fn _cv_builder(cfg): i64 { return tula_builder_new_cap(2 * (4 + 12 * _cfg_NL(cfg)) + 4); }
 
 # ---- the safetensors door ------------------------------------------------------
 # Convert the HF GPT-2 safetensors at `src_path` (nh heads: safetensors doesn't
@@ -248,10 +300,12 @@ fn _cv_transpose(src, dst, d0, d1, esz): i64 {
 # Convert a llama.cpp GPT-2 GGUF at `src_path` into a signed tula file at
 # `out_path`, in HF GPT-2's names and shapes: 2-D weights transposed back from
 # [out, in], everything in its source dtype (F32 / F16). A block-typed tensor
-# (1.6.0: Q4_0 / Q4_1 / Q5_0 / Q5_1 / Q8_0) is written as F32 holding exactly
-# ggml's dequantized values, so the file loads to what importing the GGUF gives;
-# the types are recorded as anukulana.source.quant. The full context is kept.
-# Returns 0, or -1 as for anuk_convert_safetensors.
+# (1.6.0) is written as F32 holding exactly ggml's dequantized values, so the file
+# loads to what importing the GGUF gives, except Q8_0, which is kept packed (1.6.1:
+# INT8 codes plus an F16 `<name>.scale` sidecar, _cv_gg_q8_pack), losslessly. The
+# source's block types are recorded as anukulana.source.quant and the packed ones as
+# anukulana.packed. The full context is kept. Returns 0, or -1 as for
+# anuk_convert_safetensors.
 fn anuk_convert_gguf(src_path, out_path, sk): i64 {
     var r = gg_open_mmap(src_path);
     if (r == 0) { return 0 - 1; }
@@ -266,9 +320,10 @@ fn anuk_convert_gguf(src_path, out_path, sk): i64 {
     var dims = alloc(16);
     var tr = alloc(8);
     var n = 4 + 12 * _cfg_NL(cfg);
-    var bufs = alloc(n * 16);                 # (ptr, bytes) of each transposed copy
+    var bufs = alloc(n * 32);                 # (ptr, bytes) of each copy made, 2 per tensor at most
     var nbufs = 0;
     var qmask = 0;                            # the block types met (bit = ggml type)
+    var pmask = 0;                            # the ones kept packed (1.6.1: Q8_0)
     var rowbuf = t_alloc(3 * _cfg_C(cfg) + _cfg_F(cfg));   # any row: C, F or the 3C qkv bias
     var rc = 0;
     var i = 0;
@@ -298,7 +353,32 @@ fn anuk_convert_gguf(src_path, out_path, sk): i64 {
             var nbytes = gg_entry_nelems(e) * esz;
             var data = gg_entry_data(r, e);
             var gt = gg_entry_gtype(e);
-            if (gg_type_is_quant(gt) == 1) {
+            var sname = 0;                    # a packed tensor's sidecar
+            var sdata = 0;
+            var snb = 0;
+            var sshp = 0;
+            if (gt == GG_T_Q8_0()) {
+                qmask = qmask | (1 << gt);
+                pmask = pmask | (1 << gt);
+                dt = TULA_DT_INT8;
+                nbytes = gg_entry_nelems(e);
+                snb = (nbytes / 32) * 2;
+                var cq = mmap_anon(nbytes);
+                var cs = mmap_anon(snb);
+                if (cq == 0 || cs == 0) { rc = 0 - 1; }
+                else {
+                    store64(bufs + nbufs * 16, cq); store64(bufs + nbufs * 16 + 8, nbytes);
+                    store64(bufs + nbufs * 16 + 16, cs); store64(bufs + nbufs * 16 + 24, snb);
+                    nbufs = nbufs + 2;
+                    _cv_gg_q8_pack(r, e, cq, cs, d0, d1, load64(tr));
+                    data = cq;
+                    sdata = cs;
+                    sname = _cv_scale_name(name);
+                    sshp = _nfs_shp1(d0 / 32);
+                    if (d1 != 0 && load64(tr) == 1) { sshp = _nfs_shp2(d0 / 32, d1); }
+                    if (d1 != 0 && load64(tr) == 0) { sshp = _nfs_shp2(d0, d1 / 32); }
+                }
+            } elif (gg_type_is_quant(gt) == 1) {
                 qmask = qmask | (1 << gt);
                 var q = mmap_anon(nbytes);
                 if (q == 0) { rc = 0 - 1; }
@@ -325,12 +405,18 @@ fn anuk_convert_gguf(src_path, out_path, sk): i64 {
                 var shp = _nfs_shp1(d0);
                 if (d1 != 0) { nd = 2; shp = _nfs_shp2(d0, d1); }
                 if (tula_builder_add_checked(b, _cv_dup(name), dt, shp, nd, data, nbytes) != 0) { rc = 0 - 1; }
+                if (rc == 0 && sname != 0) {
+                    if (tula_builder_add_checked(b, sname, TULA_DT_F16, sshp, nd, sdata, snb) != 0) { rc = 0 - 1; }
+                }
             }
         }
         i = i + 1;
     }
     if (rc == 0 && qmask != 0) {
         if (tula_builder_set_meta(b, "anukulana.source.quant", _cv_quant_list(qmask)) != 0) { rc = 0 - 1; }
+    }
+    if (rc == 0 && pmask != 0) {
+        if (tula_builder_set_meta(b, "anukulana.packed", _cv_quant_list(pmask)) != 0) { rc = 0 - 1; }
     }
     if (rc == 0) { rc = _cv_finish(b, cfg, src_path, out_path, sk); }
     var k = 0;

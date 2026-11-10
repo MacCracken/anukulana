@@ -3,7 +3,7 @@ include "src/lib.cyr"
 include "lib/assert.cyr"
 
 fn test_version() {
-    assert_eq(anukulana_version(), 10600, "version 1.6.0 packs to 10600");
+    assert_eq(anukulana_version(), 10601, "version 1.6.1 packs to 10601");
     return 0;
 }
 

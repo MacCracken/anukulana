@@ -6,15 +6,26 @@ moving, no API freeze until v1.0).
 
 ## [Unreleased]
 
-The roadmap's 1.6.x K-quants: the GGUF door reads Q2_K, Q3_K, Q4_K, Q5_K and Q6_K, so llama.cpp's
-standard mixes import (`Q2_K`, `Q3_K_M`, `Q4_K_M`, `Q5_K_M`, `Q6_K`). The real K-quant files come
-from llama.cpp's own `llama-quantize`, built at test time at a pinned release (the maintainer's
-call, 2026-11-09). That also gives 1.6.0's legacy types a check against ggml itself.
+## [1.6.1] - 2026-11-09
 
-- **On the real GPT-2, all ten formats match ggml's own dequantization:** 0 of 124,439,808 params
-  differ in any of them.
-- **Additive, as in 1.6.0:** files that used to be refused now open. No frozen signature, gate or
-  exit code changed. Every earlier result is unchanged; the Q6_K speed-up below is bit-identical.
+The rest of the roadmap's 1.6.x line, the quantized GGUF door.
+
+- **The K-quants:** the GGUF door reads Q2_K, Q3_K, Q4_K, Q5_K and Q6_K, so llama.cpp's standard
+  mixes import (`Q2_K`, `Q3_K_M`, `Q4_K_M`, `Q5_K_M`, `Q6_K`). The real K-quant files come from
+  llama.cpp's own `llama-quantize`, built at test time at a pinned release (the maintainer's call,
+  2026-11-09).
+- **Checked against ggml itself:** on the real GPT-2, all ten formats (1.6.0's legacy types
+  included) match ggml's own dequantization, with 0 of 124,439,808 params differing in each.
+- **`convert` keeps Q8_0 packed**, losslessly: INT8 codes and their F16 block scales. A Q8_0 GPT-2
+  converts to 134.9 MB instead of 497.8 MB, in 25 s instead of about 80 s.
+- **`gpt2-qgguf --fixture`** measures drift over the HF-oracle fixture's 48 positions.
+- **A manual `gguf` CI job** runs the GGUF door's gates.
+
+**Additive, as in 1.6.0.** Files that used to be refused now open, and there are new options,
+functions and a metadata key. No frozen signature, gate or exit code changed, and every earlier
+result is unchanged; the Q6_K speed-up below is bit-identical. A Q8_0 GGUF's converted file now
+holds INT8 tensors instead of F32 ones, and loads to the same params. Toolchain and dependencies
+are unchanged (cyrius 6.7.18; sigil 3.13.15, tula 1.6.1, rosnet 1.4.1, rupantara 0.6.1).
 
 ### Added
 
@@ -35,6 +46,31 @@ call, 2026-11-09). That also gives 1.6.0's legacy types a check against ggml its
     (`--allow-requantize … F32`, ggml's `dequantize_row_*`).
 - **`gpt2-qgguf` reports the params that differ bit for bit.** Against a ggml-dequantized
   reference that count must be 0.
+- **`convert` keeps Q8_0 packed.**
+  - **Layout:** each Q8_0 tensor is written as INT8 codes in HF's layout, plus an F16 sidecar
+    `<name>.scale` holding ggml's block scales unchanged, one per 32 codes.
+  - **The scale's shape names the block axis:** `[d0/32, d1]` for a Conv1D weight (blocks run down
+    dim 0 once transposed back), `[d0, d1/32]` for an embedding, `[d0/32]` for a vector. The two
+    2-D shapes can't coincide.
+  - **Loading:** the tula door decodes `q × d`, the GGUF import's own product, so the reload stays
+    bit-identical. An INT8 tensor without a valid sidecar is refused.
+  - **Metadata:** a new key, `anukulana.packed`, records the packed types.
+  - **The other block types stay exact F32** until tula has a 4-bit dtype (tula 1.8).
+  - **On the real Q8_0 GPT-2:** the file is 134.9 MB, against 497.8 MB as F32. `convert` takes
+    25.4 s, mostly signing, and `gpt2-load` 10.6 s, against about 80 s and 28.5 s for an F32
+    convert.
+- **`gpt2-qgguf … --fixture <fixture.bin>` and `anuk_oracle_agreement(fix_path, cfg, params, out)`.**
+  - **What it reports:** argmax agreement with HF over the HF-oracle fixture's positions (48 for
+    `gpt2_oracle_v1.bin`), for the quantized file and for the reference, plus the worst last-row
+    logit gap to HF. Reported, not gated.
+- **`realweights.yml` gains a manual `gguf` job.** It:
+  - fetches `config.json` at the pinned revision, sha256-checked;
+  - writes the F32 and legacy GGUFs in a Python venv (`actions/setup-python` pinned by commit;
+    gguf 0.19.0, numpy 2.5.4, safetensors 0.8.0);
+  - builds `llama-quantize` through `gen_kquants.sh`, with a cache for the build;
+  - runs `gpt2-gguf` and `gpt2-cross`, then for every quantized file `gpt2-gguf`, the
+    ggml-dequantization check (it fails unless 0 params differ) and `gpt2-qgguf --fixture`;
+  - converts and loads the Q8_0 file.
 
 ### Changed
 
@@ -48,6 +84,9 @@ call, 2026-11-09). That also gives 1.6.0's legacy types a check against ggml its
 - **Q6_K decoding computes its 16 `d * scale` products once per superblock**, instead of four times
   per weight position. The values are the same, so it is bit-identical, and 1M weights take 5.4 ms
   instead of 9.6 ms.
+- **`convert`'s report** names the types it kept packed and the ones it dequantized.
+- **`anukulana_version()` `10600` → `10601`.** Files written by this release record
+  `anukulana.version = 1.6.1`. The `smoke.tcyr` assertion moves with it.
 
 ### Tests
 
@@ -61,15 +100,25 @@ call, 2026-11-09). That also gives 1.6.0's legacy types a check against ggml its
   - a GPT-2 round trip in each K-quant at C = 256, bit-identical params and logits, through a
     test-side encoder (`_ggw_kblock`, fixed scales);
   - the rejects: half a superblock, a short payload, a 32-weight row.
-- **`tests/tcyr/convert.tcyr`:** Q4_K and Q6_K convert to files that reload bit-identical and match
-  the F32 safetensors twin byte for byte.
+- **`tests/tcyr/convert.tcyr`:**
+  - Q4_K and Q6_K convert to files that reload bit-identical and match the F32 safetensors twin
+    byte for byte.
+  - A Q8_0 GPT-2 converts packed: INT8 tensors, with `.scale` sidecars of the right shapes along
+    both axes, `anukulana.packed`, and a reload equal to the exported params.
+  - The convention read directly: both axes, a vector and an unaligned sub-range. Refused: INT8
+    with no sidecar, an F32 sidecar, and a sidecar of neither shape.
+  - `_cv_gg_q8_pack` against the GGUF reader, with a different scale per block in both
+    orientations. This test was added after a scale-order mutant survived the fixed-scale round
+    trips; it now fails.
 - **`tests/tcyr/fuzz.tcyr`:** the 1.6.0 rounds run again over a five-K-quant image (ne0 = 512), and a
   Q6_K over-read mutant faults at the guard page.
 - **Mutation:** ten K-quant mutants all fail `gguf.tcyr`: the f32 rounding, a min nibble, Q3_K's
   scale and hmask bits, `get_scale_min_k4`, Q5_K's high bit, Q6_K's high bits and scale index, and
   the superblock check.
-- **Totals:** 628 assertions in 10 suites (482 before). The GGUF, fuzz and convert suites pass on
-  aarch64 under qemu. fmt, lint (0 warnings), vet and doc are clean.
+- **Mutation, the packed path:** the read's axis-1 index, unsigned codes, the pack's code order and
+  its scale order all fail `convert.tcyr`.
+- **Totals:** 652 assertions in 10 suites (482 at 1.6.0). The GGUF, fuzz and convert suites pass
+  on aarch64 under qemu. fmt, lint (0 warnings), vet and doc are clean.
 - **Real checkpoint:** the five mixes from `gen_kquants.sh`, plus 1.6.0's legacy files regenerated
   with the new KV.
   - **ggml's dequantization:** `gpt2-qgguf <ggml-f32> <file>` reports 0 params differing and 0
@@ -92,6 +141,29 @@ call, 2026-11-09). That also gives 1.6.0's legacy types a check against ggml its
 
   - **Each imports and runs** with batch == decode bit-identical (`gpt2-gguf` on Q4_K_M: 3.2 s).
     `convert` of Q4_K_M takes 91.9 s and reloads bit-identical; `gpt2-load` takes 30.5 s.
+  - **The `gguf` job's quantized-file loop and Q8_0 step, run locally as written:** all ten files
+    pass `gpt2-gguf` and the ggml check with 0 params differing, and the packed Q8_0 convert and
+    `gpt2-load` pass.
+  - **Agreement with HF's argmax over the fixture's 48 positions** (`--fixture`; the reference is
+    48/48 every time):
+
+    | Format | Agreement | Worst last-row logit gap |
+    |---|---|---|
+    | Q8_0 | 41/48 | 1.23 |
+    | Q4_K_M | 39/48 | 6.59 |
+    | Q6_K | 37/48 | 3.56 |
+    | Q3_K_M | 36/48 | 4.22 |
+    | Q5_K_M | 35/48 | 4.75 |
+    | Q2_K | 24/48 | 12.12 |
+    | Q5_1 | 21/48 | 8.66 |
+    | Q4_1 | 14/48 | 18.93 |
+    | Q4_0 | 12/48 | 15.63 |
+    | Q5_0 | 10/48 | 8.68 |
+
+    **This is steadier than 8 positions, but still a near-tie measure.** The fixture's inputs are
+    integer patterns too: 38 of its 48 positions have a top-1 / top-2 margin under 1 logit, and 22
+    under 0.5. So even Q8_0's 1.2-logit drift flips 7 of them, and the order between neighbouring
+    formats is noise. Text inputs, once akshara can tokenize GPT-2, would measure it properly.
 
 ## [1.6.0] - 2026-11-09
 
