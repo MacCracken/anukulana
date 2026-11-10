@@ -1,9 +1,19 @@
 # anukulana — Current State
 
-> **Last refresh**: 2026-11-09 (1.5.1) | **Cadence**: every release.
+> **Last refresh**: 2026-11-09 (1.6.0) | **Cadence**: every release.
 > `CLAUDE.md` is preferences/process; this file is volatile state.
 
 ## Version
+
+**1.6.0 — 2026-11-09 (the GGUF legacy block types).**
+- **What changed:** the GGUF door reads Q4_0, Q4_1, Q5_0, Q5_1 and Q8_0 and dequantizes them
+  exactly as ggml does. That holds bit for bit against gguf-py's `dequantize`, both on a committed
+  fixture of random blocks and on all 124,439,808 params of a real GPT-2 in each type.
+- **New:** `gpt2-qgguf` gates batch == decode and reports the drift against the F32 import, and
+  `convert` writes a quantized GGUF as exact F32 (`anukulana.source.quant`).
+- **Drift on the demo input:** Q8_0 agrees with the F32 import at 8/8 argmax positions; the 4- and
+  5-bit types at 1–3/8, because the input's top-2 margins are small.
+- **Suite:** **482** (aarch64 under qemu for the GGUF, fuzz and convert suites).
 
 **1.5.1 — 2026-11-09 (onto rupantara 0.6.1; no repack per run length).**
 - **What changed:** `T_run = 0` imports at the file's full context through all three doors. One
@@ -148,11 +158,19 @@ CHANGELOG.
   and runs short windows on its variable-length `ru_model_fwd_n`, so nothing is
   repacked per run length.
 - **rosnet 1.4.1 / sigil 3.13.15** — consumed (tensors / Ed25519).
-- **akshara** — not yet wired (the oracle uses integer token patterns; a real
-  tokenizer enters with the LoRA fine-tune data path if needed).
+- **akshara 1.3.1** — not wired. The oracle uses integer token patterns. akshara
+  learns its own byte-level BPE from a corpus and cannot yet load a pretrained
+  vocabulary, which GPT-2 text in, text out needs (roadmap 1.x.x).
 
 ## Next
 
-rupantara 0.6–0.7 (1.6.x, gated on rupantara), quantized GGUF payloads (1.7.x) and the llama architecture
-(1.8.x, gated on rupantara). The 1.x.x list holds the digest-pinned load (the maintainer's call) and
-sigil's SHA-512 speed (upstream). See [`roadmap.md`](roadmap.md).
+Reprised after 1.5.1, with every dependency at its latest tag and rupantara's 0.7.x not started:
+
+1. **1.6.x — quantized GGUF payloads.** Nothing upstream blocks it. 1.6.0 shipped the legacy block
+   types; the K-quants, packed `convert` and a steadier drift measure remain.
+2. **1.7.x — onto rupantara 0.7 → 1.0.** It lands as rupantara ships.
+3. **1.8.x — the llama architecture.** It waits for rupantara's architecture breadth, after its 1.0.
+
+The 1.x.x list holds the digest-pinned load (the maintainer's call), text in, text out (gated on
+akshara), and the asks still to be filed with sigil, akshara, rupantara and ganita. See
+[`roadmap.md`](roadmap.md).

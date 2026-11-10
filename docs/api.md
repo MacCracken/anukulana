@@ -22,6 +22,7 @@
 | `convert <model.{safetensors,gguf}> <out.tula> [--sk <operator.sk>]` *(1.5.0)* | write the model as a **signed tula file at its source precision** (F64/F32/F16/BF16, HF GPT-2 names and shapes; GGUF weights transposed back), with metadata and provenance, then reload it and require its packed params **bit-identical** to a direct import. Without `--sk` it signs with the demo key (integrity only). Safetensors heads come from `config.json`'s `n_head` beside the model, else 12 |
 | `gpt2-load <model.tula> [--pk <key file>]` *(1.5.0)* | import a converted file (signature verified; without `--pk`, against the demo key) and run the batch == KV-cache decode check |
 | `gpt2-cross <model.safetensors> <model.gguf>` *(1.1.0)* | the **cross-format gate**: the same checkpoint through both foreign parsers must produce bit-identical packed params AND logits |
+| `gpt2-qgguf <reference> <quantized.gguf>` *(1.6.0)* | a **llama.cpp-quantized GPT-2** (Q4_0 / Q4_1 / Q5_0 / Q5_1 / Q8_0) against the unquantized import of the same checkpoint (HF safetensors, heads from a `config.json` beside it, or an F32 / F16 GGUF). Gates: same config, at least one block-typed tensor, NaN-free, batch == decode bit-identical, weights closer to the reference than zero is (relative RMS error < 1). Reported: the tensor types, the weight error (max, relative RMS), the logit drift and the argmax agreement over 8 positions |
 
 Exit code 0 = all gates PASS; 1 = a gate failed or an argument is missing (each
 command prints which); 2 = an unknown command or option *(1.2.2; an unknown
@@ -75,11 +76,21 @@ extent validation; wrap-safe bounds throughout; fuzz-gated in
 `tests/tcyr/fuzz.tcyr`) · `gg_open_mmap(path)` · accessors `gg_count` /
 `gg_entry` / `gg_entry_{name,name_len,ndim,dim,gtype,nelems,data}` / `gg_find`
 · KV lookups `gg_kv_int(r, key, found)` / `gg_kv_str(r, key, out_len)` ·
-`gg_read_f64(r, e, dst)` (widens F32/F16; quantized GGML block types reject).
+`gg_read_f64(r, e, dst)` (widens F32/F16; see 1.6.0 for the block types).
 *(1.2.2)* Element counts are checked at every multiply; KV integers are read at
 their own width and i8/i16/i32 sign-extended; `gg_entry_dim` is 0 past ndim.
 *(1.3.0)* `gg_read_f64_range(r, e, start, n, dst)` → n | -1 (a flat element
 range, widened) · `GG_MAX_ELEMS()` (2^29, the element-count cap).
+*(1.6.0)* **llama.cpp's legacy block types** open and read: Q4_0, Q4_1, Q5_0, Q5_1
+and Q8_0 (32 weights per block; ids `GG_T_Q4_0()` 2, `GG_T_Q4_1()` 3,
+`GG_T_Q5_0()` 6, `GG_T_Q5_1()` 7, `GG_T_Q8_0()` 8, with `GG_T_F32()` 0 and
+`GG_T_F16()` 1). `gg_read_f64` / `gg_read_f64_range` give **exactly ggml's own f32
+dequantization**, widened (any range, on or off block boundaries). `gg_open` also
+requires a block tensor's `ne0` to be whole blocks, and still rejects every other
+type id (the K-quants among them). `gg_entry_nbytes(e)` (the payload's bytes) ·
+`gg_type_name(t)` (`"Q8_0"`, …, `"?"`) · `gg_type_is_quant(t)`. Held by
+`tests/fixtures/gguf_qblocks_v1.gguf` (gguf-py's `dequantize` as the oracle) and
+fuzz rounds against a guard page.
 
 ### GPT-2 mapping (GGUF) — `src/gpt2_gguf.cyr` (added 1.1.0)
 `anuk_ggpt2_import(path, T_run, cfg)` → params | 0 — one-shot: mmap → infer
@@ -92,7 +103,12 @@ for a config `ru_cfg_check` rejects (e.g. `head_count = 0`, or one not dividing
 `embedding_length`). *(1.2.2)* Every tensor must have exactly its expected
 `ne` (an `attn_qkv` with more or fewer than 3C output rows is rejected).
 *(1.5.1)* `T_run = 0` keeps the file's own context (`position_embd`'s rows), as for
-the safetensors door; `anuk_ggpt2_infer_cfg` reads it the same way.
+the safetensors door; `anuk_ggpt2_infer_cfg` reads it the same way. *(1.6.0)* Any
+tensor may be in a block type (llama.cpp quantizes `token_embd` and the four block
+weights); the import holds ggml's dequantized values as f64.
+`anuk_weight_drift(p, q, n, out)` (in `src/gpt2.cyr`) → 0 — `out[0]` the max
+`|p - q|`, `out[1]` the relative RMS error `sqrt(Σ(p-q)² / Σp²)` (both f64),
+`out[2]` the NaN count in `q`, which both sums skip; `gpt2-qgguf`'s measure.
 
 ### Fidelity — `src/oracle.cyr`
 `anuk_gpt2_oracle(model_path, fix_path)` → 0 | 1. Fixture format v1 documented
@@ -126,6 +142,10 @@ doors give byte-identical tensors), the full context, a `"cfg"` F64 [8] tensor a
 metadata (`anukulana.kind = model`, `anukulana.layout = hf-gpt2`, `.config`,
 `.source.*`, and `hf.config` from a `config.json` beside the source). Same inputs →
 byte-identical files. -1 for a source the importer would refuse or a failed write.
+*(1.6.0)* A block-typed GGUF tensor is written as **F32 holding exactly ggml's
+dequantized values** (each is an f32), so the file loads to what importing the
+GGUF gives; the source's block types are recorded as `anukulana.source.quant`
+(`"Q4_0"`, or a comma-separated list). Keeping the codes packed is later 1.6.x.
 `anuk_tula_import(path, pk, T_run, cfg)` → params | 0 — open a converted file
 (strict validation, Ed25519 under `pk` required, kind/layout checked, `T_run` ≤
 the file's context; *(1.5.1)* `T_run = 0` is the file's context) and pack it
@@ -178,6 +198,7 @@ only, so the same inputs give byte-identical files:
 | `anukulana.adapter` | adapter | `{"C":…,"r":…,"V":…,"target":"lm_head"}` |
 | `anukulana.source.{name,bytes,format,sha256}` | checkpoint (`_src`) | the model file: basename, size, `safetensors` / `gguf` / `tula` / `unknown`, SHA-256 hex |
 | `anukulana.base.{name,bytes,format,sha256}` | adapter (`_src`) | the base checkpoint, likewise |
+| `anukulana.source.quant` *(1.6.0)* | converted model | the source GGUF's block types, dequantized to F32 (`Q8_0`, or a list such as `Q4_0,Q8_0`); absent for an unquantized source |
 
 The key names are part of the file layout from 1.4.0; readers must tolerate keys
 they don't know. The loaders still read the `"cfg"` tensor, not the metadata.

@@ -316,6 +316,37 @@ fn _anuk_demo_targets(tokens, T): i64 {
     store64(targets + (T - 1) * 8, load64(tokens));
     return targets;
 }
+# The weight drift of params q from a reference p, over n values (1.6.0, for the
+# quantized GGUF door). Fills out (3 cells): out[0] the max |p - q| as f64; out[1]
+# the relative RMS error sqrt(sum (p - q)^2 / sum p^2) as f64, 0 when p is all
+# zero; out[2] the count of NaN in q (they are left out of both sums). Returns 0.
+fn anuk_weight_drift(p, q, n, out): i64 {
+    var mx = f64_from(0);
+    var se = f64_from(0);
+    var sp = f64_from(0);
+    var nan = 0;
+    var i = 0;
+    while (i < n) {
+        var a = load64(p + i * 8);
+        var b = load64(q + i * 8);
+        if (f64_eq(b, b) == 0) { nan = nan + 1; }
+        else {
+            var d = f64_sub(a, b);
+            if (f64_lt(d, f64_from(0)) == 1) { d = f64_neg(d); }
+            if (f64_gt(d, mx) == 1) { mx = d; }
+            se = f64_add(se, f64_mul(d, d));
+            sp = f64_add(sp, f64_mul(a, a));
+        }
+        i = i + 1;
+    }
+    var rel = f64_from(0);
+    if (f64_gt(sp, f64_from(0)) == 1) { rel = f64_sqrt(f64_div(se, sp)); }
+    store64(out, mx);
+    store64(out + 8, rel);
+    store64(out + 16, nan);
+    return 0;
+}
+
 # How many of the T rows of logits (T x V) have their argmax at targets[t].
 fn anuk_argmax_matches(logits, targets, T, V): i64 {
     var m = 0;

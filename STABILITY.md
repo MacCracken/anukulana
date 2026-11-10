@@ -13,7 +13,8 @@ Guarantees for the 1.x line:
   gate failed or an argument is missing, 2 = an unknown command or option —
   1.2.2).
 - **Additive-only minors:** new CLI commands (e.g. GGUF import), new module
-  functions, new checkpoint tensors (readers tolerate extras).
+  functions, new checkpoint tensors (readers tolerate extras), and inputs that
+  were rejected before and are now accepted (1.6.0: GGUF's legacy block types).
 - **Out of freeze:** `_`-prefixed internals; demo training hyperparameters
   (the gates are frozen, the knobs are not); wall-clock numbers in
   `docs/benchmarks.md` (re-captured per toolchain/hardware change).

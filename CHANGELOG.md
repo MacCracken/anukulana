@@ -6,6 +6,128 @@ moving, no API freeze until v1.0).
 
 ## [Unreleased]
 
+## [1.6.0] - 2026-11-09
+
+The roadmap's 1.6.0: the GGUF door reads llama.cpp's legacy quantized block types, Q4_0, Q4_1,
+Q5_0, Q5_1 and Q8_0. Through 1.5.1 a quantized tensor was rejected at open. Everything here is
+additive (STABILITY.md): a new command, new functions, and files that used to be refused. No frozen
+signature, gate or exit code changed, and every F32 / F16 / safetensors result is unchanged.
+Toolchain and dependencies are unchanged (cyrius 6.7.18; sigil 3.13.15, tula 1.6.1, rosnet 1.4.1,
+rupantara 0.6.1).
+
+### Added
+
+- **Dequantization at import, exactly as ggml does it.**
+  - `gg_read_f64` / `gg_read_f64_range` decode the five block types. A range can start or end
+    inside a block; only the blocks it touches are read.
+  - **The values are ggml's own f32 dequantization, widened to f64.** For Q8_0, Q4_0 and Q5_0 the
+    product `q * d` is exact in both precisions. For Q4_1 and Q5_1, `q * d + m` is rounded to f32
+    as ggml rounds it; without that step 164 of the oracle's 1,024 Q5_1 values differ.
+  - **New accessors:** `GG_T_F32()` … `GG_T_Q8_0()` (the ggml type ids), `gg_entry_nbytes(e)`,
+    `gg_type_name(t)` and `gg_type_is_quant(t)`.
+- **`gpt2-qgguf <reference> <quantized.gguf>`:** a quantized GPT-2 against the unquantized import
+  of the same checkpoint. The reference can be HF safetensors or an F32 / F16 GGUF.
+  - **Gated:** the same config; at least one block-typed tensor; no NaN; batch == decode
+    bit-identical; and weights closer to the reference than zero is (relative RMS error < 1).
+  - **Reported, not gated** (as `gpt2-qlora` reports NF4): the tensor types, the weight error, the
+    logit drift and the argmax agreement over 8 positions.
+- **`anuk_weight_drift(p, q, n, out)`:** the max `|p - q|`, the relative RMS error and the NaN
+  count. This is `gpt2-qgguf`'s weight measure.
+- **`convert` takes a quantized GGUF.** Each block-typed tensor is written as F32 holding exactly
+  ggml's dequantized values, so the file loads to what importing the GGUF gives. The new metadata
+  key `anukulana.source.quant` records the source's types (for example `Q4_0`). Keeping the codes
+  packed is later 1.6.x work.
+- **`tests/oracle/gen_gguf.py` takes an optional block type** (`Q4_0` … `Q8_0`). It quantizes with
+  gguf-py's reference quantizer the tensors llama.cpp's converter would: `token_embd` and each
+  block's four weights. Norms, biases and `position_embd` stay F32.
+
+### Changed
+
+- **`gg_open` validates block tensors before any read:** `ne0` must be a whole number of blocks,
+  and the payload must be exactly blocks × block bytes. Every other type id, the K-quants
+  included, is still rejected.
+- **`convert`'s report names the source's block types**, and its result line says they became
+  exact F32 rather than "source precision".
+- **`tests/common.cyr`'s GGUF writer** takes raw payloads, encodes the five block types at a fixed
+  scale of 1/32 (`_ggw_qblock`), and exports a GPT-2 with its weights in one of them
+  (`_export_gguf_q`).
+- **`anukulana_version()` `10501` → `10600`.** Files written by this release record
+  `anukulana.version = 1.6.0`. The `smoke.tcyr` assertion moves with it.
+
+### Tests
+
+- **`tests/fixtures/gguf_qblocks_v1.gguf` (24.8 KB, new):** the decoders' oracle, written by
+  `tests/oracle/gen_qblocks.py` (gguf 0.19.0, numpy 2.5.4; regenerates byte-identical).
+  - **Contents:** 32 blocks of each type, every byte random, with edge-case scales forced in:
+    ±0, subnormal, ±65504, ±inf and NaN.
+  - **Reference:** gguf-py's `dequantize` of each block tensor, stored as F32.
+  - **The check:** `tests/tcyr/gguf.tcyr` requires all 5,120 values to match bit for bit (a NaN
+    matches any NaN), and nine sub-ranges to read what the whole read gave.
+- **`tests/tcyr/gguf.tcyr` also adds:**
+  - a GPT-2 round trip in each of the five types through `anuk_ggpt2_pack`, bit-identical to the
+    original params and logits;
+  - the rejects: a row that isn't whole blocks, a short payload, and every unsupported type id
+    from 4 to 39;
+  - `anuk_weight_drift` on exact cases.
+- **`tests/tcyr/convert.tcyr`:** each type converts to a file that reloads bit-identical. Its
+  tensors are byte-identical to the F32 safetensors convert of the same params, and
+  `source.quant` names the type.
+- **`tests/tcyr/fuzz.tcyr`, against the guard page:**
+  - 30k byte mutations of a five-type image;
+  - 20k structure-aware mutations of `ne0`, the type and the data offset;
+  - a truncation sweep, plus random sub-range reads on every accepted file.
+
+  Two over-read mutants, one in the extent check and one in the Q8_0 decoder, fault there. Seven
+  mutants of the decoders and the whole-block check (a high bit, a code offset, the int8 sign, the
+  f32 rounding of Q4_1 and of Q5_1, a partial-block skip, the check itself) all fail `gguf.tcyr`.
+- **Totals:** 482 assertions in 10 suites (297 before). The GGUF, fuzz and convert suites pass
+  on aarch64 under qemu. fmt, lint (0 warnings), vet, doc and `--locked` are clean.
+- **Real checkpoint:** GPT-2 small, quantized from the pinned safetensors with
+  `gen_gguf.py <type>`.
+  - **The import equals gguf-py's dequantization exactly** in every type: all 124,439,808 packed
+    params, compared with an F32 GGUF that gguf-py dequantized.
+  - **Each type imports and runs** with batch == decode bit-identical. `gpt2-gguf` takes 2.1 s on
+    Q4_0 and 2.7 s on Q8_0.
+  - **Drift**, against the F32 import over the 8-position demo input:
+
+    | Type | File | Weight rel. RMS | Logit max abs | Argmax agreement |
+    |---|---|---|---|---|
+    | Q8_0 | 134.9 MB | 0.0056 | 1.09 | 8/8 |
+    | Q5_1 | 96.3 MB | 0.0385 | 6.79 | 2/8 |
+    | Q5_0 | 88.6 MB | 0.0443 | 9.01 | 1/8 |
+    | Q4_1 | 80.8 MB | 0.0796 | 16.09 | 3/8 |
+    | Q4_0 | 73.1 MB | 0.0890 | 15.67 | 3/8 |
+
+    The demo input is an integer pattern, not text, and its top-1 / top-2 logit margins are 0.02 to
+    1.1. So even the 5-bit drift flips most argmaxes. The weight error is the quantizer's own: the
+    import equals gguf-py's dequantization exactly.
+  - **`convert`** of the Q4_0 file takes 79 s and reloads bit-identical; `gpt2-load` takes 28.5 s.
+  - **The earlier gates still pass:** `make fidelity` (maxrel 1.049e-6), and `gpt2`, `gpt2-gguf`
+    and `gpt2-cross` on the F32 files.
+
+### Docs
+
+- **The roadmap is reprised after 1.5.1.**
+  - **Why:** every dependency is at its latest tag, and rupantara's 0.7.x, which the old 1.6.x line
+    waited on, has not started.
+  - **New order:** quantized GGUF payloads move up to **1.6.x**, the next line, since nothing upstream
+    blocks it. What remains of the rupantara line becomes **1.7.x**. The llama architecture stays
+    **1.8.x**.
+  - **The 1.6.x plan is concrete:**
+    - 1.6.0 takes the legacy block types (Q8_0, Q4_0, Q4_1, Q5_0, Q5_1), dequantized to match ggml's
+      own f32 dequantization exactly, then the K-quants follow;
+    - gguf-py quantizes all five legacy types for the fixtures and dequantizes every type as the
+      oracle (checked 2026-11-09);
+    - Q8_0 can convert losslessly as tula `INT8` plus a per-block scale sidecar, while 4-bit data waits
+      for tula 1.8's int4.
+- **Text in, text out is gated on akshara.** The roadmap said to wire akshara's GPT-2 BPE, but akshara
+  1.3.1 learns its own BPE from a corpus and can't load GPT-2's pretrained vocabulary. The ask is
+  recorded.
+- **The asks anukulana still owes other repos are listed** in the roadmap's Gates. None is filed yet:
+  sigil's SHA-512 speed, the `f64_exp` cost, akshara's pretrained vocabulary, rupantara's helper count
+  (29, not 22) and tula's per-block int8 scale.
+- **`state.md`:** the akshara line and the Next section follow the new order.
+
 ## [1.5.1] - 2026-11-09
 
 Onto rupantara 0.6.1: the run-length repack is gone (the roadmap's 1.6.x item). One import at the

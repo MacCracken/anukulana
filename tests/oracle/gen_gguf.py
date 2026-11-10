@@ -10,6 +10,7 @@ safetensors gates use. Same pattern as gen_fixture.py.
     python3 -m venv /tmp/gguf-venv
     /tmp/gguf-venv/bin/pip install gguf numpy safetensors
     /tmp/gguf-venv/bin/python gen_gguf.py ~/models/gpt2 ~/models/gpt2/model.gguf
+    /tmp/gguf-venv/bin/python gen_gguf.py ~/models/gpt2 ~/models/gpt2/model-q8_0.gguf Q8_0
 
 Replicates llama.cpp's GPT-2 conversion choices:
   * tensor names: token_embd / position_embd / output_norm /
@@ -19,16 +20,27 @@ Replicates llama.cpp's GPT-2 conversion choices:
   * F32 data, GGUF v3, default alignment 32
   * output.weight is OMITTED (GPT-2 ties it to token_embd; the importer reads
     token_embd) — keeps the proof file ~120 MB leaner
+
+An optional third argument, a block type (Q4_0, Q4_1, Q5_0, Q5_1, Q8_0; 1.6.0),
+quantizes with gguf-py's reference quantizer the tensors llama.cpp's converter
+would: every 2-D `.weight` except position_embd (token_embd and the four block
+weights). The norms, biases and position_embd stay F32. gguf-py quantizes only these
+five types; the K-quants need llama.cpp's llama-quantize.
 """
 import json
 import sys
 
 import numpy as np
-from gguf import GGUFWriter
+from gguf import GGMLQuantizationType, GGUFWriter
+from gguf.quants import quantize
 from safetensors.numpy import load_file
 
 
-def main(model_dir: str, out_path: str) -> None:
+QTYPES = ("Q4_0", "Q4_1", "Q5_0", "Q5_1", "Q8_0")
+
+
+def main(model_dir: str, out_path: str, qtype: str = "") -> None:
+    qt = getattr(GGMLQuantizationType, qtype) if qtype else None
     cfg = json.load(open(f"{model_dir}/config.json"))
     C = cfg["n_embd"]
     NL = cfg["n_layer"]
@@ -49,7 +61,10 @@ def main(model_dir: str, out_path: str) -> None:
 
     def t(name: str, arr: np.ndarray, transpose: bool = False) -> None:
         a = np.ascontiguousarray(arr.T if transpose else arr, dtype=np.float32)
-        w.add_tensor(name, a)
+        if qt is not None and a.ndim == 2 and name.endswith(".weight") and name != "position_embd.weight":
+            w.add_tensor(name, quantize(a, qt), raw_dtype=qt)
+        else:
+            w.add_tensor(name, a)
 
     t("token_embd.weight", st["wte.weight"])
     t("position_embd.weight", st["wpe.weight"])
@@ -73,8 +88,10 @@ def main(model_dir: str, out_path: str) -> None:
     w.write_kv_data_to_file()
     w.write_tensors_to_file()
     w.close()
-    print(f"wrote {out_path}: C={C} NL={NL} NH={NH} F={F} ctx={CTX}")
+    print(f"wrote {out_path}: C={C} NL={NL} NH={NH} F={F} ctx={CTX} {qtype or 'F32'}")
 
 
 if __name__ == "__main__":
-    main(sys.argv[1], sys.argv[2])
+    if len(sys.argv) not in (3, 4) or (len(sys.argv) == 4 and sys.argv[3] not in QTYPES):
+        sys.exit(f"usage: gen_gguf.py <model_dir> <out.gguf> [{'|'.join(QTYPES)}]")
+    main(*sys.argv[1:])

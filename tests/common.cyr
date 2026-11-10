@@ -4,7 +4,9 @@
 # Included by tests/tcyr/gpt2.tcyr, tests/tcyr/gguf.tcyr and tests/anukulana.bcyr
 # after src/lib.cyr. Moved here from those two suites in 1.2.2 (unchanged except
 # where noted: the GGUF writer sizes its buffer from the model instead of a fixed
-# 4 MB, and the safetensors writer can emit F32).
+# 4 MB, and the safetensors writer can emit F32). 1.6.0: the GGUF writer takes raw
+# payloads and encodes the legacy block types (_ggw_qblock, fixed scale 1/32), and
+# _export_gguf_q writes a GPT-2 with its weights in one of them.
 
 # ---- f64 -> f32/f16 bit narrowing (test values are exact + in range) ----------
 fn _n_f32(d): i64 {
@@ -23,18 +25,24 @@ fn _n_f16(d): i64 {
 }
 
 # ---- a minimal GGUF WRITER ----------------------------------------------------
-# w: +0 buf | +8 off | +16 ntens | +24 tensor table (ntens × 48:
-#    name data(f64) ne0 ne1 ndim gtype)  — serialized by _ggw_finish.
+# w: +0 buf | +8 off | +16 ntens | +24 tensor table (ntens × 56:
+#    name data ne0 ne1 ndim gtype nraw)  — serialized by _ggw_finish.
+# data is f64 values (nraw = 0), encoded as F32 / F16 or, for a block type, by
+# _ggw_qblock; or nraw raw payload bytes, written as they are (1.6.0).
 fn _ggw_new(): i64 {
-    var w = alloc(32 + 128 * 48);
+    var w = alloc(32 + 128 * 56);
     store64(w, 0); store64(w + 8, 0); store64(w + 16, 0);
     return w;
 }
 fn _ggw_add(w, name, data, ne0, ne1, ndim, gtype): i64 {
-    var t = w + 32 + load64(w + 16) * 48;
+    return _ggw_add_raw(w, name, data, ne0, ne1, ndim, gtype, 0);
+}
+fn _ggw_add_raw(w, name, data, ne0, ne1, ndim, gtype, nraw): i64 {
+    var t = w + 32 + load64(w + 16) * 56;
     store64(t, name); store64(t + 8, data);
     store64(t + 16, ne0); store64(t + 24, ne1);
     store64(t + 32, ndim); store64(t + 40, gtype);
+    store64(t + 48, nraw);
     store64(w + 16, load64(w + 16) + 1);
     return 0;
 }
@@ -74,6 +82,51 @@ fn _ggw_tnelems(t): i64 {
     if (load64(t + 32) == 2) { n = n * load64(t + 24); }
     return n;
 }
+# the payload bytes tensor row t serializes to
+fn _ggw_tbytes(t): i64 {
+    if (load64(t + 48) != 0) { return load64(t + 48); }
+    var g = load64(t + 40);
+    if (g == 0) { return _ggw_tnelems(t) * 4; }
+    if (g == 1) { return _ggw_tnelems(t) * 2; }
+    return (_ggw_tnelems(t) / 32) * _gg_blk_bytes(g);
+}
+
+# Encode the 32 f64 values at src as one block of type g with a FIXED scale
+# d = 1/32 (and, for the _1 types, minimum lo/32). Every value must be k/32 with k
+# in the range of the type: [-128, 127] for Q8_0, [-8, 7] for Q4_0 / Q4_1 and
+# [-16, 15] for Q5_0 / Q5_1. Then the codes are exact and the block decodes to the
+# values bit for bit.
+fn _ggw_qblock(buf, offp, src, g): i64 {
+    var q = alloc(32 * 8);
+    var j = 0;
+    while (j < 32) {
+        var k = f64_to(f64_mul(load64(src + j * 8), f64_from(32)));
+        if (g == 2 || g == 3) { k = k + 8; }
+        if (g == 6 || g == 7) { k = k + 16; }
+        store64(q + j * 8, k);
+        j = j + 1;
+    }
+    _ggw_u8(buf, offp, 0x00); _ggw_u8(buf, offp, 0x28);       # d = 1/32 (f16 0x2800)
+    if (g == 3) { _ggw_u8(buf, offp, 0x00); _ggw_u8(buf, offp, 0xB4); }   # m = -8/32
+    if (g == 7) { _ggw_u8(buf, offp, 0x00); _ggw_u8(buf, offp, 0xB8); }   # m = -16/32
+    if (g == 8) {
+        j = 0;
+        while (j < 32) { _ggw_u8(buf, offp, load64(q + j * 8)); j = j + 1; }
+        return 0;
+    }
+    if (g == 6 || g == 7) {
+        var qh = 0;
+        j = 0;
+        while (j < 32) { qh = qh | (((load64(q + j * 8) >> 4) & 1) << j); j = j + 1; }
+        _ggw_u32(buf, offp, qh);
+    }
+    j = 0;
+    while (j < 16) {
+        _ggw_u8(buf, offp, (load64(q + j * 8) & 15) | ((load64(q + (j + 16) * 8) & 15) << 4));
+        j = j + 1;
+    }
+    return 0;
+}
 
 # serialize: header + KVs (arch/dims/alignment + skip-fodder) + infos + data.
 # kvmode 1 = the GPT-2 metadata set; 0 = minimal (arch only + alignment 64).
@@ -82,8 +135,8 @@ fn _ggw_finish(w, cfg, alignment, kvmode, out_len): i64 {
     var cap = 4096 + alignment;                      # header + KVs + final pad
     var ci = 0;
     while (ci < ntens) {
-        var ct = w + 32 + ci * 48;
-        cap = cap + 64 + strlen(load64(ct)) + alignment + _ggw_tnelems(ct) * 4;
+        var ct = w + 32 + ci * 56;
+        cap = cap + 64 + strlen(load64(ct)) + alignment + _ggw_tbytes(ct);
         ci = ci + 1;
     }
     var buf = alloc(cap);
@@ -115,10 +168,8 @@ fn _ggw_finish(w, cfg, alignment, kvmode, out_len): i64 {
     var doff = 0;
     var i = 0;
     while (i < ntens) {
-        var t = w + 32 + i * 48;
+        var t = w + 32 + i * 56;
         var gtype = load64(t + 40);
-        var esz = 4;
-        if (gtype == 1) { esz = 2; }
         _ggw_str(buf, offp, load64(t));
         _ggw_u32(buf, offp, load64(t + 32));         # n_dims
         var k = 0;
@@ -126,7 +177,7 @@ fn _ggw_finish(w, cfg, alignment, kvmode, out_len): i64 {
         _ggw_u32(buf, offp, gtype);
         doff = doff + (alignment - (doff % alignment)) % alignment;
         _ggw_u64(buf, offp, doff);
-        doff = doff + _ggw_tnelems(t) * esz;
+        doff = doff + _ggw_tbytes(t);
         i = i + 1;
     }
     # pad header to alignment, then write data blobs at their offsets
@@ -136,29 +187,45 @@ fn _ggw_finish(w, cfg, alignment, kvmode, out_len): i64 {
     doff = 0;
     i = 0;
     while (i < ntens) {
-        var t2 = w + 32 + i * 48;
+        var t2 = w + 32 + i * 56;
         var gtype2 = load64(t2 + 40);
-        var esz2 = 4;
-        if (gtype2 == 1) { esz2 = 2; }
         doff = doff + (alignment - (doff % alignment)) % alignment;
         store64(offp, dstart + doff);
         var src = load64(t2 + 8);
         var ne = _ggw_tnelems(t2);
         var j = 0;
-        while (j < ne) {
-            var d = load64(src + j * 8);
-            if (gtype2 == 0) { _ggw_u32(buf, offp, _n_f32(d)); }
-            else {
-                var h = _n_f16(d);
-                _ggw_u8(buf, offp, h); _ggw_u8(buf, offp, h >> 8);
+        if (load64(t2 + 48) != 0) {
+            while (j < load64(t2 + 48)) { _ggw_u8(buf, offp, load8(src + j)); j = j + 1; }
+        } elif (gtype2 == 0 || gtype2 == 1) {
+            while (j < ne) {
+                var d = load64(src + j * 8);
+                if (gtype2 == 0) { _ggw_u32(buf, offp, _n_f32(d)); }
+                else {
+                    var h = _n_f16(d);
+                    _ggw_u8(buf, offp, h); _ggw_u8(buf, offp, h >> 8);
+                }
+                j = j + 1;
             }
-            j = j + 1;
+        } else {
+            while (j < ne) { _ggw_qblock(buf, offp, src + j * 8, gtype2); j = j + 32; }
         }
-        doff = doff + ne * esz2;
+        doff = doff + _ggw_tbytes(t2);
         i = i + 1;
     }
     store64(out_len, dstart + doff);
     return buf;
+}
+
+# 1.6.0: params for a quantized round trip: k/32 with k in [lo, hi], which _ggw_qblock
+# encodes exactly at d = 1/32
+fn _fillq(p, n, seed, lo, hi): i64 {
+    var i = 0;
+    while (i < n) {
+        var k = lo + ((i * 131 + seed * 17 + 7) % (hi - lo + 1));
+        store64(p + i * 8, f64_div(f64_from(k), f64_from(32)));
+        i = i + 1;
+    }
+    return 0;
 }
 
 fn _put_u32_le(p, x): i64 {
@@ -324,11 +391,16 @@ fn _t2d(src, rows_in, cols_out): i64 {
 }
 fn _gnm(L, suffix): i64 { return _ggpt2_name(0, L, suffix); }
 
-fn _export_gguf(cfg, P, out_len): i64 {
+fn _export_gguf(cfg, P, out_len): i64 { return _export_gguf_q(cfg, P, out_len, 0); }
+# _export_gguf with token_embd and the four 2-D weights of each block written as
+# ggml type qt (1.6.0; 0 = F32 everywhere). The norms, biases and position_embd stay
+# F32, as llama.cpp's converter keeps them. A block type needs C and F to be
+# multiples of 32 and every weight in _ggw_qblock's range.
+fn _export_gguf_q(cfg, P, out_len, qt): i64 {
     var V = _cfg_V(cfg); var C = _cfg_C(cfg); var T = _cfg_T(cfg);
     var NL = _cfg_NL(cfg); var F = _cfg_F(cfg);
     var w = _ggw_new();
-    _ggw_add(w, "token_embd.weight", _p_tokemb(P), C, V, 2, 0);      # ne=[C,V]
+    _ggw_add(w, "token_embd.weight", _p_tokemb(P), C, V, 2, qt);     # ne=[C,V]
     _ggw_add(w, "position_embd.weight", _p_posemb(P, cfg), C, T, 2, 0);
     var L = 0;
     while (L < NL) {
@@ -343,19 +415,19 @@ fn _export_gguf(cfg, P, out_len): i64 {
         t_copy(cat, tq, C * C);
         t_copy(cat + C * C * 8, tk, C * C);
         t_copy(cat + 2 * C * C * 8, tv, C * C);
-        _ggw_add(w, _gnm(L, "attn_qkv.weight"), cat, C, 3 * C, 2, 0); # ne=[C,3C]
+        _ggw_add(w, _gnm(L, "attn_qkv.weight"), cat, C, 3 * C, 2, qt); # ne=[C,3C]
         var catb = alloc(3 * C * 8);
         t_copy(catb, _bq(cfg, pblk), C);
         t_copy(catb + C * 8, _bk(cfg, pblk), C);
         t_copy(catb + 2 * C * 8, _bv(cfg, pblk), C);
         _ggw_add(w, _gnm(L, "attn_qkv.bias"), catb, 3 * C, 0, 1, 0);
-        _ggw_add(w, _gnm(L, "attn_output.weight"), _t2d(pblk + _ru_o_Wo(cfg) * 8, C, C), C, C, 2, 0);
+        _ggw_add(w, _gnm(L, "attn_output.weight"), _t2d(pblk + _ru_o_Wo(cfg) * 8, C, C), C, C, 2, qt);
         _ggw_add(w, _gnm(L, "attn_output.bias"), _bo(cfg, pblk), C, 0, 1, 0);
         _ggw_add(w, _gnm(L, "ffn_norm.weight"), pblk + _ru_o_ln2g(cfg) * 8, C, 0, 1, 0);
         _ggw_add(w, _gnm(L, "ffn_norm.bias"), pblk + _ru_o_ln2b(cfg) * 8, C, 0, 1, 0);
-        _ggw_add(w, _gnm(L, "ffn_up.weight"), _t2d(pblk + _ru_o_Wfc(cfg) * 8, C, F), C, F, 2, 0);
+        _ggw_add(w, _gnm(L, "ffn_up.weight"), _t2d(pblk + _ru_o_Wfc(cfg) * 8, C, F), C, F, 2, qt);
         _ggw_add(w, _gnm(L, "ffn_up.bias"), pblk + _ru_o_bfc(cfg) * 8, F, 0, 1, 0);
-        _ggw_add(w, _gnm(L, "ffn_down.weight"), _t2d(pblk + _ru_o_Wproj(cfg) * 8, F, C), F, C, 2, 0);
+        _ggw_add(w, _gnm(L, "ffn_down.weight"), _t2d(pblk + _ru_o_Wproj(cfg) * 8, F, C), F, C, 2, qt);
         _ggw_add(w, _gnm(L, "ffn_down.bias"), pblk + _ru_o_bproj(cfg) * 8, C, 0, 1, 0);
         L = L + 1;
     }

@@ -5,7 +5,7 @@
 > **reference binary**: it consumes tula (format), rupantara (forward), rosnet (tensors) and
 > sigil (Ed25519), and does not reinvent them.
 >
-> **Where it stands (1.5.1, 2026-11-09).** The whole charter is built and gated on the real GPT-2
+> **Where it stands (1.6.0, 2026-11-09).** The whole charter is built and gated on the real GPT-2
 > checkpoint: import (safetensors and GGUF, bit-identical across both), run, match HF
 > (`gpt2-oracle`), adapt (LoRA, QLoRA/NF4) and persist (signed tula files). All seven commands were
 > re-proven at the current pin in 1.3.0, and 1.4.0 shipped the tula 1.2–1.6 surface (checked adds,
@@ -13,9 +13,23 @@
 > real-weights workflow has run green, and so has the 1.4.0 release, which gates on the `bounds` and
 > native `aarch64` CI jobs. 1.5.0 shipped `convert` (a signed tula copy at source precision, both doors
 > bit-identical) and `gpt2-load`. 1.5.1 moved onto rupantara 0.6.1: one full-context import serves every
-> run length, and all nine real-checkpoint commands pass through it. The API froze at 1.0.0. This file lists **remaining work only**. Shipped work is in the
-> [CHANGELOG](../../CHANGELOG.md), [`state.md`](state.md) and the audits
-> ([2026-07-04](../audit/2026-07-04-audit.md), [2026-11-09](../audit/2026-11-09-audit.md)).
+> run length, and all nine real-checkpoint commands pass through it. 1.6.0 reads GGUF's legacy
+> quantized block types (Q4_0 … Q8_0) exactly as ggml dequantizes them. The API froze at 1.0.0.
+>
+> **What is next (reprised 2026-11-09, after 1.5.1).** Every dependency is at its latest tag (cyrius
+> 6.7.18; sigil 3.13.15, tula 1.6.1, rosnet 1.4.1, rupantara 0.6.1). rupantara's 0.6.x is complete, and
+> its 0.7.x, which the old 1.6.x line waited on, has not started. So the order is now:
+>
+> 1. **1.6.x, quantized GGUF payloads** (moved up from 1.7.x). Nothing upstream blocks it. 1.6.0,
+>    the legacy block types, shipped; the K-quants and packed `convert` remain.
+> 2. **1.7.x, onto rupantara 0.7 → 1.0.** What remains of the old 1.6.x line; it lands as rupantara
+>    ships.
+> 3. **1.8.x, the llama architecture.** It waits for rupantara's architecture breadth, which rupantara
+>    schedules after its 1.0.
+>
+> This file lists **remaining work only**. Shipped work is in the [CHANGELOG](../../CHANGELOG.md),
+> [`state.md`](state.md) and the audits ([2026-07-04](../audit/2026-07-04-audit.md),
+> [2026-11-09](../audit/2026-11-09-audit.md)).
 
 ---
 
@@ -55,10 +69,47 @@
 
 ---
 
-## 1.6.x — onto rupantara 0.6–0.7 (gated on rupantara)
+## 1.6.x — quantized GGUF payloads (next: nothing upstream blocks it)
 
-Each item lands when rupantara ships it (its roadmap, 0.6.x and 0.7.x, lists these as cross-repo
-items for anukulana).
+**Goal:** the GGUF door reads llama.cpp's quantized files.
+
+**1.6.0 shipped the first half.** It reads the legacy block types (Q4_0,
+Q4_1, Q5_0, Q5_1, Q8_0) and dequantizes them exactly as ggml does: bit for bit against gguf-py's
+`dequantize`, and on all 124,439,808 params of a real GPT-2 in each type. `gpt2-qgguf` reports the
+drift, `convert` writes the dequantized values as exact F32, and the fuzz rounds run against the guard
+page. What remains:
+
+- **The K-quants.** Q6_K and Q4_K first (llama.cpp's `Q4_K_M` mixes the two), then Q5_K, Q3_K and
+  Q2_K. Each is a 256-weight superblock with packed sub-block scales.
+  - **The oracle:** gguf-py dequantizes every K-quant but quantizes none (`NotImplementedError`,
+    checked 2026-11-09). So `gen_qblocks.py` can write random valid blocks for them as it does for
+    the legacy types, and the decoders are checked against `dequantize`.
+  - **Bits:** ggml's K-quant dequantization is several f32 operations per weight, with the
+    sub-block scale and minimum multiplied in first. Reproduce its order, as 1.6.0 reproduces the
+    `_1` types' rounding, so the oracle comparison stays bit-exact.
+  - **A real K-quant GPT-2** needs llama.cpp's `llama-quantize` (a C++ build, used at test time
+    only, as the venv is) or a third-party file pinned by sha256. ⚠ The maintainer's call.
+  - **The parser:** a K-quant row is whole 256-weight superblocks (C = 768 and F = 3072 are), with the
+    same extent checks and fuzz rounds as 1.6.0's.
+- **`convert` keeps the codes packed where tula can hold them.** 1.6.0 writes them as exact F32: the
+  converted GPT-2 is 497.8 MB whatever the type, 3.7× the Q8_0 file and 6.8× the Q4_0 one.
+  - **Q8_0:** tula `INT8` codes plus a per-block `w.scale` sidecar holding the f16 scales, which is
+    lossless. tula's ADR 0002 lists per-tensor and per-row int8 scales, and NF4's scales are already
+    per-block. The convention is the consumer's to own, so record it in `docs/api.md` and tell tula.
+    The loader then decodes it as the GGUF door does.
+  - **4-bit and K-quant data** waits for tula 1.8's int4 (gated on tula). Its ADR chooses between
+    inline f16 scales and a sidecar.
+- **A steadier drift measure.** `gpt2-qgguf` compares argmax over the 8-position demo input, whose
+  top-1 / top-2 margins are 0.02 to 1.1 logits, so even Q5_1 agrees on only 2 of 8. Run it over the
+  oracle fixture's 48 positions as well, and report the agreement with HF's argmax there.
+- **Acceptance:** a K-quant GPT-2 (at least `Q4_K_M`'s Q4_K and Q6_K) imports and runs, with batch ==
+  decode bit-identical and its drift recorded; every new block reader is fuzz-gated.
+
+## 1.7.x — onto rupantara 0.7 → 1.0 (gated on rupantara)
+
+rupantara's 0.7.x settles the API shape that its 1.0 freeze will lock. It has not started: rupantara's
+latest tag is 0.6.1, and its roadmap names 0.7.x as next. Each item lands in whichever anukulana minor
+is current when rupantara ships it, so one that arrives during 1.6.x rides along there.
 
 - **The config descriptor's growth path.** anukulana sizes every `cfg` at 64 bytes, stores it in
   checkpoints as F64 `[8]`, and its public entries take a caller-allocated `cfg`. If rupantara grows
@@ -70,27 +121,15 @@ items for anukulana).
 - **The layout helpers.** anukulana's source uses 29 of rupantara's underscore helpers (`_cfg_*`,
   `_ru_o_*`, `_p_*`, `_b?`, `_ru_blk_base`) as its layout API (counted at 1.2.2; rupantara's audit
   counted 22 before `_cfg_bias` and a few others were in use). Move onto public names if rupantara
-  adds them, or record the frozen underscore set.
+  adds them, or record the frozen underscore set. rupantara's 0.7.x item still says 22, so give it the
+  current list when that work starts.
 - **The allocating entries.** `gpt2-oracle` and `gpt2-cross` call the allocating `ru_model_fwd_n`
   (`ru_model_fwd` through 1.5.0): 3 and 2 calls, bounded. Move them to `ru_model_fwd_n_s` if rupantara
   deprecates the allocating entries.
 - **Be rupantara's 1.0 consumer gate.** Run the fidelity gate and `gpt2-tula` against each
   `1.0.0-rc.N` (rupantara's 1.0 criterion: "≥1 downstream consumer green on a real model").
-- **Acceptance:** anukulana green on rupantara's release candidate. (The other half, no repack per run
-  length, landed in 1.5.1 on rupantara 0.6.1: `T_run = 0` imports the full context once.)
-
-## 1.7.x — quantized GGUF payloads
-
-**Goal:** the GGUF door reads llama.cpp's quantized files, which today reject cleanly by type.
-
-- **Dequantize the common GGML block types at import**, Q8_0 and Q4_0 first, then the K-quants,
-  into the f64 layout. Fuzz rounds in the same cut, with block-size and extent checks before any read.
-- **Report the fidelity honestly**, as `gpt2-qlora` does for NF4: weight error, logit drift and
-  argmax agreement against the F32 import of the same checkpoint.
-- **Keep the codes packed on disk** where tula can hold them: Q4 as tula int4 once tula 1.8 ships it
-  (gated on tula), so `convert` does not widen 4-bit data.
-- **Acceptance:** a llama.cpp-quantized GPT-2 imports and runs, batch == decode bit-identical, with its
-  drift recorded; every new block reader is fuzz-gated.
+- **Acceptance:** anukulana is green on rupantara's release candidate, and each consumer change that
+  rupantara's 0.7.x asks for ships in the anukulana release that adopts it.
 
 ## 1.8.x — llama-architecture import (gated on rupantara's architecture breadth)
 
@@ -98,7 +137,8 @@ items for anukulana).
 missing is the forward and the mapping.
 
 - **Needs from rupantara** (its backlog, "Architecture breadth"): RoPE positions, RMSNorm, the
-  SwiGLU MLP, an untied LM head (GQA exists), and the extended config from its 0.7.x.
+  SwiGLU MLP, an untied LM head (GQA exists), and the extended config from its 0.7.x. rupantara
+  schedules architecture breadth after its 1.0, so this line follows 1.7.x.
 - **anukulana side:** a llama mapping for GGUF (`llama.*` KVs, `blk.N.*`) and for HF safetensors
   (`model.layers.N.*`, with the config taken from `config.json` beside it). Add a committed fidelity
   fixture for a small llama-architecture checkpoint, generated once, as `gen_fixture.py` was.
@@ -122,8 +162,17 @@ missing is the forward and the mapping.
 
   (NF4 quantization, the 1.0 hot spot at about 25 s, is now about 4.7 s in tula 1.6.1's codec: no
   longer the bottleneck.)
-- **Text in, text out.** Wire **akshara** (the GPT-2 BPE) for a prompt → greedy-continuation command.
-  It stays greedy: the sampler zoo is the Type-2 reference's, per rupantara's scope.
+- **Text in, text out — gated on akshara.** A prompt → greedy-continuation command. It stays greedy:
+  the sampler zoo is the Type-2 reference's, per rupantara's scope.
+  - **What akshara can't do yet** (1.3.1): it learns its own byte-level BPE from a corpus, at most 512
+    merges in process-global state, and it cannot load a pretrained vocabulary.
+  - **What GPT-2 needs:** its 50,000 merges over 50,257 tokens, the byte-to-unicode mapping and the
+    pre-tokenizer split.
+  - **Where the vocabulary is:** HF ships `vocab.json` and `merges.txt` beside the safetensors (not
+    staged in `~/models/gpt2` yet). llama.cpp's GGUF carries them as `tokenizer.ggml.tokens` and
+    `.merges`, though `gen_gguf.py` doesn't write them today.
+  - **The ask:** akshara adds a pretrained-vocabulary mode. File it with akshara (tokenizing is
+    akshara's, per ADR 0001); anukulana then adds the command.
 - **Per-layer LoRA adapters** — consumes attn11's backward chain (see Standing decisions).
 - **A packed quantized forward** (dequantize inside the matmul). Needs quantized linears in rosnet;
   until then quantized weights widen at load.
@@ -149,7 +198,7 @@ additive path. Nothing here is scheduled.
 - **Source-precision (or f32) packed params.** Every import entry returns an f64 buffer by contract:
   1 GB at 124M params, 8.8 GB at 1.1B. Needs f32 paths in rupantara and rosnet first.
 - **A larger caller-owned config,** if rupantara's descriptor grows and no compatible path exists
-  (see 1.6.x).
+  (see 1.7.x).
 - **Architecture-generic entry points** (`anuk_import(path, arch, …)` and one `import`-style CLI)
   replacing the GPT-2-named functions and commands. Add them alongside, as aliases, through 1.x once a
   second architecture exists (1.8.x); only removing the old names is 2.0.
@@ -163,13 +212,26 @@ additive path. Nothing here is scheduled.
 
 - **Dependencies** (all released; tags in `cyrius.cyml`): tula · rupantara · rosnet · sigil ·
   stdlib bayan / math / ganita. akshara is not wired yet (1.x.x).
-- **Upstream gates on this plan:** rupantara 0.6 / 0.7 / 1.0 (1.6.x), rupantara's architecture breadth
-  (1.8.x), tula 1.8 int4 (1.7.x), rosnet quantized linears (1.x.x). Larger models will want rosnet's
-  mabda GPU profile (deferred).
-- **Outstanding cross-repo asks addressed to anukulana:** rupantara — drop the repack and be the 1.0
-  consumer gate (1.6.x). tula's two asks are met: the real-weights gate runs in CI (`realweights.yml`,
-  1.3.0, green on GitHub), and its 1.2–1.6 calls are adopted (1.4.0).
-  Already done in 1.2.2: decode on `ru_model_fwd_row_s`, `RU_ERR_*` checked, off rupantara 0.4.2.
+- **Upstream gates on this plan:**
+  - rupantara 0.7 / 0.8 / 1.0 (1.7.x);
+  - rupantara's architecture breadth, after its 1.0 (1.8.x);
+  - tula 1.8 int4 (1.6.x, the 4-bit half of `convert`);
+  - akshara, a pretrained vocabulary (1.x.x, text in, text out);
+  - rosnet, quantized linears (1.x.x).
+
+  Larger models will want rosnet's mabda GPU profile (deferred).
+- **Outstanding cross-repo asks addressed to anukulana:**
+  - rupantara: be its 1.0 consumer gate (1.7.x).
+  - Met: rupantara's "drop the repack" (1.5.1, on 0.6.1). Also 1.2.2's decode on
+    `ru_model_fwd_row_s` with `RU_ERR_*` checked, and the move off rupantara 0.4.2.
+  - Met: tula's two asks. The real-weights gate runs in CI (`realweights.yml`, 1.3.0, green on
+    GitHub), and its 1.2–1.6 calls are adopted (1.4.0).
+- **Asks anukulana owes other repos.** None is filed yet, and each needs the maintainer's go:
+  - **sigil:** SHA-512 throughput, 18.4 MB/s, with the `convert` and `gpt2-load` numbers (1.x.x).
+  - **rupantara and ganita:** the `ru_softmax_fwd` / `f64_exp` cost in the adapter step (1.x.x).
+  - **akshara:** a pretrained-vocabulary mode for GPT-2 (1.x.x).
+  - **rupantara:** the layout-helper count is 29, not the 22 its 0.7.x item says (1.7.x).
+  - **tula:** the per-block int8 scale convention, once 1.6.x uses it.
 - **Boundary:** training/backward → attn11 · QAT → tentib · the format → tula · the forward →
   rupantara · sampling beyond greedy → the Type-2 reference. Rotation-PTQ and one-shot sparsity stay
   research-watch.

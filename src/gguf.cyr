@@ -17,14 +17,15 @@
 # not consumed (arrays included), so unknown metadata never breaks the walk —
 # but an UNKNOWN vtype id is a hard reject (its size is unknowable).
 #
-# Supported tensor dtypes: F32 (0) and F16 (1) — widened to f64 via the same
-# IEEE-754 wideners the safetensors path uses. Quantized GGML block types are
-# a later lane (reject cleanly, named in the error).
+# Supported tensor dtypes: F32 (0) and F16 (1), widened to f64 by the same
+# IEEE-754 wideners the safetensors path uses, and (1.6.0) llama.cpp's legacy
+# block types Q4_0 (2), Q4_1 (3), Q5_0 (6), Q5_1 (7) and Q8_0 (8), dequantized
+# to exactly the values ggml's own f32 dequantization gives (see the decoders
+# below). gg_open rejects every other type id, the K-quants included.
 #
 # Reader record (heap): +0 buf | +8 len | +16 data_start | +24 count
-#   +32 entries (count × 128: name_ptr name_len ndim dims[4] gtype off nbytes
-#   ... packed below) | +40 kv_count | +48 kv_index (kv_count × 32:
-#   key_ptr key_len vtype val_off)
+#   +32 entries (count × 128: name_ptr name_len ndim dims[4] gtype off nbytes)
+#   | +40 kv_count | +48 kv_index (kv_count × 32: key_ptr key_len vtype val_off)
 
 # The GGUF magic: the bytes "GGUF" read as a little-endian u32.
 fn GGUF_MAGIC(): i64 { return 0x46554747; }
@@ -91,11 +92,54 @@ fn _gg_skip_value(buf, len, off, t): i64 {
     return o;
 }
 
-# ggml dtype -> bytes per element; -1 = unsupported (quantized/unknown)
-fn _gg_gtype_size(t): i64 {
+# ggml type ids (ggml.h's GGML_TYPE_*) of the supported tensor dtypes.
+fn GG_T_F32(): i64 { return 0; }
+# GGML_TYPE_F16.
+fn GG_T_F16(): i64 { return 1; }
+# GGML_TYPE_Q4_0: 32 weights per 18-byte block, y = (q - 8) * d.
+fn GG_T_Q4_0(): i64 { return 2; }
+# GGML_TYPE_Q4_1: 32 weights per 20-byte block, y = q * d + m.
+fn GG_T_Q4_1(): i64 { return 3; }
+# GGML_TYPE_Q5_0: 32 weights per 22-byte block, y = (q - 16) * d.
+fn GG_T_Q5_0(): i64 { return 6; }
+# GGML_TYPE_Q5_1: 32 weights per 24-byte block, y = q * d + m.
+fn GG_T_Q5_1(): i64 { return 7; }
+# GGML_TYPE_Q8_0: 32 weights per 34-byte block, y = q * d.
+fn GG_T_Q8_0(): i64 { return 8; }
+
+# ggml type -> elements per block (1 for F32 / F16); -1 = unsupported
+fn _gg_blk_elems(t): i64 {
+    if (t == 0 || t == 1) { return 1; }
+    if (t == 2 || t == 3 || t == 6 || t == 7 || t == 8) { return 32; }
+    return 0 - 1;
+}
+# ggml type -> bytes per block; -1 = unsupported
+fn _gg_blk_bytes(t): i64 {
     if (t == 0) { return 4; }     # F32
     if (t == 1) { return 2; }     # F16
+    if (t == 2) { return 18; }    # Q4_0: f16 d, 16 B of nibbles
+    if (t == 3) { return 20; }    # Q4_1: f16 d, f16 m, 16 B of nibbles
+    if (t == 6) { return 22; }    # Q5_0: f16 d, u32 high bits, 16 B of nibbles
+    if (t == 7) { return 24; }    # Q5_1: f16 d, f16 m, u32 high bits, 16 B of nibbles
+    if (t == 8) { return 34; }    # Q8_0: f16 d, 32 int8
     return 0 - 1;
+}
+
+# The name of a ggml type id ("F32", "Q8_0", ...), or "?" for one gg_open rejects.
+fn gg_type_name(t): i64 {
+    if (t == 0) { return "F32"; }
+    if (t == 1) { return "F16"; }
+    if (t == 2) { return "Q4_0"; }
+    if (t == 3) { return "Q4_1"; }
+    if (t == 6) { return "Q5_0"; }
+    if (t == 7) { return "Q5_1"; }
+    if (t == 8) { return "Q8_0"; }
+    return "?";
+}
+# 1 iff t is one of the block (quantized) types gg_open accepts.
+fn gg_type_is_quant(t): i64 {
+    if (_gg_blk_elems(t) == 32) { return 1; }
+    return 0;
 }
 
 # ---- entry accessors (entry = 128B) -----------------------------------------
@@ -115,8 +159,12 @@ fn gg_entry_dim(e, k): i64 {
     if (k >= gg_entry_ndim(e)) { return 0; }
     return load64(e + 24 + k * 8);
 }
-# The tensor's ggml type id (only F32 = 0 and F16 = 1 pass gg_open).
+# The tensor's ggml type id: F32, F16 or (1.6.0) one of the five legacy block
+# types (GG_T_*); gg_open rejects any other.
 fn gg_entry_gtype(e): i64 { return load64(e + 56); }
+# The payload's length in bytes, which gg_open checks lies inside the data
+# section (1.6.0): nelems x 4 or 2, or blocks x block bytes.
+fn gg_entry_nbytes(e): i64 { return load64(e + 72); }
 # Element count: the product of the dims. gg_open checks it stays within
 # GG_MAX_ELEMS without wrapping.
 fn gg_entry_nelems(e): i64 {
@@ -316,8 +364,10 @@ fn gg_open(buf, len): i64 {
     i = 0;
     while (i < n_tensors) {
         var e2 = entries + i * 128;
-        var esz = _gg_gtype_size(load64(e2 + 56));
-        if (esz < 0) { return 0; }                   # quantized/unknown dtype: later lane
+        var be = _gg_blk_elems(load64(e2 + 56));
+        if (be < 0) { return 0; }                    # unknown or K-quant dtype
+        # a block never straddles two rows (ggml's rule): ne0 is whole blocks
+        if (load64(e2 + 24) % be != 0) { return 0; }
         # element count, checked at every step: 4 dims of up to 2^30 can multiply
         # past 2^64 (dims [4,27905,429509837,384773] wrapped to 4 through 1.2.1)
         var ne = 1;
@@ -328,21 +378,137 @@ fn gg_open(buf, len): i64 {
             ne = ne * d2;
             k2 = k2 + 1;
         }
-        var nb = ne * esz;
+        var nb = (ne / be) * _gg_blk_bytes(load64(e2 + 56));   # <= 2^29 x 4: no wrap
         var o2 = load64(e2 + 64);
         if (o2 < 0) { return 0; }
         if (o2 > data_len) { return 0; }
         if (nb > data_len - o2) { return 0; }
+        store64(e2 + 72, nb);
         i = i + 1;
     }
     return r;
 }
 
+# ---- the legacy block types (1.6.0) ---------------------------------------------
+# ggml-quants.c's dequantize_row_*, one 32-weight block at a time. Every block opens
+# with an f16 scale d; the _1 types follow it with an f16 minimum m. The 4-bit codes
+# are packed two per byte: byte j holds weight j in its low nibble and weight j + 16
+# in its high one. Q5_* keep each code's fifth bit in a little-endian u32 qh: bit j
+# for weight j and bit j + 16 for weight j + 16.
+#
+#   Q8_0  y = q * d          (q an int8)
+#   Q4_0  y = (q - 8) * d    Q5_0  y = (q - 16) * d
+#   Q4_1  y = q * d + m      Q5_1  y = q * d + m
+#
+# The values are exactly ggml's, which computes in f32. A product q * d is exact in
+# f32 (an 11-bit f16 significand times a code of at most 8 bits) and in f64: the _0
+# types need no rounding step. Adding m rounds in f32, so the _1 types round the
+# f64 sum to f32 (f32_from); one f64 rounding then one f32 rounding equals ggml's
+# single f32 rounding because 53 >= 2 * 24 + 2. Held by tests/tcyr/gguf.tcyr against
+# gguf-py's dequantize (tests/fixtures/gguf_qblocks_v1.gguf).
+
+# the f16 at p as f64
+fn _gg_f16(p): i64 { return _st_f16_to_f64(load8(p) | (load8(p + 1) << 8)); }
+# x rounded to f32 precision, as f64
+fn _gg_f32r(x): i64 { return f32_to(f32_from(x)); }
+
+# one Q8_0 block at blk -> 32 f64 at out
+fn _gg_deq_q8_0(blk, out): i64 {
+    var d = _gg_f16(blk);
+    var j = 0;
+    while (j < 32) {
+        var q = load8(blk + 2 + j);
+        if (q >= 128) { q = q - 256; }
+        store64(out + j * 8, f64_mul(f64_from(q), d));
+        j = j + 1;
+    }
+    return 0;
+}
+# one Q4_0 (t = 2) or Q4_1 (t = 3) block
+fn _gg_deq_q4(t, blk, out): i64 {
+    var d = _gg_f16(blk);
+    if (t == 2) {
+        var j = 0;
+        while (j < 16) {
+            var b = load8(blk + 2 + j);
+            store64(out + j * 8, f64_mul(f64_from((b & 15) - 8), d));
+            store64(out + (j + 16) * 8, f64_mul(f64_from((b >> 4) - 8), d));
+            j = j + 1;
+        }
+        return 0;
+    }
+    var m = _gg_f16(blk + 2);
+    var k = 0;
+    while (k < 16) {
+        var c = load8(blk + 4 + k);
+        store64(out + k * 8, _gg_f32r(f64_add(f64_mul(f64_from(c & 15), d), m)));
+        store64(out + (k + 16) * 8, _gg_f32r(f64_add(f64_mul(f64_from(c >> 4), d), m)));
+        k = k + 1;
+    }
+    return 0;
+}
+# one Q5_0 (t = 6) or Q5_1 (t = 7) block
+fn _gg_deq_q5(t, blk, out): i64 {
+    var d = _gg_f16(blk);
+    var m = 0;
+    var hoff = 2;
+    if (t == 7) { m = _gg_f16(blk + 2); hoff = 4; }
+    var qh = load32(blk + hoff) & 0xFFFFFFFF;
+    var qs = blk + hoff + 4;
+    var j = 0;
+    while (j < 16) {
+        var b = load8(qs + j);
+        var x0 = (b & 15) | (((qh >> j) & 1) << 4);
+        var x1 = (b >> 4) | (((qh >> (j + 16)) & 1) << 4);
+        if (t == 6) {
+            store64(out + j * 8, f64_mul(f64_from(x0 - 16), d));
+            store64(out + (j + 16) * 8, f64_mul(f64_from(x1 - 16), d));
+        } else {
+            store64(out + j * 8, _gg_f32r(f64_add(f64_mul(f64_from(x0), d), m)));
+            store64(out + (j + 16) * 8, _gg_f32r(f64_add(f64_mul(f64_from(x1), d), m)));
+        }
+        j = j + 1;
+    }
+    return 0;
+}
+# one block of type t (a supported block type) at blk -> 32 f64 at out
+fn _gg_deq_block(t, blk, out): i64 {
+    if (t == 8) { return _gg_deq_q8_0(blk, out); }
+    if (t == 2 || t == 3) { return _gg_deq_q4(t, blk, out); }
+    return _gg_deq_q5(t, blk, out);
+}
+# elements [start, start + n) of a block-typed payload p -> dst. Whole blocks
+# decode straight into dst; a range that starts or ends inside a block decodes
+# that block into a local buffer and copies its part. Only blocks the range
+# touches are read.
+fn _gg_read_blocks(t, p, start, n, dst): i64 {
+    var bb = _gg_blk_bytes(t);
+    var tmp[256];
+    var b = start / 32;
+    var skip = start % 32;
+    var done = 0;
+    while (done < n) {
+        var take = 32 - skip;
+        if (take > n - done) { take = n - done; }
+        if (take == 32) {
+            _gg_deq_block(t, p + b * bb, dst + done * 8);
+        } else {
+            _gg_deq_block(t, p + b * bb, &tmp);
+            memcpy(dst + done * 8, &tmp + skip * 8, take * 8);
+        }
+        done = done + take;
+        skip = 0;
+        b = b + 1;
+    }
+    return 0;
+}
+
 # Read elements [start, start + n) of tensor e (flat, ne-order) into dst[0..n) as
-# f64 (1.2.2). Uses the safetensors path's bulk wideners (bit-identical to the
-# per-element ones; F16 is byte-composed, so the last element never reads past
-# the payload). Returns n, or -1 for a range outside the tensor or a dtype other
-# than F32/F16.
+# f64 (1.2.2). F32 / F16 use the safetensors path's bulk wideners (bit-identical
+# to the per-element ones; F16 is byte-composed, so the last element never reads
+# past the payload). The block types (1.6.0) take any range, block-aligned or not,
+# and give ggml's dequantized values. Returns n, or -1 for a range outside the
+# tensor or an unsupported dtype.
 fn gg_read_f64_range(r, e, start, n, dst): i64 {
     var total = gg_entry_nelems(e);
     if (start < 0) { return 0 - 1; }
@@ -353,6 +519,7 @@ fn gg_read_f64_range(r, e, start, n, dst): i64 {
     var t = gg_entry_gtype(e);
     if (t == 0) { _st_widen_f32(p + start * 4, dst, n); return n; }
     if (t == 1) { _st_widen_f16(p + start * 2, dst, n); return n; }
+    if (gg_type_is_quant(t) == 1) { _gg_read_blocks(t, p, start, n, dst); return n; }
     return 0 - 1;
 }
 # Read the whole tensor into dst (gg_entry_nelems f64). Returns the element

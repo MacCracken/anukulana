@@ -14,10 +14,11 @@ name: Real weights
 # Since 1.5.0 it also runs `convert` (safetensors door) and `gpt2-load`; the
 # convert step's reload must be bit-identical to the direct import.
 #
-# Not covered here: `gpt2-gguf`, `gpt2-cross` and convert's GGUF door. Their GGUF
-# file is made by tests/oracle/gen_gguf.py in a disposable Python venv (llama.cpp's
-# converter conventions, so the cross gate checks against an independent writer),
-# and Python is never a build, run or test dependency. Run those three locally.
+# Not covered here: `gpt2-gguf`, `gpt2-cross`, `gpt2-qgguf` (1.6.0) and convert's
+# GGUF door. Their GGUF files are made by tests/oracle/gen_gguf.py in a disposable
+# Python venv (llama.cpp's converter conventions, and gguf-py's quantizer for the
+# block types, so the gates check against an independent writer), and Python is
+# never a build, run or test dependency. Run those locally.
 
 on:
   workflow_dispatch:

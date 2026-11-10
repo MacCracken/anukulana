@@ -13,6 +13,9 @@
 # and widen STRAIGHT into the params buffer (token_embd is 309 MB as f64,
 # past the alloc cap; no scratch). Norms/biases are 1D — direct.
 #
+# Any tensor may be in one of llama.cpp's legacy block types (1.6.0: Q4_0, Q4_1,
+# Q5_0, Q5_1, Q8_0); gg_read_f64_range dequantizes it, so the mapping is unchanged.
+#
 # Config from KV metadata: gpt2.embedding_length (C), gpt2.block_count (NL),
 # gpt2.attention.head_count (nh), gpt2.feed_forward_length (F; absent → 4C);
 # V from token_embd's outer dim. `general.architecture` must be "gpt2".

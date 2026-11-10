@@ -290,8 +290,218 @@ fn test_gguf_kv_width(): i64 {
     return 0;
 }
 
+# ---- 1.6.0: the legacy block types (Q4_0, Q4_1, Q5_0, Q5_1, Q8_0) --------------
+fn _is_nan64(b): i64 {
+    if (((b >> 52) & 0x7FF) == 0x7FF && (b & 0xFFFFFFFFFFFFF) != 0) { return 1; }
+    return 0;
+}
+fn _is_inf64(b): i64 {
+    if (((b >> 52) & 0x7FF) == 0x7FF && (b & 0xFFFFFFFFFFFFF) == 0) { return 1; }
+    return 0;
+}
+
+# read [start, start + n) of q into c and count its differences from the whole read a
+fn _qb_range(r, q, a, c, start, n): i64 {
+    if (gg_read_f64_range(r, q, start, n, c) != n) { return n + 1; }
+    var bad = 0;
+    var i = 0;
+    while (i < n) {
+        if (load64(c + i * 8) != load64(a + (start + i) * 8)) { bad = bad + 1; }
+        i = i + 1;
+    }
+    return bad;
+}
+
+# One type of the oracle fixture: <qn> (4 rows of 256 weights of type gt, random
+# bytes) dequantizes to <rn> (gguf-py's dequantize as F32) bit for bit, a NaN
+# matching any NaN; and every sub-range, on or off block boundaries, reads the
+# same values as the whole tensor.
+fn _qb_check(r, qn, rn, gt, bb): i64 {
+    var q = gg_find(r, qn);
+    var f = gg_find(r, rn);
+    assert_nonnull(q, "the oracle holds the block tensor");
+    assert_nonnull(f, "the oracle holds the reference tensor");
+    assert_eq(gg_entry_gtype(q), gt, "the block tensor has its type");
+    assert_eq(gg_entry_nelems(q), 1024, "4 x 256 weights");
+    assert_eq(gg_entry_nbytes(q), 32 * bb, "32 blocks of the type's size");
+    var a = t_alloc(1024);
+    var b = t_alloc(1024);
+    assert_eq(gg_read_f64(r, q, a), 1024, "the block tensor reads");
+    assert_eq(gg_read_f64(r, f, b), 1024, "the reference reads");
+    var diffs = 0;
+    var nan = 0;
+    var inf = 0;
+    var i = 0;
+    while (i < 1024) {
+        var x = load64(a + i * 8);
+        var y = load64(b + i * 8);
+        if (_is_nan64(y) == 1) {
+            nan = nan + 1;
+            if (_is_nan64(x) == 0) { diffs = diffs + 1; }
+        } elif (x != y) { diffs = diffs + 1; }
+        if (_is_inf64(y) == 1) { inf = inf + 1; }
+        i = i + 1;
+    }
+    assert_eq(diffs, 0, "the dequantization equals gguf-py's, bit for bit");
+    assert_gt(nan, 0, "the oracle reaches NaN");
+    assert_gt(inf, 0, "the oracle reaches infinity");
+    var c = t_alloc(1024);
+    var bad = _qb_range(r, q, a, c, 0, 1);
+    bad = bad + _qb_range(r, q, a, c, 5, 27);
+    bad = bad + _qb_range(r, q, a, c, 31, 2);
+    bad = bad + _qb_range(r, q, a, c, 17, 100);
+    bad = bad + _qb_range(r, q, a, c, 33, 991);
+    bad = bad + _qb_range(r, q, a, c, 1000, 24);
+    bad = bad + _qb_range(r, q, a, c, 1023, 1);
+    bad = bad + _qb_range(r, q, a, c, 512, 0);
+    bad = bad + _qb_range(r, q, a, c, 256, 512);
+    assert_eq(bad, 0, "every sub-range reads what the whole read gave");
+    assert_eq(gg_read_f64_range(r, q, 1000, 25, c), 0 - 1, "a range past the end is refused");
+    assert_eq(gg_read_f64_range(r, q, 0 - 1, 1, c), 0 - 1, "a negative start is refused");
+    assert_eq(gg_read_f64_range(r, q, 0, 1025, c), 0 - 1, "a range longer than the tensor is refused");
+    return 0;
+}
+
+fn test_gguf_qblocks_oracle(): i64 {
+    var r = gg_open_mmap("tests/fixtures/gguf_qblocks_v1.gguf");
+    assert_nonnull(r, "the block oracle fixture (gguf-py-written) opens");
+    assert_eq(gg_count(r), 10, "five types, a block tensor and a reference each");
+    _qb_check(r, "q4_0.q", "q4_0.ref", GG_T_Q4_0(), 18);
+    _qb_check(r, "q4_1.q", "q4_1.ref", GG_T_Q4_1(), 20);
+    _qb_check(r, "q5_0.q", "q5_0.ref", GG_T_Q5_0(), 22);
+    _qb_check(r, "q5_1.q", "q5_1.ref", GG_T_Q5_1(), 24);
+    _qb_check(r, "q8_0.q", "q8_0.ref", GG_T_Q8_0(), 34);
+    return 0;
+}
+
+# A GPT-2 with token_embd and every block weight in type qt imports through
+# anuk_ggpt2_pack to the original params bit for bit, so the mapping's row reads and
+# transposes are right over block payloads; the logits match too.
+fn _q_roundtrip(qt, lo, hi): i64 {
+    var V = 13; var C = 32; var T = 6; var nh = 2; var NL = 2;
+    var cfg = alloc(64);
+    ru_cfg_init(cfg, V, C, T, nh, nh, NL, 4 * C, 1);
+    var np = ru_params_count(cfg);
+    var P = t_alloc(np);
+    _fillq(P, np, qt, lo, hi);
+    var lenp = alloc(8);
+    var buf = _export_gguf_q(cfg, P, lenp, qt);
+    var r = gg_open(buf, load64(lenp));
+    assert_nonnull(r, "the quantized GPT-2 GGUF opens");
+    assert_eq(gg_entry_gtype(gg_find(r, "token_embd.weight")), qt, "token_embd is in the block type");
+    assert_eq(gg_entry_gtype(gg_find(r, "blk.1.ffn_down.weight")), qt, "ffn_down is in the block type");
+    assert_eq(gg_entry_gtype(gg_find(r, "blk.0.attn_norm.weight")), GG_T_F32(), "norms stay F32");
+    var cfg2 = alloc(64);
+    assert_eq(anuk_ggpt2_infer_cfg(r, cfg2, 0), 0, "infer_cfg ok");
+    var P2 = t_alloc(np);
+    assert_eq(anuk_ggpt2_pack(r, cfg2, P2), 0, "the quantized pack is ok");
+    var diffs = 0;
+    var i = 0;
+    while (i < np) {
+        if (load64(P2 + i * 8) != load64(P + i * 8)) { diffs = diffs + 1; }
+        i = i + 1;
+    }
+    assert_eq(diffs, 0, "the quantized import is bit-identical to the original params");
+    var tokens = alloc(T * 8);
+    var t = 0;
+    while (t < T) { store64(tokens + t * 8, (t * 5 + 2) % V); t = t + 1; }
+    var L1 = t_alloc(T * V);
+    var L2 = t_alloc(T * V);
+    ru_model_fwd(cfg, P, tokens, L1, 0);
+    ru_model_fwd(cfg2, P2, tokens, L2, 0);
+    var ld = 0;
+    i = 0;
+    while (i < T * V) {
+        if (load64(L1 + i * 8) != load64(L2 + i * 8)) { ld = ld + 1; }
+        i = i + 1;
+    }
+    assert_eq(ld, 0, "the quantized import's logits are bit-identical");
+    return 0;
+}
+
+fn test_gguf_quant_gpt2_roundtrip(): i64 {
+    _q_roundtrip(GG_T_Q8_0(), 0 - 50, 50);
+    _q_roundtrip(GG_T_Q4_0(), 0 - 8, 7);
+    _q_roundtrip(GG_T_Q4_1(), 0 - 8, 7);
+    _q_roundtrip(GG_T_Q5_0(), 0 - 16, 15);
+    _q_roundtrip(GG_T_Q5_1(), 0 - 16, 15);
+    return 0;
+}
+
+# a one-tensor GGUF: `name` of type gt, ne = [ne0] or [ne0, ne1], with nraw raw bytes
+fn _q_one(gt, ne0, ne1, nraw, lenp): i64 {
+    var raw = alloc(nraw + 8);
+    var i = 0;
+    while (i < nraw) { store8(raw + i, (i * 37 + 11) & 0xFF); i = i + 1; }
+    var w = _ggw_new();
+    var nd = 1;
+    if (ne1 != 0) { nd = 2; }
+    _ggw_add_raw(w, "t", raw, ne0, ne1, nd, gt, nraw);
+    return _ggw_finish(w, 0, 32, 0, lenp);
+}
+fn _q_opens(gt, ne0, ne1, nraw): i64 {
+    var lenp = alloc(8);
+    var buf = _q_one(gt, ne0, ne1, nraw, lenp);
+    if (gg_open(buf, load64(lenp)) == 0) { return 0; }
+    return 1;
+}
+
+fn test_gguf_quant_rejects(): i64 {
+    var lenp = alloc(8);
+    var buf = _q_one(GG_T_Q8_0(), 64, 0, 68, lenp);
+    var r = gg_open(buf, load64(lenp));
+    assert_nonnull(r, "a two-block Q8_0 vector opens");
+    assert_eq(gg_entry_nbytes(gg_entry(r, 0)), 68, "its payload is 2 x 34 bytes");
+    assert(streq(gg_type_name(GG_T_Q8_0()), "Q8_0") == 1, "the type is named");
+    assert_eq(_q_opens(GG_T_Q8_0(), 32, 3, 102), 1, "a [32, 3] Q8_0 matrix opens");
+    assert_eq(_q_opens(GG_T_Q5_1(), 64, 2, 96), 1, "a [64, 2] Q5_1 matrix opens");
+    assert_eq(_q_opens(GG_T_Q8_0(), 48, 0, 68), 0, "a row that isn't whole blocks is rejected");
+    assert_eq(_q_opens(GG_T_Q4_0(), 32, 2, 18), 0, "one block of payload for two is rejected");
+    assert_eq(_q_opens(GG_T_Q8_0(), 64, 0, 67), 0, "a payload one byte short is rejected");
+    assert_eq(_q_opens(GG_T_Q4_1(), 1, 0, 20), 0, "a 1-weight block tensor is rejected");
+    # the K-quants (10..15), the removed Q4_2 / Q4_3 (4, 5), Q8_1 (9), Q8_K (15) and later ids
+    var t = 4;
+    var opened = 0;
+    while (t < 40) {
+        if (t != 6 && t != 7 && t != 8) { opened = opened + _q_opens(t, 256, 0, 512); }
+        t = t + 1;
+    }
+    assert_eq(opened, 0, "every other ggml type id is rejected");
+    assert(streq(gg_type_name(12), "?") == 1, "an unsupported type has no name");
+    assert_eq(gg_type_is_quant(GG_T_F16()), 0, "F16 is not a block type");
+    return 0;
+}
+
+# anuk_weight_drift, gpt2-qgguf's weight measure: exact on small cases
+fn test_weight_drift(): i64 {
+    var p = t_alloc(4);
+    var q = t_alloc(4);
+    tset(p, 0, f64_from(3)); tset(p, 1, f64_from(0 - 4)); tset(p, 2, f64_from(0)); tset(p, 3, f64_from(0));
+    var out = alloc(24);
+    anuk_weight_drift(p, p, 4, out);
+    assert_eq(load64(out), f64_from(0), "identical: max 0");
+    assert_eq(load64(out + 8), f64_from(0), "identical: relative RMS 0");
+    anuk_weight_drift(p, q, 4, out);                       # q all zero
+    assert_eq(load64(out), f64_from(4), "against zero: max |dW| = 4");
+    assert_eq(load64(out + 8), f64_from(1), "against zero: relative RMS exactly 1");
+    tset(q, 0, f64_from(0 - 3)); tset(q, 1, f64_from(4));
+    anuk_weight_drift(p, q, 4, out);                       # q = -p
+    assert_eq(load64(out + 8), f64_from(2), "q = -p: relative RMS 2");
+    tset(q, 2, f64_div(f64_from(0), f64_from(0)));         # a NaN in q
+    anuk_weight_drift(p, q, 4, out);
+    assert_eq(load64(out + 16), 1, "the NaN is counted");
+    assert_eq(load64(out + 8), f64_from(2), "and left out of the sums");
+    anuk_weight_drift(q, q, 2, out);
+    assert_eq(load64(out + 8), f64_from(0), "a zero-error run over nonzero p");
+    return 0;
+}
+
 fn main(): i64 {
     alloc_init();
+    test_weight_drift();
+    test_gguf_qblocks_oracle();
+    test_gguf_quant_gpt2_roundtrip();
+    test_gguf_quant_rejects();
     test_gguf_minimal();
     test_gguf_gpt2_roundtrip();
     test_gguf_hostile_head_count();

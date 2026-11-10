@@ -243,8 +243,75 @@ fn test_full_context(): i64 {
     return 0;
 }
 
+# 1.6.0: a quantized GGUF (token_embd and the block weights in type qt) converts to
+# F32 tensors holding exactly the dequantized values. Its file loads onto the
+# direct import bit for bit, records the type as anukulana.source.quant, and holds
+# the same tensors, byte for byte, as the F32 safetensors export of the same params.
+fn _cv_quant(qt, lo, hi, qname): i64 {
+    var sk = alloc(64);
+    var pk = alloc(32);
+    anuk_demo_keypair(sk, pk);
+    var cfg = alloc(64);
+    ru_cfg_init(cfg, 7, 32, 6, 2, 2, 1, 128, 1);
+    var np = ru_params_count(cfg);
+    var P = t_alloc(np);
+    _fillq(P, np, qt, lo, hi);
+    sys_mkdir("/tmp/anuk_cvq", 448);
+    var lp = alloc(8);
+    var gb = _export_gguf_q(cfg, P, lp, qt);
+    file_write_all("/tmp/anuk_cvq/model.gguf", gb, load64(lp));
+    var st = _export_gpt2_dt(cfg, P, lp, 1);
+    file_write_all("/tmp/anuk_cvq/model.safetensors", st, load64(lp));
+    var out_q = "/tmp/anuk_cvq_q.tula";
+    var out_s = "/tmp/anuk_cvq_s.tula";
+    assert_eq(anuk_convert_gguf("/tmp/anuk_cvq/model.gguf", out_q, sk), 0, "a quantized GGUF converts");
+    assert_eq(anuk_convert_safetensors("/tmp/anuk_cvq/model.safetensors", 2, out_s, sk), 0,
+      "its F32 safetensors twin converts");
+    var cG = alloc(64);
+    var pG = anuk_ggpt2_import("/tmp/anuk_cvq/model.gguf", 0, cG);
+    var cH = alloc(64);
+    var pH = anuk_tula_import(out_q, pk, 0, cH);
+    assert_nonnull(pH, "the converted quantized file loads");
+    assert_eq(_cv_same_params(pG, pH, ru_params_count(cG)), 0, "quantized door: reload bit-identical");
+    assert_eq(_cv_same_params(P, pH, np), 0, "and equal to the exported params");
+    assert_eq(_cv_meta_is(out_q, "anukulana.source.quant", qname), 1, "meta source.quant names the type");
+    assert_eq(_cv_meta_is(out_s, "anukulana.source.quant", qname), 0, "an unquantized source has no source.quant");
+    var ra = tula_read_file(out_q);
+    var rb = tula_read_file(out_s);
+    assert_eq(tula_entry_dtype(tula_find_name(ra, "h.0.mlp.c_proj.weight")), TULA_DT_F32, "dequantized to F32");
+    var name = alloc(64);
+    var dims = alloc(16);
+    var diff = 0;
+    var i = 0;
+    while (i < 4 + 12) {
+        _gpt2_spec(cfg, i, name, dims);
+        var ea = tula_find_name(ra, name);
+        var eb = tula_find_name(rb, name);
+        if (ea == 0 || eb == 0) { diff = diff + 1; }
+        elif (tula_entry_data_len(ea) != tula_entry_data_len(eb)) { diff = diff + 1; }
+        elif (memeq(tula_entry_data(ra, ea), tula_entry_data(rb, eb), tula_entry_data_len(ea)) != 1) {
+            diff = diff + 1;
+        }
+        i = i + 1;
+    }
+    assert_eq(diff, 0, "the quantized GGUF and the F32 safetensors convert to the same tensors");
+    return 0;
+}
+
+fn test_convert_quant(): i64 {
+    _cv_quant(GG_T_Q8_0(), 0 - 50, 50, "Q8_0");
+    _cv_quant(GG_T_Q4_0(), 0 - 8, 7, "Q4_0");
+    _cv_quant(GG_T_Q4_1(), 0 - 8, 7, "Q4_1");
+    _cv_quant(GG_T_Q5_0(), 0 - 16, 15, "Q5_0");
+    _cv_quant(GG_T_Q5_1(), 0 - 16, 15, "Q5_1");
+    var mask = (1 << GG_T_Q8_0()) | (1 << GG_T_Q4_0());
+    assert(streq(_cv_quant_list(mask), "Q4_0,Q8_0") == 1, "a mixed file lists its types");
+    return 0;
+}
+
 fn main(): i64 {
     alloc_init();
+    test_convert_quant();
     test_convert_doors();
     test_full_context();
     test_convert_rejects();

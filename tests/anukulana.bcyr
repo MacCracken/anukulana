@@ -4,7 +4,8 @@
 # small, 2026-07-04): 123.6M fp32 -> f64 widens plus the pack onto rupantara's
 # layout. These benches time those paths on synthetic, f32-exact data, so they
 # need no checkpoint:
-#   - st_read_f64 / gg_read_f64: the per-element widen, 1M elements
+#   - st_read_f64 / gg_read_f64: the per-element widen, 1M elements; and (1.6.0)
+#     gg_read_f64 over the Q8_0 / Q4_0 / Q4_1 block decoders, 1M weights
 #   - anuk_gpt2_pack / anuk_ggpt2_pack: the whole pack of a small GPT-2
 #     (V=2048 C=128 T=64 nh=4 NL=4 F=512, about 1.06M params), from F32 files
 #   - nf4_dq_pack / nf4_dq_unpack: the local double-quant layer, 64k scales
@@ -61,19 +62,22 @@ fn _bench_st_read(dtype_name, esz, iters, label): i64 {
     return 0;
 }
 
-fn bench_gg_read(): i64 {
+fn bench_gg_read(): i64 { return _bench_gg_read(0, "gg_read_f64 F32 n=1M"); }
+# gg_read_f64 of a 1M-element vector of ggml type gt (F32, or a block type: the
+# test writer's fixed-scale blocks; the decode time doesn't depend on the codes)
+fn _bench_gg_read(gt, label): i64 {
     var n = 1048576;
     var src = t_alloc(n);
     _bfill32(src, n, 2);
     var w = _ggw_new();
-    _ggw_add(w, "w", src, n, 0, 1, 0);
+    _ggw_add(w, "w", src, n, 0, 1, gt);
     var lp = alloc(8);
     var buf = _ggw_finish(w, 0, 32, 0, lp);
     var r = gg_open(buf, load64(lp));
     var e = gg_entry(r, 0);
     var dst = t_alloc(n);
     var iters = 20;
-    var b = bench_new("gg_read_f64 F32 n=1M");
+    var b = bench_new(label);
     bench_batch_start(b);
     var i = 0;
     while (i < iters) { gg_read_f64(r, e, dst); i = i + 1; }
@@ -159,6 +163,9 @@ fn main(): i64 {
     _bench_st_read("F32", 4, 20, "st_read_f64 F32 n=1M");
     _bench_st_read("F16", 2, 20, "st_read_f64 F16 n=1M");
     bench_gg_read();
+    _bench_gg_read(GG_T_Q8_0(), "gg_read_f64 Q8_0 n=1M");
+    _bench_gg_read(GG_T_Q4_0(), "gg_read_f64 Q4_0 n=1M");
+    _bench_gg_read(GG_T_Q4_1(), "gg_read_f64 Q4_1 n=1M");
     bench_st_pack();
     bench_gg_pack();
     bench_dq();

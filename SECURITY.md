@@ -29,8 +29,15 @@ their defenses:
    tensors/KVs, 2^30 per dim, 2^29 elems — the element count checked at every
    multiply since 1.2.2, when four in-cap dims could wrap to 4), every KV read
    at its own width (1.2.2: a u16 was read with a 4-byte load), allocations
-   sized from foreign data null-checked. Only F32/F16 payloads are consumed; quantized GGML block
-   types reject cleanly. **Fuzz-gated in the same cut**: 30k byte-mutation
+   sized from foreign data null-checked. F32/F16 payloads and *(1.6.0)* the legacy
+   block types Q4_0/Q4_1/Q5_0/Q5_1/Q8_0 are consumed; every other GGML type id (the
+   K-quants included) rejects cleanly. A block tensor's `ne0` must be whole blocks
+   and its payload exactly blocks × block bytes, checked before any read, and a
+   decoder reads only the blocks a range touches. The 1.6.0 fuzz rounds (30k byte
+   mutations of a five-type image, 20k structure-aware mutations of `ne0`, the type
+   and the data offset, a truncation sweep, random sub-range reads) run against a
+   guard page; two over-read mutants of the decoder and the extent check fault
+   there. **Fuzz-gated in the same cut**: 30k byte-mutation
    rounds + a full truncation sweep + 5k garbage buffers, guard-paged, reads
    on every accepted reader. *(1.2.2)* The GPT-2 mapping requires every weight
    to have exactly its expected shape: through 1.2.1 a weight with extra output

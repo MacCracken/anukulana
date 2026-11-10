@@ -21,6 +21,10 @@ checkpoint. Same host and session, cyrius 6.7.18, median of 3 runs. 1.2.2's outp
 | `nf4_dq_pack nb=64k` (unchanged code) | 0.417 ms | 0.410 ms | — |
 | `nf4_dq_unpack nb=64k` (unchanged code) | 0.264 ms | 0.273 ms | — |
 
+**1.6.0's block decoders** (same host, cyrius 6.7.18, one run): `gg_read_f64` over 1M weights takes
+**3.79 ms for Q8_0**, **3.31 ms for Q4_0** and **6.40 ms for Q4_1**, against 5.93 ms for F32 in the same
+run. Q8_0 and Q4_0 read fewer bytes than F32; Q4_1 (like Q5_1, not benched) pays for the f32 rounding of `q * d + m`.
+
 What moved: one `load32` per f32 instead of four byte loads; bulk widen loops that rebias normal numbers
 inline; the safetensors fused QKV split straight into place and `wpe` read to T rows; GGUF transposes that
 widen each element once (QKV was widened three times). The end-to-end gain on the real checkpoint is in the
@@ -42,6 +46,9 @@ rosnet 1.4.1, rupantara 0.5.3). Every gate passed in both captures.
 | `gpt2-tula` | 79.5 s | **50.15 s** | the qlora pipeline + signed 63.8 MB checkpoint write/read/verify + adapter write/read/verify + bit-compares |
 | `convert` *(1.5.0)* | — | **86.8 s** | import + write the 497.8 MB F32 file (source SHA-256 1.7 s, Ed25519 sign ~54 s) + reload (verify ~27 s) + bit-compare |
 | `gpt2-load` *(1.5.0)* | — | **29.3 s** | verify the converted file's signature (~27 s) + pack + the batch == decode check |
+| `gpt2-gguf` Q8_0 / Q4_0 *(1.6.0)* | — | **2.66 s / 2.13 s** | the `gpt2-gguf` check on gguf-py-quantized files (134.9 MB / 73.1 MB) |
+| `gpt2-qgguf` *(1.6.0)* | — | **9.2–10.3 s** | both imports, the weight drift over 124.4M params, the batch == decode check, 8 reference positions |
+| `convert` Q4_0 *(1.6.0)* | — | **79.0 s** | dequantize to exact F32 + sign the 497.8 MB file + reload (verify) + bit-compare |
 
 Fidelity at 1.3.0: argmax exact at all 48 positions, worst last-row maxrel **1.049e-6** (1.0: 1.05e-6), so
 the GELU `tanh` change at cyrius 6.6.13 (up to 2 ulp) did not move the gate.

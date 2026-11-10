@@ -340,11 +340,138 @@ fn test_fuzz_gguf(): i64 {
     return 0;
 }
 
+# ---- 1.6.0: GGUF block types ------------------------------------------------------
+# A valid GGUF with one 2-block vector of each legacy block type (Q4_0, Q4_1, Q5_0,
+# Q5_1, Q8_0: ne0 = 64), payload bytes from a fixed pattern. `fields` receives,
+# per tensor, the file offsets of its ne0 (u64), ggml type (u32) and data offset
+# (u64), for the structure-aware round.
+fn _fz_valid_qgguf(out_len, fields): i64 {
+    var buf = alloc(1024);
+    var offp = alloc(8);
+    store64(offp, 0);
+    _fz_gg_u32(buf, offp, GGUF_MAGIC());
+    _fz_gg_u32(buf, offp, 3);
+    _fz_gg_u64(buf, offp, 5);                        # n_tensors
+    _fz_gg_u64(buf, offp, 1);                        # n_kv
+    _fz_gg_str(buf, offp, "general.architecture");
+    _fz_gg_u32(buf, offp, 8); _fz_gg_str(buf, offp, "gpt2");
+    var types = alloc(40);
+    store64(types, 2); store64(types + 8, 3); store64(types + 16, 6);
+    store64(types + 24, 7); store64(types + 32, 8);
+    var doff = 0;
+    var i = 0;
+    while (i < 5) {
+        var nm = alloc(8);
+        store8(nm, 97 + i); store8(nm + 1, 0);          # "a" .. "e"
+        _fz_gg_str(buf, offp, nm);
+        _fz_gg_u32(buf, offp, 1);                    # ndim
+        store64(fields + i * 24, load64(offp));
+        _fz_gg_u64(buf, offp, 64);                   # ne0: two blocks
+        store64(fields + i * 24 + 8, load64(offp));
+        _fz_gg_u32(buf, offp, load64(types + i * 8));
+        store64(fields + i * 24 + 16, load64(offp));
+        doff = doff + (32 - (doff % 32)) % 32;
+        _fz_gg_u64(buf, offp, doff);
+        doff = doff + 2 * _gg_blk_bytes(load64(types + i * 8));
+        i = i + 1;
+    }
+    var hend = load64(offp);
+    var dstart = hend + (32 - (hend % 32)) % 32;
+    var j = hend;
+    while (j < dstart + doff) { store8(buf + j, (j * 89 + 13) & 0xFF); j = j + 1; }
+    store64(out_len, dstart + doff);
+    return buf;
+}
+
+# the accessor surface plus sub-range reads at LCG-chosen starts and lengths, on
+# and off block boundaries, of every tensor of an accepted reader
+fn _fz_probe_gg_ranges(r): i64 {
+    _fz_probe_gg(r);
+    var i = 0;
+    while (i < gg_count(r)) {
+        var e = gg_entry(r, i);
+        var ne = gg_entry_nelems(e);
+        var out = alloc(ne * 8 + 8);
+        var k = 0;
+        while (k < 4 && out != 0) {
+            var s = _fz_next() % (ne + 1);
+            var n = _fz_next() % (ne - s + 1);
+            gg_read_f64_range(r, e, s, n, out);
+            k = k + 1;
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+
+fn test_fuzz_gguf_quant(): i64 {
+    var lenp = alloc(8);
+    var fields = alloc(5 * 24);
+    var valid = _fz_valid_qgguf(lenp, fields);
+    var vlen = load64(lenp);
+    var r0 = gg_open(valid, vlen);
+    assert_nonnull(r0, "the valid block-type seed GGUF opens");
+    assert_eq(gg_count(r0), 5, "one tensor per block type");
+    var work = alloc(vlen + 8);
+    var gend = _fz_guard_end(vlen + 256);
+    var accepted = 0;
+    var rejected = 0;
+    _fz_seed(20261109);
+
+    # byte mutation: 30k rounds, 1-4 bytes; most land in the block payloads, so the
+    # decoders see arbitrary codes and scales (NaN, infinity, subnormal)
+    var round = 0;
+    while (round < 30000) {
+        memcpy(work, valid, vlen);
+        var nmut = 1 + (_fz_next() % 4);
+        var m = 0;
+        while (m < nmut) { store8(work + (_fz_next() % vlen), _fz_next() & 0xFF); m = m + 1; }
+        var r = gg_open(_fz_place(work, vlen, gend), vlen);
+        if (r != 0) { _fz_probe_gg_ranges(r); accepted = accepted + 1; }
+        else { rejected = rejected + 1; }
+        round = round + 1;
+    }
+    # structure-aware: one tensor's ne0, type or data offset set to a small random
+    # value (sizes off by a byte or a block, types next to the supported ones)
+    var srej = 0;
+    round = 0;
+    while (round < 20000) {
+        memcpy(work, valid, vlen);
+        var t = _fz_next() % 5;
+        var which = _fz_next() % 3;
+        var at = load64(fields + t * 24 + which * 8);
+        var v = _fz_next() % 400;
+        if (which == 1) { v = _fz_next() % 40; }
+        var b = 0;
+        var nb = 8;
+        if (which == 1) { nb = 4; }
+        while (b < nb) { store8(work + at + b, (v >> (b * 8)) & 0xFF); b = b + 1; }
+        var r4 = gg_open(_fz_place(work, vlen, gend), vlen);
+        if (r4 != 0) { _fz_probe_gg_ranges(r4); }
+        else { srej = srej + 1; }
+        round = round + 1;
+    }
+    # truncation sweep: every prefix
+    var L = 0;
+    while (L <= vlen) {
+        var r2 = gg_open(_fz_place(valid, L, gend), L);
+        if (r2 != 0) { _fz_probe_gg_ranges(r2); }
+        L = L + 1;
+    }
+    assert_eq(gg_open(_fz_place(valid, vlen - 1, gend), vlen - 1), 0, "a payload one byte short is rejected");
+    assert_gt(accepted, 0, "block-type fuzz: mutated files were accepted and read");
+    assert_gt(rejected, 0, "block-type fuzz: mutated files were rejected");
+    assert_gt(srej, 0, "block-type fuzz: structural mutations were rejected");
+    assert_eq(accepted + rejected, 30000, "block-type fuzz: all byte rounds ran");
+    return 0;
+}
+
 fn main(): i64 {
     alloc_init();
     test_fuzz_safetensors();
     test_fuzz_oracle_fixture();
     test_fuzz_gguf();
+    test_fuzz_gguf_quant();
     return assert_summary();
 }
 

@@ -15,7 +15,7 @@ them: the weight **format** is `tula`; the transformer **forward** is `rupantara
 
 ## Status
 
-**1.5.0 — STABLE: the Type-3 reference, frozen at 1.0.0 + the GGUF door** ([`docs/api.md`](docs/api.md) +
+**1.6.0 — STABLE: the Type-3 reference, frozen at 1.0.0 + the GGUF door** ([`docs/api.md`](docs/api.md) +
 [`STABILITY.md`](STABILITY.md); parsers fuzz-gated, audited —
 [`SECURITY.md`](SECURITY.md) and the 2026-11-09 P(-1) sweep,
 [`docs/audit/2026-11-09-audit.md`](docs/audit/2026-11-09-audit.md); benchmarks captured). The charter (import → run →
@@ -34,8 +34,10 @@ a real operator key — ifran's `store add` records **`verified`** end-to-end). 
 1.1.0 (2026-07-05): GGUF import** — a sovereign GGUF v2/v3 parser (llama.cpp's format)
 plus the `blk.N.*` GPT-2 mapping; `gpt2-gguf` runs the real checkpoint through
 the second foreign door, and `gpt2-cross` proves **both doors bit-identical**
-(123.6M packed params / 402k logits, 0 diffs). Quantized GGML payloads and the
-TinyLlama-class (llama-architecture) mapping are the next lanes; see
+(123.6M packed params / 402k logits, 0 diffs). The GGUF door now reads llama.cpp's
+legacy quantized block types (Q4_0, Q4_1, Q5_0, Q5_1, Q8_0; `gpt2-qgguf` reports
+their drift; 1.6.0). The K-quants and the TinyLlama-class
+(llama-architecture) mapping are the next lanes; see
 [`docs/development/roadmap.md`](docs/development/roadmap.md). The Cyrius pin and
 the dependency tags are in [`cyrius.cyml`](cyrius.cyml); the CHANGELOG records
 each move.
