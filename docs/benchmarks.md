@@ -70,7 +70,7 @@ the GELU `tanh` change at cyrius 6.6.13 (up to 2 ulp) did not move the gate.
   got faster despite the training loop below.
 - **Head-adapter training is the slow part now: about 30 ms per step, 24 s for 800 steps.** Measured per
   step at the real dims (T=8, C=768, V=50257, r=8): `ru_softmax_fwd` over the 402k logits 10.0 ms
-  (rupantara, bounded by ganita's `f64_exp`, about 14 ns each), `lora_adam` on B (402k params) 9.1 ms,
+  (rupantara; 58 % of it is the cyrius `f64_exp` builtin, x87 on x86_64, about 14.5 ns each), `lora_adam` on B (402k params) 9.1 ms,
   `lora_bwd` 5.4 ms, `lora_fwd` 4.0 ms, `lora_xent_bwd` 1.4 ms. The unmodified 1.2.1 code takes 27.3 s for
   `gpt2-lora` on the same box, so 1.2.2's refactor didn't cause it; it came with the toolchain and
   dependency moves since 1.0. **Correction:** this file's 1.0 note said "800 Adam steps cost ~2 s"; its own

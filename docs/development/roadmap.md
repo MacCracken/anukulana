@@ -27,8 +27,8 @@
 >    schedules after its 1.0.
 >
 > Until then the unblocked work is anukulana's own in 1.x.x: the bit-identical `lora_adam` hoist and
-> duplicate-name detection in safetensors headers. The asks to other repos are in Gates / relations;
-> filing them needs the maintainer's go.
+> duplicate-name detection in safetensors headers. The asks to other repos were filed in their
+> `docs/development/issues/` on 2026-11-09 (Gates / relations).
 >
 > This file lists **remaining work only**. Shipped work is in the [CHANGELOG](../../CHANGELOG.md),
 > [`state.md`](state.md) and the audits ([2026-07-04](../audit/2026-07-04-audit.md),
@@ -88,8 +88,9 @@ is current when rupantara ships it.
 - **The layout helpers.** anukulana's source uses 29 of rupantara's underscore helpers (`_cfg_*`,
   `_ru_o_*`, `_p_*`, `_b?`, `_ru_blk_base`) as its layout API (counted at 1.2.2; rupantara's audit
   counted 22 before `_cfg_bias` and a few others were in use). Move onto public names if rupantara
-  adds them, or record the frozen underscore set. rupantara's 0.7.x item still says 22, so give it the
-  current list when that work starts.
+  adds them, or record the frozen underscore set. The current list of 29 is filed with rupantara
+  (`docs/development/issues/2026-11-09-anukulana-uses-29-layout-helpers.md`), whose 0.7.x item
+  still says 22.
 - **The allocating entries.** `gpt2-oracle` and `gpt2-cross` call the allocating `ru_model_fwd_n`
   (`ru_model_fwd` through 1.5.0): 3 and 2 calls, bounded. Move them to `ru_model_fwd_n_s` if rupantara
   deprecates the allocating entries.
@@ -129,9 +130,11 @@ missing is the forward and the mapping.
   V=50257, r=8), so it is now most of `gpt2-lora` (26.6 s), `gpt2-qlora` and `gpt2-tula`. It is about
   2.6× slower per step than at 1.0, from the toolchain and dependency moves, not anukulana code. The two
   biggest pieces:
-  - `ru_softmax_fwd` over the 402k logits, 10.0 ms, bound by ganita's `f64_exp` (about 14 ns each).
-    That's rupantara's and ganita's: report it with these numbers. A faster `exp` changes bits, so it
-    needs their parity policy first.
+  - `ru_softmax_fwd` over the 402k logits, 10.0 ms. 58 % of it is the cyrius `f64_exp` builtin (x87
+    on x86_64, 14.5 ns per call, re-measured 2026-11-09), not a ganita function, as this file said
+    before. Filed with rupantara
+    (`docs/development/issues/2026-11-09-anukulana-softmax-exp-cost.md`). A faster `exp` changes
+    bits, so it needs rupantara's parity decision first.
   - `lora_adam` on B (402k params), 9.1 ms. This one is anukulana's. Bit-identical first: hoist the
     per-element `1 − β` subtractions out of the loop. Dividing by the bias corrections through a
     reciprocal would change bits, so it isn't allowed under the Discipline rule.
@@ -147,15 +150,16 @@ missing is the forward and the mapping.
   - **Where the vocabulary is:** HF ships `vocab.json` and `merges.txt` beside the safetensors (not
     staged in `~/models/gpt2` yet). llama.cpp's GGUF carries them as `tokenizer.ggml.tokens` and
     `.merges`, though `gen_gguf.py` doesn't write them today.
-  - **The ask:** akshara adds a pretrained-vocabulary mode. File it with akshara (tokenizing is
-    akshara's, per ADR 0001); anukulana then adds the command.
+  - **The ask:** akshara adds a pretrained-vocabulary mode (tokenizing is akshara's, per ADR 0001).
+    Filed: `akshara/docs/development/issues/2026-11-09-anukulana-gpt2-pretrained-vocabulary.md`.
+    anukulana then adds the command.
 - **Per-layer LoRA adapters** — consumes attn11's backward chain (see Standing decisions).
 - **A packed quantized forward** (dequantize inside the matmul). Needs quantized linears in rosnet;
   until then quantized weights widen at load.
-- **Big-file signing speed** is bound by sigil's SHA-512 (18.4 MB/s, measured here). That is sigil's to
-  fix; anukulana benefits with no change. It is what makes `convert` take about 86 s and `gpt2-load`
-  about 29 s on GPT-2 small (sign ~54 s, verify ~27 s for ~500 MB): file it with sigil, with these
-  numbers.
+- **Big-file signing speed** is bound by sigil's SHA-512 (about 19 MB/s; SHA-256 runs at 319 MB/s).
+  That is sigil's to fix; anukulana benefits with no change. It is what makes `convert` take about
+  80 s and `gpt2-load` about 28 s on GPT-2 small (sign ~54 s, verify ~27 s for ~500 MB). Filed:
+  `sigil/docs/development/issues/2026-11-09-anukulana-sha512-throughput-bounds-big-file-signing.md`.
 - **A digest-pinned load for converted files** — ⚠ the maintainer's call, because it changes the trust
   model. For example, `gpt2-load --sha256 <hex>` would accept the file on a caller-pinned SHA-256
   (about 1.6 s at sigil's SHA-NI speed) printed at convert time, instead of verifying the Ed25519
@@ -202,13 +206,20 @@ additive path. Nothing here is scheduled.
     `ru_model_fwd_row_s` with `RU_ERR_*` checked, and the move off rupantara 0.4.2.
   - Met: tula's two asks. The real-weights gate runs in CI (`realweights.yml`, 1.3.0, green on
     GitHub), and its 1.2–1.6 calls are adopted (1.4.0).
-- **Asks anukulana owes other repos.** None is filed yet, and each needs the maintainer's go:
-  - **sigil:** SHA-512 throughput, 18.4 MB/s, with the `convert` and `gpt2-load` numbers (1.x.x).
-  - **rupantara and ganita:** the `ru_softmax_fwd` / `f64_exp` cost in the adapter step (1.x.x).
-  - **akshara:** a pretrained-vocabulary mode for GPT-2 (1.x.x).
-  - **rupantara:** the layout-helper count is 29, not the 22 its 0.7.x item says (1.7.x).
-  - **tula:** the per-block int8 scale convention, in use since 1.6.1: INT8 codes plus an F16
-    `<name>.scale` sidecar, one scale per 32 codes along one axis (`docs/api.md`, Convert).
+- **Requests anukulana filed with other repos** (2026-11-09, the maintainer's go), each in that
+  repo's `docs/development/issues/` and each open:
+  - **sigil:** `2026-11-09-anukulana-sha512-throughput-bounds-big-file-signing.md`. SHA-512 at
+    about 19 MB/s, with the `convert` and `gpt2-load` numbers (1.x.x).
+  - **rupantara:** `2026-11-09-anukulana-softmax-exp-cost.md`. `ru_softmax_fwd` over GPT-2's
+    vocabulary is 10.1 ms per call, 58 % of it the `f64_exp` builtin (1.x.x). The `exp` is the
+    cyrius builtin, not ganita's, so nothing was filed with ganita.
+  - **rupantara:** `2026-11-09-anukulana-uses-29-layout-helpers.md`. The 29 helpers, and what
+    anukulana needs from the config growth path (1.7.x).
+  - **akshara:** `2026-11-09-anukulana-gpt2-pretrained-vocabulary.md`. A pretrained-vocabulary
+    mode for GPT-2 (1.x.x, text in, text out).
+  - **tula:** `2026-11-09-anukulana-per-block-int8-scale-sidecar.md`. The INT8 + F16 `.scale`
+    convention in use since 1.6.1, and what anukulana would want from the 1.8 int4 ADR. tula had
+    no issues folder; this filing starts one.
 - **Boundary:** training/backward → attn11 · QAT → tentib · the format → tula · the forward →
   rupantara · sampling beyond greedy → the Type-2 reference. Rotation-PTQ and one-shot sparsity stay
   research-watch.

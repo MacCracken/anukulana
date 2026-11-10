@@ -6,6 +6,23 @@ moving, no API freeze until v1.0).
 
 ## [Unreleased]
 
+### Docs
+
+- **The requests to other repos are filed**, each as an open issue in that repo's
+  `docs/development/issues/` (the maintainer's go, 2026-11-09):
+  - **sigil:** SHA-512 throughput;
+  - **rupantara:** the softmax / `exp` cost, and the 29 layout helpers anukulana uses;
+  - **akshara:** a pretrained GPT-2 vocabulary;
+  - **tula:** the per-block INT8 scale sidecar, and anukulana's input for the 1.8 int4 ADR. tula had
+    no issues folder; this filing starts one.
+
+  The numbers were re-measured for the filings: SHA-512 at about 19 MB/s against SHA-256's 319 MB/s,
+  and `ru_softmax_fwd` at 10.1 ms over 8 × 50,257 logits, of which the `f64_exp` builtin is 14.5 ns
+  per call (58 %).
+- **Corrected:** the roadmap and `docs/benchmarks.md` attributed the softmax's `exp` to ganita. It is
+  the cyrius `f64_exp` builtin (x87 on x86_64), which is why nothing was filed with ganita.
+- **`roadmap.md`** lists each filing under Gates / relations, with its file name.
+
 ## [1.6.1] - 2026-11-09
 
 The rest of the roadmap's 1.6.x line, the quantized GGUF door.

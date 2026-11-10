@@ -185,5 +185,7 @@ CHANGELOG.
 and **1.8.x**, the llama architecture, after rupantara's 1.0. Until then the unblocked work is
 anukulana's own in 1.x.x: the bit-identical `lora_adam` hoist and duplicate-name detection in
 safetensors headers. Also there: packed 4-bit `convert` (gated on tula 1.8) and text in, text out
-(gated on akshara). The asks to other repos (sigil, rupantara and ganita, akshara, tula) need the
-maintainer's go. See [`roadmap.md`](roadmap.md).
+(gated on akshara). The requests to other repos are filed as open issues in their
+`docs/development/issues/` (2026-11-09): sigil (SHA-512 speed), rupantara (the softmax `exp` cost; the
+29 layout helpers), akshara (a pretrained GPT-2 vocabulary) and tula (the INT8 scale sidecar and the
+int4 ADR). See [`roadmap.md`](roadmap.md).
