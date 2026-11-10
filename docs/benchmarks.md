@@ -24,6 +24,9 @@ checkpoint. Same host and session, cyrius 6.7.18, median of 3 runs. 1.2.2's outp
 **1.6.0's block decoders** (same host, cyrius 6.7.18, one run): `gg_read_f64` over 1M weights takes
 **3.79 ms for Q8_0**, **3.31 ms for Q4_0** and **6.40 ms for Q4_1**, against 5.93 ms for F32 in the same
 run. Q8_0 and Q4_0 read fewer bytes than F32; Q4_1 (like Q5_1, not benched) pays for the f32 rounding of `q * d + m`.
+**The K-quants** (same host, one run): **6.96 ms for Q4_K** and **5.44 ms for Q6_K** per 1M weights
+(F32 6.01 ms in that run). Q6_K took 9.64 ms until its 16 `d * scale` products were computed once per
+superblock instead of four times per weight position (bit-identical).
 
 What moved: one `load32` per f32 instead of four byte loads; bulk widen loops that rebias normal numbers
 inline; the safetensors fused QKV split straight into place and `wpe` read to T rows; GGUF transposes that
@@ -49,6 +52,8 @@ rosnet 1.4.1, rupantara 0.5.3). Every gate passed in both captures.
 | `gpt2-gguf` Q8_0 / Q4_0 *(1.6.0)* | — | **2.66 s / 2.13 s** | the `gpt2-gguf` check on gguf-py-quantized files (134.9 MB / 73.1 MB) |
 | `gpt2-qgguf` *(1.6.0)* | — | **9.2–10.3 s** | both imports, the weight drift over 124.4M params, the batch == decode check, 8 reference positions |
 | `convert` Q4_0 *(1.6.0)* | — | **79.0 s** | dequantize to exact F32 + sign the 497.8 MB file + reload (verify) + bit-compare |
+| `gpt2-gguf` Q4_K_M *(K-quants)* | — | **3.16 s** | the `gpt2-gguf` check on llama.cpp's own Q4_K_M file (89.5 MB) |
+| `convert` Q4_K_M *(K-quants)* | — | **91.9 s** | as for Q4_0; `gpt2-load` of the result 30.5 s |
 
 Fidelity at 1.3.0: argmax exact at all 48 positions, worst last-row maxrel **1.049e-6** (1.0: 1.05e-6), so
 the GELU `tanh` change at cyrius 6.6.13 (up to 2 ulp) did not move the gate.

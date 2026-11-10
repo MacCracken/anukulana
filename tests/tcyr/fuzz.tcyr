@@ -341,12 +341,14 @@ fn test_fuzz_gguf(): i64 {
 }
 
 # ---- 1.6.0: GGUF block types ------------------------------------------------------
-# A valid GGUF with one 2-block vector of each legacy block type (Q4_0, Q4_1, Q5_0,
-# Q5_1, Q8_0: ne0 = 64), payload bytes from a fixed pattern. `fields` receives,
-# per tensor, the file offsets of its ne0 (u64), ggml type (u32) and data offset
-# (u64), for the structure-aware round.
-fn _fz_valid_qgguf(out_len, fields): i64 {
-    var buf = alloc(1024);
+# A valid GGUF with one 2-block vector of each of five block types: the legacy ones
+# (Q4_0, Q4_1, Q5_0, Q5_1, Q8_0: ne0 = 64) or, with k = 1 (1.6.1), the K-quants
+# (Q2_K .. Q6_K: ne0 = 512). Payload bytes come from a fixed pattern. `fields`
+# receives, per tensor, the file offsets of its ne0 (u64), ggml type (u32) and data
+# offset (u64), for the structure-aware round.
+fn _fz_valid_qgguf(out_len, fields): i64 { return _fz_valid_qgguf_k(out_len, fields, 0); }
+fn _fz_valid_qgguf_k(out_len, fields, k): i64 {
+    var buf = alloc(4096);
     var offp = alloc(8);
     store64(offp, 0);
     _fz_gg_u32(buf, offp, GGUF_MAGIC());
@@ -358,6 +360,12 @@ fn _fz_valid_qgguf(out_len, fields): i64 {
     var types = alloc(40);
     store64(types, 2); store64(types + 8, 3); store64(types + 16, 6);
     store64(types + 24, 7); store64(types + 32, 8);
+    var ne0 = 64;
+    if (k == 1) {
+        var t = 0;
+        while (t < 5) { store64(types + t * 8, 10 + t); t = t + 1; }
+        ne0 = 512;
+    }
     var doff = 0;
     var i = 0;
     while (i < 5) {
@@ -366,7 +374,7 @@ fn _fz_valid_qgguf(out_len, fields): i64 {
         _fz_gg_str(buf, offp, nm);
         _fz_gg_u32(buf, offp, 1);                    # ndim
         store64(fields + i * 24, load64(offp));
-        _fz_gg_u64(buf, offp, 64);                   # ne0: two blocks
+        _fz_gg_u64(buf, offp, ne0);                  # two blocks
         store64(fields + i * 24 + 8, load64(offp));
         _fz_gg_u32(buf, offp, load64(types + i * 8));
         store64(fields + i * 24 + 16, load64(offp));
@@ -404,10 +412,13 @@ fn _fz_probe_gg_ranges(r): i64 {
     return 0;
 }
 
-fn test_fuzz_gguf_quant(): i64 {
+fn test_fuzz_gguf_quant(): i64 { return _fz_gguf_quant(0, 20261109); }
+# 1.6.1: the same rounds over the K-quants
+fn test_fuzz_gguf_kquant(): i64 { return _fz_gguf_quant(1, 20261110); }
+fn _fz_gguf_quant(k, seed): i64 {
     var lenp = alloc(8);
     var fields = alloc(5 * 24);
-    var valid = _fz_valid_qgguf(lenp, fields);
+    var valid = _fz_valid_qgguf_k(lenp, fields, k);
     var vlen = load64(lenp);
     var r0 = gg_open(valid, vlen);
     assert_nonnull(r0, "the valid block-type seed GGUF opens");
@@ -416,7 +427,7 @@ fn test_fuzz_gguf_quant(): i64 {
     var gend = _fz_guard_end(vlen + 256);
     var accepted = 0;
     var rejected = 0;
-    _fz_seed(20261109);
+    _fz_seed(seed);
 
     # byte mutation: 30k rounds, 1-4 bytes; most land in the block payloads, so the
     # decoders see arbitrary codes and scales (NaN, infinity, subnormal)
@@ -441,6 +452,7 @@ fn test_fuzz_gguf_quant(): i64 {
         var which = _fz_next() % 3;
         var at = load64(fields + t * 24 + which * 8);
         var v = _fz_next() % 400;
+        if (k == 1) { v = _fz_next() % 2000; }       # sizes around 256-weight rows
         if (which == 1) { v = _fz_next() % 40; }
         var b = 0;
         var nb = 8;
@@ -472,6 +484,7 @@ fn main(): i64 {
     test_fuzz_oracle_fixture();
     test_fuzz_gguf();
     test_fuzz_gguf_quant();
+    test_fuzz_gguf_kquant();
     return assert_summary();
 }
 

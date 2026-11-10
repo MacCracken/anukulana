@@ -29,7 +29,7 @@ fn usage(fd): i64 {
     _u(fd, "  gpt2-gguf <model.gguf>                import via GGUF + run (batch==decode gate)\n");
     _u(fd, "  gpt2-cross <model.safetensors> <model.gguf>   cross-format bit-identity gate\n");
     _u(fd, "  gpt2-qgguf <reference> <quantized.gguf>\n");
-    _u(fd, "                                        Q4_0..Q8_0 GGUF: batch==decode gate + drift report\n");
+    _u(fd, "                                        quantized GGUF: batch==decode gate + drift report\n");
     _u(fd, "  convert <model.{safetensors,gguf}> <out.tula> [--sk <operator.sk>]\n");
     _u(fd, "                                        signed tula copy at source precision (self-checked)\n");
     _u(fd, "  gpt2-load <model.tula> [--pk <key>]   run from a converted file (batch==decode gate)\n");
@@ -159,7 +159,9 @@ fn _gpt2_cross(st_path, gg_path): i64 {
 
 # `gpt2-qgguf <reference> <quantized.gguf>` (1.6.0): a llama.cpp-quantized GPT-2
 # against the unquantized import of the same checkpoint (the reference: HF
-# safetensors, heads from a config.json beside it, or an F32 / F16 GGUF).
+# safetensors, heads from a config.json beside it, or an F32 / F16 GGUF). With
+# llama.cpp's own F32 dequantization of the file as the reference (1.6.1,
+# tests/oracle/gen_kquants.sh --oracle) the params differing and the drift are 0.
 #   Gates: both import at the full context with the same config; the quantized file
 #   holds at least one block-typed tensor; its import is NaN-free; its batch ==
 #   decode is bit-identical; and its weights are closer to the reference than zero
@@ -219,7 +221,11 @@ fn _anuk_qgguf(ref_path, q_path): i64 {
     var np = ru_params_count(cfgQ);
     var wd = alloc(24);
     anuk_weight_drift(pR, pQ, np, wd);
+    var pbits = 0;                              # 1.6.1: bit-level, for a ggml-dequantized reference
+    i = 0;
+    while (i < np) { if (load64(pR + i * 8) != load64(pQ + i * 8)) { pbits = pbits + 1; } i = i + 1; }
     _anuk_sput("weights vs reference: params "); _anuk_puti(np);
+    _anuk_sput(", differing "); _anuk_puti(pbits);
     _anuk_sput(", max |dW| "); fmt_float(load64(wd), 6);
     _anuk_sput(", relative RMS "); fmt_float(load64(wd + 8), 6);
     _anuk_sput(", NaN "); _anuk_puti(load64(wd + 16)); _anuk_sput("\n");

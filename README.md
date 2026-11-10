@@ -35,9 +35,10 @@ a real operator key — ifran's `store add` records **`verified`** end-to-end). 
 plus the `blk.N.*` GPT-2 mapping; `gpt2-gguf` runs the real checkpoint through
 the second foreign door, and `gpt2-cross` proves **both doors bit-identical**
 (123.6M packed params / 402k logits, 0 diffs). The GGUF door now reads llama.cpp's
-legacy quantized block types (Q4_0, Q4_1, Q5_0, Q5_1, Q8_0; `gpt2-qgguf` reports
-their drift; 1.6.0). The K-quants and the TinyLlama-class
-(llama-architecture) mapping are the next lanes; see
+quantized files: the legacy block types (Q4_0, Q4_1, Q5_0, Q5_1, Q8_0; 1.6.0) and the
+K-quants (Q2_K … Q6_K, so `Q4_K_M` and the other standard mixes; `[Unreleased]`),
+each exactly as ggml dequantizes it; `gpt2-qgguf` reports the drift. The TinyLlama-class
+(llama-architecture) mapping is the next lane; see
 [`docs/development/roadmap.md`](docs/development/roadmap.md). The Cyrius pin and
 the dependency tags are in [`cyrius.cyml`](cyrius.cyml); the CHANGELOG records
 each move.

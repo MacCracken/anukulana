@@ -18,10 +18,11 @@
 # but an UNKNOWN vtype id is a hard reject (its size is unknowable).
 #
 # Supported tensor dtypes: F32 (0) and F16 (1), widened to f64 by the same
-# IEEE-754 wideners the safetensors path uses, and (1.6.0) llama.cpp's legacy
-# block types Q4_0 (2), Q4_1 (3), Q5_0 (6), Q5_1 (7) and Q8_0 (8), dequantized
-# to exactly the values ggml's own f32 dequantization gives (see the decoders
-# below). gg_open rejects every other type id, the K-quants included.
+# IEEE-754 wideners the safetensors path uses; (1.6.0) llama.cpp's legacy block
+# types Q4_0 (2), Q4_1 (3), Q5_0 (6), Q5_1 (7) and Q8_0 (8); and (1.6.1) its
+# K-quants Q2_K (10) through Q6_K (14). Each is dequantized to exactly the values
+# ggml's own f32 dequantization gives (see the decoders below). gg_open rejects
+# every other type id (Q8_K, the IQ and TQ types, MXFP4, BF16, ...).
 #
 # Reader record (heap): +0 buf | +8 len | +16 data_start | +24 count
 #   +32 entries (count × 128: name_ptr name_len ndim dims[4] gtype off nbytes)
@@ -106,11 +107,22 @@ fn GG_T_Q5_0(): i64 { return 6; }
 fn GG_T_Q5_1(): i64 { return 7; }
 # GGML_TYPE_Q8_0: 32 weights per 34-byte block, y = q * d.
 fn GG_T_Q8_0(): i64 { return 8; }
+# GGML_TYPE_Q2_K: 256 weights per 84-byte superblock, 2-bit codes, 4-bit scales and mins.
+fn GG_T_Q2_K(): i64 { return 10; }
+# GGML_TYPE_Q3_K: 256 weights per 110-byte superblock, 3-bit codes, 6-bit scales.
+fn GG_T_Q3_K(): i64 { return 11; }
+# GGML_TYPE_Q4_K: 256 weights per 144-byte superblock, 4-bit codes, 6-bit scales and mins.
+fn GG_T_Q4_K(): i64 { return 12; }
+# GGML_TYPE_Q5_K: 256 weights per 176-byte superblock, 5-bit codes, 6-bit scales and mins.
+fn GG_T_Q5_K(): i64 { return 13; }
+# GGML_TYPE_Q6_K: 256 weights per 210-byte superblock, 6-bit codes, 8-bit scales.
+fn GG_T_Q6_K(): i64 { return 14; }
 
 # ggml type -> elements per block (1 for F32 / F16); -1 = unsupported
 fn _gg_blk_elems(t): i64 {
     if (t == 0 || t == 1) { return 1; }
     if (t == 2 || t == 3 || t == 6 || t == 7 || t == 8) { return 32; }
+    if (t >= 10 && t <= 14) { return 256; }                 # the K-quants (Q8_K, 15, is not stored)
     return 0 - 1;
 }
 # ggml type -> bytes per block; -1 = unsupported
@@ -122,6 +134,11 @@ fn _gg_blk_bytes(t): i64 {
     if (t == 6) { return 22; }    # Q5_0: f16 d, u32 high bits, 16 B of nibbles
     if (t == 7) { return 24; }    # Q5_1: f16 d, f16 m, u32 high bits, 16 B of nibbles
     if (t == 8) { return 34; }    # Q8_0: f16 d, 32 int8
+    if (t == 10) { return 84; }   # Q2_K: scales[16], qs[64], f16 d, f16 dmin
+    if (t == 11) { return 110; }  # Q3_K: hmask[32], qs[64], scales[12], f16 d
+    if (t == 12) { return 144; }  # Q4_K: f16 d, f16 dmin, scales[12], qs[128]
+    if (t == 13) { return 176; }  # Q5_K: f16 d, f16 dmin, scales[12], qh[32], qs[128]
+    if (t == 14) { return 210; }  # Q6_K: ql[128], qh[64], int8 scales[16], f16 d
     return 0 - 1;
 }
 
@@ -134,11 +151,16 @@ fn gg_type_name(t): i64 {
     if (t == 6) { return "Q5_0"; }
     if (t == 7) { return "Q5_1"; }
     if (t == 8) { return "Q8_0"; }
+    if (t == 10) { return "Q2_K"; }
+    if (t == 11) { return "Q3_K"; }
+    if (t == 12) { return "Q4_K"; }
+    if (t == 13) { return "Q5_K"; }
+    if (t == 14) { return "Q6_K"; }
     return "?";
 }
 # 1 iff t is one of the block (quantized) types gg_open accepts.
 fn gg_type_is_quant(t): i64 {
-    if (_gg_blk_elems(t) == 32) { return 1; }
+    if (_gg_blk_elems(t) > 1) { return 1; }
     return 0;
 }
 
@@ -471,11 +493,190 @@ fn _gg_deq_q5(t, blk, out): i64 {
     }
     return 0;
 }
-# one block of type t (a supported block type) at blk -> 32 f64 at out
+# ---- the K-quants (256-weight superblocks) ---------------------------------------
+# ggml-quants.c's dequantize_row_q{2,3,4,5,6}_K, one superblock at a time, in the
+# same loop order. Each superblock has an f16 scale d (and, for Q2_K / Q4_K / Q5_K,
+# an f16 dmin) that scales 16 or 8 small sub-block scales (and mins).
+#
+#   Q2_K  16 x 16 weights   y = (d * sc) * q - dmin * m      q 2-bit, sc / m 4-bit
+#   Q3_K  16 x 16 weights   y = (d * (s - 32)) * q           q 3-bit signed, s 6-bit
+#   Q4_K   8 x 32 weights   y = (d * sc) * q - dmin * m      q 4-bit, sc / m 6-bit
+#   Q5_K   8 x 32 weights   y = (d * sc) * q - dmin * m      q 5-bit, sc / m 6-bit
+#   Q6_K  16 x 16 weights   y = (d * s) * q                  q 6-bit signed, s int8
+#
+# As for the legacy types the values are ggml's f32 ones. Every product here is
+# exact in f32 (at most 11 + 7 + 5 significant bits), and so in f64. Q3_K and
+# Q6_K need nothing more. In the other three, subtracting dmin * m rounds in f32,
+# so that difference is rounded to f32 (_gg_f32r), as for Q4_1.
+
+# one Q2_K superblock (84 B) -> 256 f64
+fn _gg_deq_q2_k(blk, out): i64 {
+    var d = _gg_f16(blk + 80);
+    var dmin = _gg_f16(blk + 82);
+    var y = 0;
+    var is = 0;
+    var n = 0;
+    while (n < 2) {
+        var q = blk + 16 + n * 32;
+        var j = 0;
+        while (j < 4) {
+            var h = 0;
+            while (h < 2) {
+                var sc = load8(blk + is);
+                var dl = f64_mul(d, f64_from(sc & 15));
+                var ml = f64_mul(dmin, f64_from(sc >> 4));
+                var l = 0;
+                while (l < 16) {
+                    var c = (load8(q + h * 16 + l) >> (2 * j)) & 3;
+                    store64(out + y * 8, _gg_f32r(f64_sub(f64_mul(dl, f64_from(c)), ml)));
+                    y = y + 1;
+                    l = l + 1;
+                }
+                is = is + 1;
+                h = h + 1;
+            }
+            j = j + 1;
+        }
+        n = n + 1;
+    }
+    return 0;
+}
+# Q3_K's 6-bit scale k (0..15) from the 12 packed scale bytes at sb, less 32: the low
+# four bits are a nibble of bytes 0..7, the top two a 2-bit field of bytes 8..11
+fn _gg_q3_scale(sb, k): i64 {
+    var lo = 0;
+    if (k < 8) { lo = load8(sb + k) & 15; } else { lo = load8(sb + k - 8) >> 4; }
+    var hi = (load8(sb + 8 + (k % 4)) >> (2 * (k / 4))) & 3;
+    return (lo | (hi << 4)) - 32;
+}
+# one Q3_K superblock (110 B) -> 256 f64. A code is 2 low bits from qs and a high bit
+# from hmask; a clear high bit subtracts 4.
+fn _gg_deq_q3_k(blk, out): i64 {
+    var d = _gg_f16(blk + 108);
+    var y = 0;
+    var is = 0;
+    var n = 0;
+    while (n < 2) {
+        var q = blk + 32 + n * 32;
+        var j = 0;
+        while (j < 4) {
+            var mbit = n * 4 + j;
+            var h = 0;
+            while (h < 2) {
+                var dl = f64_mul(d, f64_from(_gg_q3_scale(blk + 96, is)));
+                var l = 0;
+                while (l < 16) {
+                    var c = (load8(q + h * 16 + l) >> (2 * j)) & 3;
+                    if (((load8(blk + h * 16 + l) >> mbit) & 1) == 0) { c = c - 4; }
+                    store64(out + y * 8, f64_mul(dl, f64_from(c)));
+                    y = y + 1;
+                    l = l + 1;
+                }
+                is = is + 1;
+                h = h + 1;
+            }
+            j = j + 1;
+        }
+        n = n + 1;
+    }
+    return 0;
+}
+# Q4_K / Q5_K's 6-bit scale (out[0]) and min (out[1]) of sub-block j (0..7), from
+# the 12 scale bytes at sb (ggml's get_scale_min_k4)
+fn _gg_k4_sm(sb, j, out): i64 {
+    if (j < 4) {
+        store64(out, load8(sb + j) & 63);
+        store64(out + 8, load8(sb + j + 4) & 63);
+        return 0;
+    }
+    store64(out, (load8(sb + j + 4) & 15) | ((load8(sb + j - 4) >> 6) << 4));
+    store64(out + 8, (load8(sb + j + 4) >> 4) | ((load8(sb + j) >> 6) << 4));
+    return 0;
+}
+# one Q4_K (t = 12, 144 B) or Q5_K (t = 13, 176 B) superblock -> 256 f64. Q5_K adds a
+# fifth bit from qh: bit 2c (low nibbles) or 2c + 1 (high) of qh[l], for chunk c.
+fn _gg_deq_q45_k(t, blk, out): i64 {
+    var d = _gg_f16(blk);
+    var dmin = _gg_f16(blk + 2);
+    var qh = blk + 16;
+    var qs = blk + 16;
+    if (t == 13) { qs = blk + 48; }
+    var sm[16];
+    var c = 0;
+    while (c < 4) {
+        _gg_k4_sm(blk + 4, 2 * c, &sm);
+        var d1 = f64_mul(d, f64_from(load64(&sm)));
+        var m1 = f64_mul(dmin, f64_from(load64(&sm + 8)));
+        _gg_k4_sm(blk + 4, 2 * c + 1, &sm);
+        var d2 = f64_mul(d, f64_from(load64(&sm)));
+        var m2 = f64_mul(dmin, f64_from(load64(&sm + 8)));
+        var q = qs + c * 32;
+        var l = 0;
+        while (l < 32) {
+            var b = load8(q + l);
+            var lo = b & 15;
+            var hi = b >> 4;
+            if (t == 13) {
+                lo = lo + (((load8(qh + l) >> (2 * c)) & 1) << 4);
+                hi = hi + (((load8(qh + l) >> (2 * c + 1)) & 1) << 4);
+            }
+            store64(out + (c * 64 + l) * 8, _gg_f32r(f64_sub(f64_mul(d1, f64_from(lo)), m1)));
+            store64(out + (c * 64 + 32 + l) * 8, _gg_f32r(f64_sub(f64_mul(d2, f64_from(hi)), m2)));
+            l = l + 1;
+        }
+        c = c + 1;
+    }
+    return 0;
+}
+# Q6_K's int8 scale k of the 16 at sc, times d
+fn _gg_q6_ds(d, sc, k): i64 {
+    var s = load8(sc + k);
+    if (s >= 128) { s = s - 256; }
+    return f64_mul(d, f64_from(s));
+}
+# one Q6_K superblock (210 B) -> 256 f64. A code is 4 low bits from ql and 2 high
+# bits from qh, less 32.
+fn _gg_deq_q6_k(blk, out): i64 {
+    var d = _gg_f16(blk + 208);
+    var dsv[128];                                    # d * s for the 16 scales, once
+    var k = 0;
+    while (k < 16) { store64(&dsv + k * 8, _gg_q6_ds(d, blk + 192, k)); k = k + 1; }
+    var n = 0;
+    while (n < 2) {
+        var ql = blk + n * 64;
+        var qh = blk + 128 + n * 32;
+        var ds = &dsv + n * 64;
+        var y = out + n * 128 * 8;
+        var l = 0;
+        while (l < 32) {
+            var is = l / 16;
+            var h = load8(qh + l);
+            var a = load8(ql + l);
+            var b = load8(ql + l + 32);
+            var q1 = ((a & 15) | ((h & 3) << 4)) - 32;
+            var q2 = ((b & 15) | (((h >> 2) & 3) << 4)) - 32;
+            var q3 = ((a >> 4) | (((h >> 4) & 3) << 4)) - 32;
+            var q4 = ((b >> 4) | (((h >> 6) & 3) << 4)) - 32;
+            store64(y + l * 8, f64_mul(load64(ds + is * 8), f64_from(q1)));
+            store64(y + (l + 32) * 8, f64_mul(load64(ds + (is + 2) * 8), f64_from(q2)));
+            store64(y + (l + 64) * 8, f64_mul(load64(ds + (is + 4) * 8), f64_from(q3)));
+            store64(y + (l + 96) * 8, f64_mul(load64(ds + (is + 6) * 8), f64_from(q4)));
+            l = l + 1;
+        }
+        n = n + 1;
+    }
+    return 0;
+}
+
+# one block of type t (a supported block type) at blk -> its 32 or 256 f64 at out
 fn _gg_deq_block(t, blk, out): i64 {
     if (t == 8) { return _gg_deq_q8_0(blk, out); }
     if (t == 2 || t == 3) { return _gg_deq_q4(t, blk, out); }
-    return _gg_deq_q5(t, blk, out);
+    if (t == 6 || t == 7) { return _gg_deq_q5(t, blk, out); }
+    if (t == 10) { return _gg_deq_q2_k(blk, out); }
+    if (t == 11) { return _gg_deq_q3_k(blk, out); }
+    if (t == 14) { return _gg_deq_q6_k(blk, out); }
+    return _gg_deq_q45_k(t, blk, out);
 }
 # elements [start, start + n) of a block-typed payload p -> dst. Whole blocks
 # decode straight into dst; a range that starts or ends inside a block decodes
@@ -483,14 +684,15 @@ fn _gg_deq_block(t, blk, out): i64 {
 # touches are read.
 fn _gg_read_blocks(t, p, start, n, dst): i64 {
     var bb = _gg_blk_bytes(t);
-    var tmp[256];
-    var b = start / 32;
-    var skip = start % 32;
+    var be = _gg_blk_elems(t);
+    var tmp[2048];
+    var b = start / be;
+    var skip = start % be;
     var done = 0;
     while (done < n) {
-        var take = 32 - skip;
+        var take = be - skip;
         if (take > n - done) { take = n - done; }
-        if (take == 32) {
+        if (take == be) {
             _gg_deq_block(t, p + b * bb, dst + done * 8);
         } else {
             _gg_deq_block(t, p + b * bb, &tmp);

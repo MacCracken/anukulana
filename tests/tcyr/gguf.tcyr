@@ -312,27 +312,28 @@ fn _qb_range(r, q, a, c, start, n): i64 {
     return bad;
 }
 
-# One type of the oracle fixture: <qn> (4 rows of 256 weights of type gt, random
+# One type of an oracle fixture: <qn> (ne weights of type gt in blocks of be, random
 # bytes) dequantizes to <rn> (gguf-py's dequantize as F32) bit for bit, a NaN
 # matching any NaN; and every sub-range, on or off block boundaries, reads the
 # same values as the whole tensor.
-fn _qb_check(r, qn, rn, gt, bb): i64 {
+fn _qb_check(r, qn, rn, gt, bb): i64 { return _qb_check_n(r, qn, rn, gt, bb, 1024, 32); }
+fn _qb_check_n(r, qn, rn, gt, bb, ne, be): i64 {
     var q = gg_find(r, qn);
     var f = gg_find(r, rn);
     assert_nonnull(q, "the oracle holds the block tensor");
     assert_nonnull(f, "the oracle holds the reference tensor");
     assert_eq(gg_entry_gtype(q), gt, "the block tensor has its type");
-    assert_eq(gg_entry_nelems(q), 1024, "4 x 256 weights");
-    assert_eq(gg_entry_nbytes(q), 32 * bb, "32 blocks of the type's size");
-    var a = t_alloc(1024);
-    var b = t_alloc(1024);
-    assert_eq(gg_read_f64(r, q, a), 1024, "the block tensor reads");
-    assert_eq(gg_read_f64(r, f, b), 1024, "the reference reads");
+    assert_eq(gg_entry_nelems(q), ne, "4 rows of the fixture's width");
+    assert_eq(gg_entry_nbytes(q), (ne / be) * bb, "whole blocks of the type's size");
+    var a = t_alloc(ne);
+    var b = t_alloc(ne);
+    assert_eq(gg_read_f64(r, q, a), ne, "the block tensor reads");
+    assert_eq(gg_read_f64(r, f, b), ne, "the reference reads");
     var diffs = 0;
     var nan = 0;
     var inf = 0;
     var i = 0;
-    while (i < 1024) {
+    while (i < ne) {
         var x = load64(a + i * 8);
         var y = load64(b + i * 8);
         if (_is_nan64(y) == 1) {
@@ -345,7 +346,7 @@ fn _qb_check(r, qn, rn, gt, bb): i64 {
     assert_eq(diffs, 0, "the dequantization equals gguf-py's, bit for bit");
     assert_gt(nan, 0, "the oracle reaches NaN");
     assert_gt(inf, 0, "the oracle reaches infinity");
-    var c = t_alloc(1024);
+    var c = t_alloc(ne);
     var bad = _qb_range(r, q, a, c, 0, 1);
     bad = bad + _qb_range(r, q, a, c, 5, 27);
     bad = bad + _qb_range(r, q, a, c, 31, 2);
@@ -355,10 +356,17 @@ fn _qb_check(r, qn, rn, gt, bb): i64 {
     bad = bad + _qb_range(r, q, a, c, 1023, 1);
     bad = bad + _qb_range(r, q, a, c, 512, 0);
     bad = bad + _qb_range(r, q, a, c, 256, 512);
+    bad = bad + _qb_range(r, q, a, c, ne - 1, 1);
+    if (ne > 1024) {                                         # across superblock boundaries
+        bad = bad + _qb_range(r, q, a, c, 250, 20);
+        bad = bad + _qb_range(r, q, a, c, 255, 2);
+        bad = bad + _qb_range(r, q, a, c, 300, 3000);
+        bad = bad + _qb_range(r, q, a, c, 1024, 3072);
+    }
     assert_eq(bad, 0, "every sub-range reads what the whole read gave");
-    assert_eq(gg_read_f64_range(r, q, 1000, 25, c), 0 - 1, "a range past the end is refused");
+    assert_eq(gg_read_f64_range(r, q, ne - 24, 25, c), 0 - 1, "a range past the end is refused");
     assert_eq(gg_read_f64_range(r, q, 0 - 1, 1, c), 0 - 1, "a negative start is refused");
-    assert_eq(gg_read_f64_range(r, q, 0, 1025, c), 0 - 1, "a range longer than the tensor is refused");
+    assert_eq(gg_read_f64_range(r, q, 0, ne + 1, c), 0 - 1, "a range longer than the tensor is refused");
     return 0;
 }
 
@@ -374,11 +382,27 @@ fn test_gguf_qblocks_oracle(): i64 {
     return 0;
 }
 
+# 1.6.1: the K-quants against gguf-py (tests/fixtures/gguf_kblocks_v1.gguf: 4 rows of
+# 1024 weights, 16 superblocks per type)
+fn test_gguf_kblocks_oracle(): i64 {
+    var r = gg_open_mmap("tests/fixtures/gguf_kblocks_v1.gguf");
+    assert_nonnull(r, "the K-quant oracle fixture (gguf-py-written) opens");
+    assert_eq(gg_count(r), 10, "five K-quants, a block tensor and a reference each");
+    _qb_check_n(r, "q2_k.q", "q2_k.ref", GG_T_Q2_K(), 84, 4096, 256);
+    _qb_check_n(r, "q3_k.q", "q3_k.ref", GG_T_Q3_K(), 110, 4096, 256);
+    _qb_check_n(r, "q4_k.q", "q4_k.ref", GG_T_Q4_K(), 144, 4096, 256);
+    _qb_check_n(r, "q5_k.q", "q5_k.ref", GG_T_Q5_K(), 176, 4096, 256);
+    _qb_check_n(r, "q6_k.q", "q6_k.ref", GG_T_Q6_K(), 210, 4096, 256);
+    return 0;
+}
+
 # A GPT-2 with token_embd and every block weight in type qt imports through
 # anuk_ggpt2_pack to the original params bit for bit, so the mapping's row reads and
 # transposes are right over block payloads; the logits match too.
-fn _q_roundtrip(qt, lo, hi): i64 {
-    var V = 13; var C = 32; var T = 6; var nh = 2; var NL = 2;
+fn _q_roundtrip(qt, lo, hi): i64 { return _q_roundtrip_c(qt, lo, hi, 32, 2); }
+# the same at width C over NL blocks (a K-quant row is 256 weights, so C = 256)
+fn _q_roundtrip_c(qt, lo, hi, C, NL): i64 {
+    var V = 13; var T = 6; var nh = 2;
     var cfg = alloc(64);
     ru_cfg_init(cfg, V, C, T, nh, nh, NL, 4 * C, 1);
     var np = ru_params_count(cfg);
@@ -389,7 +413,7 @@ fn _q_roundtrip(qt, lo, hi): i64 {
     var r = gg_open(buf, load64(lenp));
     assert_nonnull(r, "the quantized GPT-2 GGUF opens");
     assert_eq(gg_entry_gtype(gg_find(r, "token_embd.weight")), qt, "token_embd is in the block type");
-    assert_eq(gg_entry_gtype(gg_find(r, "blk.1.ffn_down.weight")), qt, "ffn_down is in the block type");
+    assert_eq(gg_entry_gtype(gg_find(r, "blk.0.ffn_down.weight")), qt, "ffn_down is in the block type");
     assert_eq(gg_entry_gtype(gg_find(r, "blk.0.attn_norm.weight")), GG_T_F32(), "norms stay F32");
     var cfg2 = alloc(64);
     assert_eq(anuk_ggpt2_infer_cfg(r, cfg2, 0), 0, "infer_cfg ok");
@@ -425,6 +449,12 @@ fn test_gguf_quant_gpt2_roundtrip(): i64 {
     _q_roundtrip(GG_T_Q4_1(), 0 - 8, 7);
     _q_roundtrip(GG_T_Q5_0(), 0 - 16, 15);
     _q_roundtrip(GG_T_Q5_1(), 0 - 16, 15);
+    # 1.6.1: the K-quants, at C = 256 (F = 1024)
+    _q_roundtrip_c(GG_T_Q2_K(), 0 - 2, 1, 256, 1);
+    _q_roundtrip_c(GG_T_Q3_K(), 0 - 4, 3, 256, 1);
+    _q_roundtrip_c(GG_T_Q4_K(), 0 - 8, 7, 256, 1);
+    _q_roundtrip_c(GG_T_Q5_K(), 0 - 16, 15, 256, 1);
+    _q_roundtrip_c(GG_T_Q6_K(), 0 - 32, 31, 256, 1);
     return 0;
 }
 
@@ -459,15 +489,24 @@ fn test_gguf_quant_rejects(): i64 {
     assert_eq(_q_opens(GG_T_Q4_0(), 32, 2, 18), 0, "one block of payload for two is rejected");
     assert_eq(_q_opens(GG_T_Q8_0(), 64, 0, 67), 0, "a payload one byte short is rejected");
     assert_eq(_q_opens(GG_T_Q4_1(), 1, 0, 20), 0, "a 1-weight block tensor is rejected");
-    # the K-quants (10..15), the removed Q4_2 / Q4_3 (4, 5), Q8_1 (9), Q8_K (15) and later ids
+    # 1.6.1: the K-quants' 256-weight superblocks
+    assert_eq(_q_opens(GG_T_Q4_K(), 512, 2, 4 * 144), 1, "a [512, 2] Q4_K matrix opens");
+    assert_eq(_q_opens(GG_T_Q6_K(), 256, 0, 210), 1, "a one-superblock Q6_K vector opens");
+    assert_eq(_q_opens(GG_T_Q2_K(), 128, 0, 84), 0, "a K-quant row of half a superblock is rejected");
+    assert_eq(_q_opens(GG_T_Q3_K(), 768, 0, 3 * 110 - 1), 0, "a K-quant payload one byte short is rejected");
+    assert_eq(_q_opens(GG_T_Q5_K(), 32, 0, 176), 0, "a 32-weight row is not a K-quant row");
+    # the removed Q4_2 / Q4_3 (4, 5), Q8_1 (9), Q8_K (15) and later ids
     var t = 4;
     var opened = 0;
     while (t < 40) {
-        if (t != 6 && t != 7 && t != 8) { opened = opened + _q_opens(t, 256, 0, 512); }
+        if (gg_type_is_quant(t) == 0) { opened = opened + _q_opens(t, 256, 0, 512); }
         t = t + 1;
     }
     assert_eq(opened, 0, "every other ggml type id is rejected");
-    assert(streq(gg_type_name(12), "?") == 1, "an unsupported type has no name");
+    assert_eq(gg_type_is_quant(GG_T_Q3_K()), 1, "Q3_K is a block type");
+    assert_eq(gg_type_is_quant(9) + gg_type_is_quant(15), 0, "Q8_1 and Q8_K are not");
+    assert(streq(gg_type_name(GG_T_Q5_K()), "Q5_K") == 1, "a K-quant is named");
+    assert(streq(gg_type_name(15), "?") == 1, "an unsupported type has no name");
     assert_eq(gg_type_is_quant(GG_T_F16()), 0, "F16 is not a block type");
     return 0;
 }
@@ -500,6 +539,7 @@ fn main(): i64 {
     alloc_init();
     test_weight_drift();
     test_gguf_qblocks_oracle();
+    test_gguf_kblocks_oracle();
     test_gguf_quant_gpt2_roundtrip();
     test_gguf_quant_rejects();
     test_gguf_minimal();

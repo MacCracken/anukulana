@@ -6,6 +6,93 @@ moving, no API freeze until v1.0).
 
 ## [Unreleased]
 
+The roadmap's 1.6.x K-quants: the GGUF door reads Q2_K, Q3_K, Q4_K, Q5_K and Q6_K, so llama.cpp's
+standard mixes import (`Q2_K`, `Q3_K_M`, `Q4_K_M`, `Q5_K_M`, `Q6_K`). The real K-quant files come
+from llama.cpp's own `llama-quantize`, built at test time at a pinned release (the maintainer's
+call, 2026-11-09). That also gives 1.6.0's legacy types a check against ggml itself.
+
+- **On the real GPT-2, all ten formats match ggml's own dequantization:** 0 of 124,439,808 params
+  differ in any of them.
+- **Additive, as in 1.6.0:** files that used to be refused now open. No frozen signature, gate or
+  exit code changed. Every earlier result is unchanged; the Q6_K speed-up below is bit-identical.
+
+### Added
+
+- **The K-quant decoders**, ports of ggml's `dequantize_row_q{2,3,4,5,6}_K` in the same loop order.
+  - **Exact:** every product is exact in f32 (at most 23 significant bits) and so in f64. Q3_K and
+    Q6_K need nothing more.
+  - **Q2_K, Q4_K and Q5_K** subtract `dmin * m`, which rounds in f32, so that difference is rounded
+    to f32, as for Q4_1.
+  - **Ids:** `GG_T_Q2_K()` (10) through `GG_T_Q6_K()` (14). `gg_type_name` and `gg_type_is_quant`
+    cover them. `gpt2-qgguf` and `convert` take them unchanged; `convert` records, for example,
+    `anukulana.source.quant = Q4_K,Q6_K`.
+- **`tests/oracle/gen_kquants.sh <model_dir> <work_dir> [--oracle]`.**
+  - **What it does:** clones llama.cpp at tag `b12242` (commit `3b4d6ab3`, checked) into the work
+    folder, builds only `llama-quantize`, and writes the five mixes from `gen_gguf.py`'s F32 GGUF.
+  - **Cost:** about 2 minutes on this box. It needs git, cmake and a C++ compiler; none of them,
+    nor llama.cpp, is ever a build, run or test dependency.
+  - **`--oracle`** also writes ggml's F32 dequantization of every quantized file
+    (`--allow-requantize … F32`, ggml's `dequantize_row_*`).
+- **`gpt2-qgguf` reports the params that differ bit for bit.** Against a ggml-dequantized
+  reference that count must be 0.
+
+### Changed
+
+- **`gg_open` requires a K-quant tensor's `ne0` to be whole 256-weight superblocks.** Q8_K, the IQ
+  and TQ types, MXFP4 and BF16 are still rejected.
+- **`tests/oracle/gen_gguf.py` writes `gpt2.attention.layer_norm_epsilon`**, read from `config.json`.
+  llama.cpp's loader requires it, and `llama-quantize` refused the file without it. anukulana
+  ignores it, so a regenerated `model.gguf` differs from 1.6.0's by that one KV.
+- **`tests/oracle/gen_qblocks.py`** gains a `kquants` mode. Its default output is unchanged:
+  `gguf_qblocks_v1.gguf` regenerates byte-identical.
+- **Q6_K decoding computes its 16 `d * scale` products once per superblock**, instead of four times
+  per weight position. The values are the same, so it is bit-identical, and 1M weights take 5.4 ms
+  instead of 9.6 ms.
+
+### Tests
+
+- **`tests/fixtures/gguf_kblocks_v1.gguf` (94 KB, new):** written by `gen_qblocks.py … kquants`;
+  regenerates byte-identical.
+  - **Contents:** 16 superblocks of each K-quant, every byte random, with the edge-case scales and
+    minimums forced in.
+  - **The check:** all 20,480 values match gguf-py's `dequantize` bit for bit, and sub-ranges across
+    superblock boundaries read what the whole read gave.
+- **`tests/tcyr/gguf.tcyr` also adds:**
+  - a GPT-2 round trip in each K-quant at C = 256, bit-identical params and logits, through a
+    test-side encoder (`_ggw_kblock`, fixed scales);
+  - the rejects: half a superblock, a short payload, a 32-weight row.
+- **`tests/tcyr/convert.tcyr`:** Q4_K and Q6_K convert to files that reload bit-identical and match
+  the F32 safetensors twin byte for byte.
+- **`tests/tcyr/fuzz.tcyr`:** the 1.6.0 rounds run again over a five-K-quant image (ne0 = 512), and a
+  Q6_K over-read mutant faults at the guard page.
+- **Mutation:** ten K-quant mutants all fail `gguf.tcyr`: the f32 rounding, a min nibble, Q3_K's
+  scale and hmask bits, `get_scale_min_k4`, Q5_K's high bit, Q6_K's high bits and scale index, and
+  the superblock check.
+- **Totals:** 628 assertions in 10 suites (482 before). The GGUF, fuzz and convert suites pass on
+  aarch64 under qemu. fmt, lint (0 warnings), vet and doc are clean.
+- **Real checkpoint:** the five mixes from `gen_kquants.sh`, plus 1.6.0's legacy files regenerated
+  with the new KV.
+  - **ggml's dequantization:** `gpt2-qgguf <ggml-f32> <file>` reports 0 params differing and 0
+    logit drift for all ten files.
+  - **The mixes' types:**
+    - `Q2_K`: Q2_K ×12, Q3_K ×36, Q6_K ×1;
+    - `Q3_K_M`: Q3_K ×12, Q4_K ×34, Q5_K ×2, Q6_K ×1;
+    - `Q4_K_M`: Q4_K ×36, Q6_K ×13;
+    - `Q5_K_M`: Q5_K ×36, Q6_K ×13;
+    - `Q6_K`: Q6_K ×49.
+  - **Drift** against the F32 import over the 8-position demo input (top-2 margins 0.02 to 1.1):
+
+    | Mix | File | Weight rel. RMS | Logit max abs | Argmax agreement |
+    |---|---|---|---|---|
+    | Q6_K | 105.0 MB | 0.0183 | 3.10 | 7/8 |
+    | Q5_K_M | 97.0 MB | 0.0275 | 3.98 | 6/8 |
+    | Q4_K_M | 89.5 MB | 0.0488 | 5.10 | 6/8 |
+    | Q3_K_M | 79.8 MB | 0.0846 | 8.92 | 6/8 |
+    | Q2_K | 68.9 MB | 0.1715 | 22.62 | 3/8 |
+
+  - **Each imports and runs** with batch == decode bit-identical (`gpt2-gguf` on Q4_K_M: 3.2 s).
+    `convert` of Q4_K_M takes 91.9 s and reloads bit-identical; `gpt2-load` takes 30.5 s.
+
 ## [1.6.0] - 2026-11-09
 
 The roadmap's 1.6.0: the GGUF door reads llama.cpp's legacy quantized block types, Q4_0, Q4_1,

@@ -5,6 +5,16 @@
 
 ## Version
 
+**Unreleased — the K-quants (1.6.x), waiting for the cut.**
+- **What changed:** the GGUF door reads Q2_K, Q3_K, Q4_K, Q5_K and Q6_K, so llama.cpp's standard
+  mixes (`Q2_K`, `Q3_K_M`, `Q4_K_M`, `Q5_K_M`, `Q6_K`) import.
+- **Checked against ggml itself:** `tests/oracle/gen_kquants.sh` builds llama.cpp's `llama-quantize`
+  at tag `b12242` at test time. Its F32 dequantization of all ten quantized GPT-2 files (legacy and
+  K) matches anukulana's import with 0 of 124,439,808 params differing.
+- **Drift on the demo input:** Q4_K_M agrees with the F32 import at 6/8 argmax positions, with a
+  weight relative RMS of 0.049 (Q4_0: 0.089, 3/8).
+- **Suite:** **628**.
+
 **1.6.0 — 2026-11-09 (the GGUF legacy block types).**
 - **What changed:** the GGUF door reads Q4_0, Q4_1, Q5_0, Q5_1 and Q8_0 and dequantizes them
   exactly as ggml does. That holds bit for bit against gguf-py's `dequantize`, both on a committed
@@ -167,7 +177,7 @@ CHANGELOG.
 Reprised after 1.5.1, with every dependency at its latest tag and rupantara's 0.7.x not started:
 
 1. **1.6.x — quantized GGUF payloads.** Nothing upstream blocks it. 1.6.0 shipped the legacy block
-   types; the K-quants, packed `convert` and a steadier drift measure remain.
+   types and the K-quants are done (above); packed `convert` and a steadier drift measure remain.
 2. **1.7.x — onto rupantara 0.7 → 1.0.** It lands as rupantara ships.
 3. **1.8.x — the llama architecture.** It waits for rupantara's architecture breadth, after its 1.0.
 

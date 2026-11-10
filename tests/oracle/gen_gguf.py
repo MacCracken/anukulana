@@ -18,6 +18,8 @@ Replicates llama.cpp's GPT-2 conversion choices:
   * 2D Conv1D weights TRANSPOSED to ggml's [out, in] row-major (HF stores
     [in, out]); embeddings and 1D tensors as-is
   * F32 data, GGUF v3, default alignment 32
+  * gpt2.attention.layer_norm_epsilon from config.json, as llama.cpp's converter
+    writes it (llama.cpp's loader, llama-quantize included, requires the key)
   * output.weight is OMITTED (GPT-2 ties it to token_embd; the importer reads
     token_embd) — keeps the proof file ~120 MB leaner
 
@@ -58,6 +60,9 @@ def main(model_dir: str, out_path: str, qtype: str = "") -> None:
     w.add_head_count(NH)
     w.add_context_length(CTX)
     w.add_feed_forward_length(F)
+    # llama.cpp's loader requires it (llama-quantize refuses the file without it);
+    # anukulana ignores it (rupantara's LayerNorm eps is fixed)
+    w.add_layer_norm_eps(cfg.get("layer_norm_epsilon", 1e-5))
 
     def t(name: str, arr: np.ndarray, transpose: bool = False) -> None:
         a = np.ascontiguousarray(arr.T if transpose else arr, dtype=np.float32)

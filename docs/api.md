@@ -22,7 +22,7 @@
 | `convert <model.{safetensors,gguf}> <out.tula> [--sk <operator.sk>]` *(1.5.0)* | write the model as a **signed tula file at its source precision** (F64/F32/F16/BF16, HF GPT-2 names and shapes; GGUF weights transposed back), with metadata and provenance, then reload it and require its packed params **bit-identical** to a direct import. Without `--sk` it signs with the demo key (integrity only). Safetensors heads come from `config.json`'s `n_head` beside the model, else 12 |
 | `gpt2-load <model.tula> [--pk <key file>]` *(1.5.0)* | import a converted file (signature verified; without `--pk`, against the demo key) and run the batch == KV-cache decode check |
 | `gpt2-cross <model.safetensors> <model.gguf>` *(1.1.0)* | the **cross-format gate**: the same checkpoint through both foreign parsers must produce bit-identical packed params AND logits |
-| `gpt2-qgguf <reference> <quantized.gguf>` *(1.6.0)* | a **llama.cpp-quantized GPT-2** (Q4_0 / Q4_1 / Q5_0 / Q5_1 / Q8_0) against the unquantized import of the same checkpoint (HF safetensors, heads from a `config.json` beside it, or an F32 / F16 GGUF). Gates: same config, at least one block-typed tensor, NaN-free, batch == decode bit-identical, weights closer to the reference than zero is (relative RMS error < 1). Reported: the tensor types, the weight error (max, relative RMS), the logit drift and the argmax agreement over 8 positions |
+| `gpt2-qgguf <reference> <quantized.gguf>` *(1.6.0)* | a **llama.cpp-quantized GPT-2** (Q4_0 / Q4_1 / Q5_0 / Q5_1 / Q8_0; *(1.6.1)* the K-quants, e.g. `Q4_K_M`) against the unquantized import of the same checkpoint (HF safetensors, heads from a `config.json` beside it, or an F32 / F16 GGUF). Gates: same config, at least one block-typed tensor, NaN-free, batch == decode bit-identical, weights closer to the reference than zero is (relative RMS error < 1). Reported: the tensor types, the params that differ bit for bit *(1.6.1)*, the weight error (max, relative RMS), the logit drift and the argmax agreement over 8 positions |
 
 Exit code 0 = all gates PASS; 1 = a gate failed or an argument is missing (each
 command prints which); 2 = an unknown command or option *(1.2.2; an unknown
@@ -91,6 +91,13 @@ type id (the K-quants among them). `gg_entry_nbytes(e)` (the payload's bytes) ·
 `gg_type_name(t)` (`"Q8_0"`, …, `"?"`) · `gg_type_is_quant(t)`. Held by
 `tests/fixtures/gguf_qblocks_v1.gguf` (gguf-py's `dequantize` as the oracle) and
 fuzz rounds against a guard page.
+*(1.6.1)* **The K-quants** open and read the same way: Q2_K, Q3_K, Q4_K, Q5_K and
+Q6_K (256-weight superblocks; ids `GG_T_Q2_K()` 10 … `GG_T_Q6_K()` 14), so
+llama.cpp's standard mixes (`Q2_K`, `Q3_K_M`, `Q4_K_M`, `Q5_K_M`, `Q6_K`) import. A
+K-quant tensor's `ne0` must be whole superblocks. Still rejected: Q8_K (15, not a
+storage type), the IQ / TQ types, MXFP4 and BF16. Held by
+`tests/fixtures/gguf_kblocks_v1.gguf` (gguf-py's `dequantize`) and, on real files,
+by llama.cpp's own dequantization (`tests/oracle/gen_kquants.sh --oracle`).
 
 ### GPT-2 mapping (GGUF) — `src/gpt2_gguf.cyr` (added 1.1.0)
 `anuk_ggpt2_import(path, T_run, cfg)` → params | 0 — one-shot: mmap → infer

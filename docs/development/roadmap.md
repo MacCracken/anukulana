@@ -20,8 +20,9 @@
 > 6.7.18; sigil 3.13.15, tula 1.6.1, rosnet 1.4.1, rupantara 0.6.1). rupantara's 0.6.x is complete, and
 > its 0.7.x, which the old 1.6.x line waited on, has not started. So the order is now:
 >
-> 1. **1.6.x, quantized GGUF payloads** (moved up from 1.7.x). Nothing upstream blocks it. 1.6.0,
->    the legacy block types, shipped; the K-quants and packed `convert` remain.
+> 1. **1.6.x, quantized GGUF payloads** (moved up from 1.7.x). Nothing upstream blocks it. 1.6.0
+>    shipped the legacy block types and the K-quants are in `[Unreleased]`; packed `convert` and a
+>    steadier drift measure remain.
 > 2. **1.7.x, onto rupantara 0.7 → 1.0.** What remains of the old 1.6.x line; it lands as rupantara
 >    ships.
 > 3. **1.8.x, the llama architecture.** It waits for rupantara's architecture breadth, which rupantara
@@ -73,25 +74,19 @@
 
 **Goal:** the GGUF door reads llama.cpp's quantized files.
 
-**1.6.0 shipped the first half.** It reads the legacy block types (Q4_0,
-Q4_1, Q5_0, Q5_1, Q8_0) and dequantizes them exactly as ggml does: bit for bit against gguf-py's
-`dequantize`, and on all 124,439,808 params of a real GPT-2 in each type. `gpt2-qgguf` reports the
-drift, `convert` writes the dequantized values as exact F32, and the fuzz rounds run against the guard
-page. What remains:
+**The decoders are done.** 1.6.0 shipped the legacy block types (Q4_0, Q4_1, Q5_0, Q5_1, Q8_0). The
+K-quants (Q2_K … Q6_K, so llama.cpp's standard mixes) are in `[Unreleased]`. Every type is checked
+three ways:
 
-- **The K-quants.** Q6_K and Q4_K first (llama.cpp's `Q4_K_M` mixes the two), then Q5_K, Q3_K and
-  Q2_K. Each is a 256-weight superblock with packed sub-block scales.
-  - **The oracle:** gguf-py dequantizes every K-quant but quantizes none (`NotImplementedError`,
-    checked 2026-11-09). So `gen_qblocks.py` can write random valid blocks for them as it does for
-    the legacy types, and the decoders are checked against `dequantize`.
-  - **Bits:** ggml's K-quant dequantization is several f32 operations per weight, with the
-    sub-block scale and minimum multiplied in first. Reproduce its order, as 1.6.0 reproduces the
-    `_1` types' rounding, so the oracle comparison stays bit-exact.
-  - **A real K-quant GPT-2** needs llama.cpp's `llama-quantize` (a C++ build, used at test time
-    only, as the venv is) or a third-party file pinned by sha256. ⚠ The maintainer's call.
-  - **The parser:** a K-quant row is whole 256-weight superblocks (C = 768 and F = 3072 are), with the
-    same extent checks and fuzz rounds as 1.6.0's.
-- **`convert` keeps the codes packed where tula can hold them.** 1.6.0 writes them as exact F32: the
+- against gguf-py's `dequantize` on committed fixtures of random blocks;
+- against ggml's own dequantization on all 124,439,808 params of a real GPT-2: 0 differ in each of
+  the ten formats;
+- by fuzz rounds against the guard page.
+
+The real K-quant files come from llama.cpp's `llama-quantize`, built at test time at a pinned tag by
+`tests/oracle/gen_kquants.sh` (the maintainer's call, 2026-11-09). What remains:
+
+- **`convert` keeps the codes packed where tula can hold them.** Today it writes them as exact F32: the
   converted GPT-2 is 497.8 MB whatever the type, 3.7× the Q8_0 file and 6.8× the Q4_0 one.
   - **Q8_0:** tula `INT8` codes plus a per-block `w.scale` sidecar holding the f16 scales, which is
     lossless. tula's ADR 0002 lists per-tensor and per-row int8 scales, and NF4's scales are already
@@ -100,10 +95,15 @@ page. What remains:
   - **4-bit and K-quant data** waits for tula 1.8's int4 (gated on tula). Its ADR chooses between
     inline f16 scales and a sidecar.
 - **A steadier drift measure.** `gpt2-qgguf` compares argmax over the 8-position demo input, whose
-  top-1 / top-2 margins are 0.02 to 1.1 logits, so even Q5_1 agrees on only 2 of 8. Run it over the
-  oracle fixture's 48 positions as well, and report the agreement with HF's argmax there.
-- **Acceptance:** a K-quant GPT-2 (at least `Q4_K_M`'s Q4_K and Q6_K) imports and runs, with batch ==
-  decode bit-identical and its drift recorded; every new block reader is fuzz-gated.
+  top-1 / top-2 margins are 0.02 to 1.1 logits, so even Q5_1 agrees on only 2 of 8 and Q4_K_M on 6.
+  Run it over the oracle fixture's 48 positions as well, and report the agreement with HF's argmax
+  there.
+- **The GGUF gates in CI (optional).** `gpt2-gguf`, `gpt2-cross` and `gpt2-qgguf` run locally only,
+  because their files come from a Python venv and, now, a llama.cpp build (about 2 minutes). A
+  `realweights.yml` job could make both. ⚠ The maintainer's call: it adds pip and cmake steps to a
+  workflow that has none today.
+- **Acceptance:** the Q8_0 convert is packed and lossless; the drift is reported over the 48 fixture
+  positions.
 
 ## 1.7.x — onto rupantara 0.7 → 1.0 (gated on rupantara)
 

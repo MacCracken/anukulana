@@ -17,8 +17,10 @@ name: Real weights
 # Not covered here: `gpt2-gguf`, `gpt2-cross`, `gpt2-qgguf` (1.6.0) and convert's
 # GGUF door. Their GGUF files are made by tests/oracle/gen_gguf.py in a disposable
 # Python venv (llama.cpp's converter conventions, and gguf-py's quantizer for the
-# block types, so the gates check against an independent writer), and Python is
-# never a build, run or test dependency. Run those locally.
+# block types, so the gates check against an independent writer); the K-quant files
+# (1.6.1) by tests/oracle/gen_kquants.sh, which builds llama.cpp's llama-quantize at
+# a pinned tag. Neither Python nor llama.cpp is ever a build, run or test dependency.
+# Run those locally.
 
 on:
   workflow_dispatch:
