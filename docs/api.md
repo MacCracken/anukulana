@@ -11,7 +11,7 @@
 
 | Command | Contract |
 |---|---|
-| `inspect <file.tula>` | open a sovereign tula checkpoint: list tensors + report signature status |
+| `inspect <file.tula> [--pk <key file>]` | open a sovereign tula checkpoint: list tensors + report signature status. *(1.4.0)* Prints the file's signed metadata, reads files of any size, and with `--pk` (a 32-byte public key, or a 64-byte seed\|\|pk whose halves agree) verifies the signature: exit 1 for a bad signature **or an unsigned file** |
 | `version` | print the packed version int (`major*10000 + minor*100 + patch`) |
 | `gpt2 <model.safetensors>` | import a real GPT-2-small checkpoint, run its forward, cross-check batch == KV-cache decode (bit-identical); the no-oracle validation |
 | `gpt2-oracle <model.safetensors> <fixture.bin>` | the **HF-fidelity gate**: per-position argmax must equal HF's exactly, last-row maxrel ≤ 1e-5 vs the committed reference fixture |
@@ -105,6 +105,14 @@ massive-activation outlier dims).
 superblock-256 double-quantization of the per-block scales (symmetric-u8;
 error ≤ 1/254 relative per scale).
 
+### Inspection — `src/inspect.cyr`
+`anuk_inspect(path)` → tensor count | -1 · `anuk_enumerate(r)` · `anuk_verify(r,
+pk)`. *(1.4.0)* `anuk_inspect_pk(path, pk)` → tensor count | -1 (missing or
+malformed) | -2 (with `pk`: unsigned or a bad signature) — reads any size through
+a private mapping · `anuk_pk_load(path)` → 32-byte public key | 0 ·
+`anuk_print_meta(r)` → the metadata pair count. tula's own tables
+(`__tula.meta__`, `__tula.names__`) are not counted or listed as tensors.
+
 ### Persistence — `src/nf4_store.cyr` (trust boundary)
 `anuk_nf4_save(path, cfg, params, sk)` / `anuk_nf4_load(path, pk, cfg_out)` —
 signed NF4 checkpoint (`"cfg"` + `TULA_DT_NF4` codes + INT8 scale codes + F64
@@ -120,6 +128,28 @@ bit-identical by contract (quantized data is discrete). `anuk_sk_load(path)`
 layout = ifran's `operator.sk`); pk is the trailing 32 bytes (`sk + 32`);
 returns 0 on an absent file, *(1.2.2)* on any file that isn't exactly 64 bytes,
 and on one whose pk half isn't the public key of its seed half.
+
+*(1.4.0)* `anuk_nf4_save_src(path, cfg, params, sk, src_path)` /
+`anuk_adapter_save_src(path, A, B, C, r, V, s, sk, base_path)` — the savers, also
+recording the input file (`src_path`: the model; `base_path`: the checkpoint the
+adapter was trained over; 0 for none). Both savers now use tula's checked adds
+and its streaming, crash-safe signed writer (no 2 GiB cap; strictly valid output)
+and write **signed metadata** (tula 1.6, ADR 0008), derived from their inputs
+only, so the same inputs give byte-identical files:
+
+| Key | In | Value |
+|---|---|---|
+| `anukulana.kind` | both | `nf4-checkpoint` / `lora-adapter` |
+| `anukulana.version` | both | the writer's version, `major.minor.patch` |
+| `anukulana.layout` | checkpoint | `rupantara-gpt2` (the packed parameter layout) |
+| `anukulana.config` | checkpoint | the cfg as JSON (`V`, `C`, `T`, `nh`, `nkv`, `NL`, `F`, `attn_bias`) |
+| `anukulana.nf4` | checkpoint | the NF4 parameters as JSON (block 64, superblock 256) |
+| `anukulana.adapter` | adapter | `{"C":…,"r":…,"V":…,"target":"lm_head"}` |
+| `anukulana.source.{name,bytes,format,sha256}` | checkpoint (`_src`) | the model file: basename, size, `safetensors` / `gguf` / `tula` / `unknown`, SHA-256 hex |
+| `anukulana.base.{name,bytes,format,sha256}` | adapter (`_src`) | the base checkpoint, likewise |
+
+The key names are part of the file layout from 1.4.0; readers must tolerate keys
+they don't know. The loaders still read the `"cfg"` tensor, not the metadata.
 
 ### Demo helpers — `src/lora_demo.cyr`
 `anuk_frozen_features(cfg, params, tokens, T)` → f(T,C) — the frozen forward's

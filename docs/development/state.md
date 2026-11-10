@@ -1,9 +1,15 @@
 # anukulana — Current State
 
-> **Last refresh**: 2026-11-09 (1.3.0) | **Cadence**: every release.
+> **Last refresh**: 2026-11-09 (1.4.0) | **Cadence**: every release.
 > `CLAUDE.md` is preferences/process; this file is volatile state.
 
 ## Version
+
+**1.4.0 — 2026-11-09 (the tula 1.2–1.6 surface).** Every checkpoint and adapter carries signed metadata
+(`anukulana.*`: kind, version, layout, config, and with the `_src` savers the source model's or base
+checkpoint's SHA-256); same inputs → byte-identical files. `inspect --pk` verifies signatures (an unsigned
+file fails), prints the metadata and reads any size. Saves use tula's checked adds and its streaming,
+crash-safe signed writer; loaders look up by full name. Suite **257**.
 
 **1.3.0 — 2026-11-09 (re-proven on real weights).** All seven real-checkpoint commands pass on HF GPT-2
 small (now pinned by revision and sha256) at cyrius 6.7.18: fidelity argmax exact 48/48, worst maxrel
@@ -126,7 +132,6 @@ CHANGELOG.
 
 ## Next
 
-**1.3.x follow-through** ([`roadmap.md`](roadmap.md)): the first `realweights.yml` run on GitHub (and
-whether to schedule it), and the first runs of the `bounds` / `aarch64` jobs. Then the tula 1.2–1.6
-surface (1.4.x), `convert` at source precision (1.5.x), rupantara 0.6–0.7 (1.6.x, gated), quantized GGUF
-(1.7.x) and the llama architecture (1.8.x, gated on rupantara).
+Still open from 1.3.x: the first `realweights.yml` run on GitHub and the first `bounds` / `aarch64` runs.
+Then `convert` at source precision (1.5.x), rupantara 0.6–0.7 (1.6.x, gated), quantized GGUF (1.7.x) and
+the llama architecture (1.8.x, gated on rupantara). See [`roadmap.md`](roadmap.md).

@@ -5,10 +5,12 @@
 > **reference binary**: it consumes tula (format), rupantara (forward), rosnet (tensors) and
 > sigil (Ed25519), and does not reinvent them.
 >
-> **Where it stands (1.3.0, 2026-11-09).** The whole charter is built and gated on the real GPT-2
+> **Where it stands (1.4.0, 2026-11-09).** The whole charter is built and gated on the real GPT-2
 > checkpoint: import (safetensors and GGUF, bit-identical across both), run, match HF
 > (`gpt2-oracle`), adapt (LoRA, QLoRA/NF4) and persist (signed tula files). All seven commands were
-> re-proven at the current pin in 1.3.0. The API froze at 1.0.0. This file lists **remaining work only**. Shipped work is in the
+> re-proven at the current pin in 1.3.0, and 1.4.0 shipped the tula 1.2–1.6 surface (checked adds,
+> signed metadata and provenance, `inspect --pk`, big-file reads, streaming writes). The API froze at
+> 1.0.0. This file lists **remaining work only**. Shipped work is in the
 > [CHANGELOG](../../CHANGELOG.md), [`state.md`](state.md) and the audits
 > ([2026-07-04](../audit/2026-07-04-audit.md), [2026-11-09](../audit/2026-11-09-audit.md)).
 
@@ -63,27 +65,6 @@
   for anukulana yet; if it isn't available, the job (and the release gate, which calls `ci.yml`) fails
   until it's changed.
 
-## 1.4.x — the tula 1.2–1.6 surface
-
-**Goal:** anukulana writes and reads tula files with the calls tula added for consumers (tula's
-roadmap: "other consumers move onto the 1.2–1.6 calls").
-
-- **Checked adds.** Every save uses `tula_builder_add_checked`, so a bad shape, or a name over 47
-  bytes, fails loudly instead of truncating (tula audit D-1: two long LoRA names truncate to the same
-  key).
-- **File metadata** (tula 1.6.0, ADR 0008). Write the architecture, the config and provenance (the
-  source file and its digest, the anukulana version) into the signed metadata. Keep the `"cfg"`
-  tensor, which 1.x readers rely on. `inspect` prints the metadata.
-- **`inspect --pk <public key file>`.** Today `inspect` says "pass a pubkey to verify", and the CLI has
-  no way to do that.
-- **Long names on read.** Look tensors up with `tula_find_name`, so a foreign tula file with
-  PEFT-style names (over 47 bytes) resolves the right tensor.
-- **Files past 2 GiB.** `inspect` reads through `tula_read_file` (a private copy, 2 GiB cap). Use
-  tula's big-file reads, and its streaming signed writer (1.4.0) for any checkpoint past the 2 GiB
-  single-allocation cap. GPT-2 does not need this (63.8 MB); the 1.8.x model class will.
-- **Acceptance:** the save/load round trips stay bit-identical. Files are written with checked adds
-  and metadata, and still read through 1.x's `"cfg"` path.
-
 ## 1.5.x — keep the source precision (`convert`)
 
 **Goal:** tula ADR 0005's premise, that "the Type-3 import path (anukulana) needs to keep the
@@ -91,7 +72,8 @@ source precision", rather than only writing NF4.
 
 - **A `convert <model.{safetensors,gguf}> <out.tula> [--sk <key>]` command.** Write the imported
   weights as a signed tula file in their source dtype (F32, F16 or BF16, tula 1.3.0), with the
-  architecture and config in its metadata (1.4.x).
+  architecture, config and provenance in its metadata (the `anukulana.*` keys the savers already write),
+  plus the Hugging Face `config.json` beside the model as `hf.config` (ADR 0008's suggested namespace).
 - **Load a converted file** straight into rupantara's packed layout, so a foreign file is parsed
   once and every later run starts from the signed sovereign copy.
 - **Acceptance:** foreign file → `convert` → load lands on packed params bit-identical to the direct
@@ -201,7 +183,8 @@ additive path. Nothing here is scheduled.
   (1.8.x), tula 1.8 int4 (1.7.x), rosnet quantized linears (1.x.x). Larger models will want rosnet's
   mabda GPU profile (deferred).
 - **Outstanding cross-repo asks addressed to anukulana:** tula — the real-weights gate in CI (the
-  workflow landed in 1.3.0; its first run is pending, 1.3.x) and its 1.2–1.6 calls (1.4.x); rupantara —
+  workflow landed in 1.3.0; its first run is pending, 1.3.x). Its 1.2–1.6 calls (checked adds, strict
+  reads, streaming writes, metadata, long-name lookups) are adopted as of 1.4.0. rupantara —
   drop the repack and be the 1.0 consumer gate (1.6.x).
   Already done in 1.2.2: decode on `ru_model_fwd_row_s`, `RU_ERR_*` checked, off rupantara 0.4.2.
 - **Boundary:** training/backward → attn11 · QAT → tentib · the format → tula · the forward →

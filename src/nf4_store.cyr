@@ -13,9 +13,13 @@
 #   "base.nf4"            NF4  [np]   packed codes (2/byte)
 #   "base.nf4.scale.q8"   INT8 [nb]   double-quantized per-block scales (0..127)
 #   "base.nf4.scale.sup"  F64  [nsb]  per-superblock scale absmax
+#   (1.4.0) metadata: anukulana.kind = "nf4-checkpoint", .version, .layout,
+#   .config (JSON), .nf4, and with anuk_nf4_save_src .source.{name,bytes,format,sha256}
 # Adapter layout:
 #   "lora.A"    F64 [C,r]   ·   "lora.B"    F64 [r,V]   ·
 #   "lora.meta" F64 [2] = (s, r)
+#   (1.4.0) metadata: anukulana.kind = "lora-adapter", .version, .adapter (JSON),
+#   and with anuk_adapter_save_src .base.{name,bytes,format,sha256}
 #
 # Loading (1.2.2): a file is accepted only if it passes tula's strict validator
 # (every payload exactly its dtype x shape, no duplicate names, canonical layout),
@@ -28,9 +32,10 @@ fn _nfs_shp1(a): i64 { var s = alloc(8); store64(s, a); return s; }
 fn _nfs_shp2(a, b): i64 { var s = alloc(16); store64(s, a); store64(s + 8, b); return s; }
 
 # The entry `name` if it has exactly `dtype` and shape [d0] (d1 < 0) or [d0, d1];
-# d0 < 0 accepts any length for a rank-1 tensor. Otherwise 0.
+# d0 < 0 accepts any length for a rank-1 tensor. Otherwise 0. Looked up by full
+# name (1.4.0, tula_find_name), so it can never match a long-named entry's key.
 fn _nfs_tensor(r, name, dtype, d0, d1): i64 {
-    var e = tula_find(r, name);
+    var e = tula_find_name(r, name);
     if (e == 0) { return 0; }
     if (tula_entry_dtype(e) != dtype) { return 0; }
     if (d1 < 0) {
@@ -51,19 +56,126 @@ fn _nfs_check(r, pk, who): i64 {
         _anuk_eput(who); _anuk_eput(": strict validation failed\n");
         return 0 - 1;
     }
-    if (tula_verify(r, pk) != TULA_SIG_OK) {
+    # tula_verify_required (1.4.0): an unsigned file is rejected as firmly as a
+    # bad signature (the earlier `!= TULA_SIG_OK` check did the same, implicitly)
+    if (tula_verify_required(r, pk) != TULA_OK) {
         _anuk_eput(who); _anuk_eput(": signature REJECTED\n");
         return 0 - 1;
     }
     return 0;
 }
 
+# ---- signed file metadata (1.4.0; tula 1.6.0, ADR 0008) ----------------------
+# Every file anukulana writes carries `anukulana.*` keys in tula's metadata
+# table, signed with the tensors: what it is, which anukulana wrote it, the
+# packed layout and its config, and (the _src savers) the file it came from with
+# its SHA-256. Values are derived from the inputs only — no timestamps — so a
+# file stays a pure function of what was saved, as tula intends. Readers keep
+# using the "cfg" tensor; the metadata describes, it doesn't steer.
+
+# "major.minor.patch" of anukulana_version().
+fn _nfs_version_str(): i64 {
+    var v = anukulana_version();
+    var sb = str_builder_new();
+    str_builder_add_int(sb, v / 10000);
+    str_builder_add_cstr(sb, ".");
+    str_builder_add_int(sb, (v / 100) % 100);
+    str_builder_add_cstr(sb, ".");
+    str_builder_add_int(sb, v % 100);
+    return str_cstr(str_builder_build(sb));
+}
+
+fn _nfs_json_int(sb, key, v, first): i64 {
+    if (first == 0) { str_builder_add_cstr(sb, ","); }
+    str_builder_add_cstr(sb, "\"");
+    str_builder_add_cstr(sb, key);
+    str_builder_add_cstr(sb, "\":");
+    str_builder_add_int(sb, v);
+    return 0;
+}
+
+# The config as one-line JSON: {"V":…,"C":…,"T":…,"nh":…,"nkv":…,"NL":…,"F":…,"attn_bias":…}.
+fn _nfs_cfg_json(cfg): i64 {
+    var sb = str_builder_new();
+    str_builder_add_cstr(sb, "{");
+    _nfs_json_int(sb, "V", _cfg_V(cfg), 1);
+    _nfs_json_int(sb, "C", _cfg_C(cfg), 0);
+    _nfs_json_int(sb, "T", _cfg_T(cfg), 0);
+    _nfs_json_int(sb, "nh", _cfg_nh(cfg), 0);
+    _nfs_json_int(sb, "nkv", _cfg_nkv(cfg), 0);
+    _nfs_json_int(sb, "NL", _cfg_NL(cfg), 0);
+    _nfs_json_int(sb, "F", _cfg_F(cfg), 0);
+    _nfs_json_int(sb, "attn_bias", _cfg_bias(cfg), 0);
+    str_builder_add_cstr(sb, "}");
+    return str_cstr(str_builder_build(sb));
+}
+
+# The keys every anukulana file carries. Returns 0, or a TULA_ERR_* code.
+fn _nfs_common_meta(b, kind): i64 {
+    var rc = tula_builder_set_meta(b, "anukulana.kind", kind);
+    if (rc == 0) { rc = tula_builder_set_meta(b, "anukulana.version", _nfs_version_str()); }
+    return rc;
+}
+
+# What a file at the start of `addr` (size bytes) looks like: "gguf", "tula",
+# "safetensors" (a u64 header length that fits, then '{'), or "unknown".
+fn _nfs_sniff(addr, size): i64 {
+    if (size >= 4) { if ((load32(addr) & 0xFFFFFFFF) == 0x46554747) { return "gguf"; } }
+    if (size >= 8) {
+        if (load64(addr) == TULA_MAGIC) { return "tula"; }
+        var hlen = load64(addr);
+        if (size > 8 && hlen > 0 && hlen <= size - 8) { if (load8(addr + 8) == 123) { return "safetensors"; } }
+    }
+    return "unknown";
+}
+
+# Record the file at `path` as <prefix>.name (its basename), <prefix>.bytes,
+# <prefix>.format and <prefix>.sha256. The file is mapped read-only and hashed
+# with sigil's SHA-256 (about 1.7 s for a 548 MB checkpoint). Returns 0 or -1.
+fn _nfs_file_meta(b, prefix, path): i64 {
+    var fd = file_open(path, 0, 0);
+    if (fd < 0) { return 0 - 1; }
+    var size = xlseek(fd, 0, 2);
+    if (size <= 0) { file_close(fd); return 0 - 1; }
+    var addr = mmap_file_ro(fd, size);
+    file_close(fd);
+    if (addr == 0) { return 0 - 1; }
+    var digest = sha256_hex(addr, size);
+    var format = _nfs_sniff(addr, size);
+    cyr_munmap(addr, size);
+    var base = path;
+    var i = 0;
+    while (load8(path + i) != 0) { if (load8(path + i) == 47) { base = path + i + 1; } i = i + 1; }
+    var nb = str_builder_new();
+    str_builder_add_int(nb, size);
+    var rc = _nfs_meta_kv(b, prefix, ".name", base);
+    if (rc == 0) { rc = _nfs_meta_kv(b, prefix, ".bytes", str_cstr(str_builder_build(nb))); }
+    if (rc == 0) { rc = _nfs_meta_kv(b, prefix, ".format", format); }
+    if (rc == 0) { rc = _nfs_meta_kv(b, prefix, ".sha256", digest); }
+    if (rc != 0) { return 0 - 1; }
+    return 0;
+}
+fn _nfs_meta_kv(b, prefix, suffix, value): i64 {
+    var kb = str_builder_new();
+    str_builder_add_cstr(kb, prefix);
+    str_builder_add_cstr(kb, suffix);
+    return tula_builder_set_meta(b, str_cstr(str_builder_build(kb)), value);
+}
+
 # ---- save the NF4-quantized base as a signed .tula --------------------------
 # Quantizes params(np f64) through the FULL pipeline (tula NF4 pack -> local
 # double-quant) and writes a signed checkpoint. Returns 0, or -1 on any failure
 # (1.2.2: including a cfg rupantara rejects). The quantization buffers are
-# unmapped before returning.
-fn anuk_nf4_save(path, cfg, params, sk): i64 {
+# unmapped before returning. 1.4.0: the file also carries the metadata above
+# (kind "nf4-checkpoint", version, layout, config, the NF4 parameters); see
+# anuk_nf4_save_src to record the source model too.
+fn anuk_nf4_save(path, cfg, params, sk): i64 { return anuk_nf4_save_src(path, cfg, params, sk, 0); }
+
+# anuk_nf4_save, also recording the model file the params were imported from
+# (`src_path`; 0 for none) as anukulana.source.{name,bytes,format,sha256}
+# (1.4.0). Every tensor goes through tula's checked add, and the file is
+# streamed to disk and signed by tula's crash-safe writer (no 2 GiB cap).
+fn anuk_nf4_save_src(path, cfg, params, sk, src_path): i64 {
     if (ru_cfg_check(cfg) != RU_OK()) { return 0 - 1; }
     var np = ru_params_count(cfg);
     var bs = NF4_BS();
@@ -88,15 +200,25 @@ fn anuk_nf4_save(path, cfg, params, sk): i64 {
         store64(cfgv + 6 * 8, f64_from(_cfg_F(cfg)));
         store64(cfgv + 7 * 8, f64_from(_cfg_bias(cfg)));
         var b = tula_builder_new();
-        tula_builder_add(b, "cfg", TULA_DT_F64, _nfs_shp1(8), 1, cfgv, 64);
-        tula_builder_add(b, "base.nf4", TULA_DT_NF4, _nfs_shp1(np), 1, nibbles, nbytes);
-        tula_builder_add(b, "base.nf4.scale.q8", TULA_DT_INT8, _nfs_shp1(nb), 1, q8, nb);
-        tula_builder_add(b, "base.nf4.scale.sup", TULA_DT_F64, _nfs_shp1(nsb), 1, supers, nsb * 8);
-        var buf = tula_builder_finish_signed(b, sk);
-        if (buf != 0) {
-            var total = tula_total_len(buf);
-            if (tula_write_file(path, buf, total) == total) { rc = 0; }
+        # checked adds (1.4.0): a bad shape or name fails here instead of being
+        # truncated, and every return is checked (through 1.3.0 none was)
+        var e = tula_builder_add_checked(b, "cfg", TULA_DT_F64, _nfs_shp1(8), 1, cfgv, 64);
+        if (e == 0) { e = tula_builder_add_checked(b, "base.nf4", TULA_DT_NF4, _nfs_shp1(np), 1, nibbles, nbytes); }
+        if (e == 0) { e = tula_builder_add_checked(b, "base.nf4.scale.q8", TULA_DT_INT8, _nfs_shp1(nb), 1, q8, nb); }
+        if (e == 0) {
+            e = tula_builder_add_checked(b, "base.nf4.scale.sup", TULA_DT_F64, _nfs_shp1(nsb), 1, supers, nsb * 8);
         }
+        if (e == 0) { e = _nfs_common_meta(b, "nf4-checkpoint"); }
+        if (e == 0) { e = tula_builder_set_meta(b, "anukulana.layout", "rupantara-gpt2"); }
+        if (e == 0) { e = tula_builder_set_meta(b, "anukulana.config", _nfs_cfg_json(cfg)); }
+        if (e == 0) {
+            e = tula_builder_set_meta(b, "anukulana.nf4",
+              "{\"block\":64,\"superblock\":256,\"scales\":\"int8 codes + f64 superblock absmax\"}");
+        }
+        if (e == 0 && src_path != 0) { e = _nfs_file_meta(b, "anukulana.source", src_path); }
+        # streamed and signed by tula (1.4.0): no in-memory copy of the file, so no
+        # 2 GiB cap, and crash-safe (built in a temp, renamed into place)
+        if (e == 0) { if (tula_builder_write_file_signed(b, path, sk) > 0) { rc = 0; } }
     }
     if (nibbles != 0) { cyr_munmap(nibbles, nbytes); }
     if (scales != 0) { cyr_munmap(scales, nb * 8); }
@@ -152,19 +274,36 @@ fn _nfs_load_base(r, pk, cfg_out): i64 {
 
 # ---- adapter save / load ------------------------------------------------------
 # Write the adapter (A [C,r], B [r,V], meta (s, r)) as a signed .tula. Returns 0
-# or -1.
+# or -1. 1.4.0: checked adds, tula's streaming signed writer, and metadata (kind
+# "lora-adapter", version, the adapter's shape); see anuk_adapter_save_src.
 fn anuk_adapter_save(path, A, B, C, r, V, s, sk): i64 {
+    return anuk_adapter_save_src(path, A, B, C, r, V, s, sk, 0);
+}
+
+# anuk_adapter_save, also recording the checkpoint the adapter was trained over
+# (`base_path`; 0 for none) as anukulana.base.{name,bytes,format,sha256} (1.4.0),
+# which ties the adapter to the exact base it adapts.
+fn anuk_adapter_save_src(path, A, B, C, r, V, s, sk, base_path): i64 {
     var meta = t_alloc(2);
     store64(meta, s);
     store64(meta + 8, f64_from(r));
     var b = tula_builder_new();
-    tula_builder_add(b, "lora.A", TULA_DT_F64, _nfs_shp2(C, r), 2, A, C * r * 8);
-    tula_builder_add(b, "lora.B", TULA_DT_F64, _nfs_shp2(r, V), 2, B, r * V * 8);
-    tula_builder_add(b, "lora.meta", TULA_DT_F64, _nfs_shp1(2), 1, meta, 16);
-    var buf = tula_builder_finish_signed(b, sk);
-    if (buf == 0) { return 0 - 1; }
-    var total = tula_total_len(buf);
-    if (tula_write_file(path, buf, total) != total) { return 0 - 1; }
+    var e = tula_builder_add_checked(b, "lora.A", TULA_DT_F64, _nfs_shp2(C, r), 2, A, C * r * 8);
+    if (e == 0) { e = tula_builder_add_checked(b, "lora.B", TULA_DT_F64, _nfs_shp2(r, V), 2, B, r * V * 8); }
+    if (e == 0) { e = tula_builder_add_checked(b, "lora.meta", TULA_DT_F64, _nfs_shp1(2), 1, meta, 16); }
+    if (e == 0) { e = _nfs_common_meta(b, "lora-adapter"); }
+    if (e == 0) {
+        var sb = str_builder_new();
+        str_builder_add_cstr(sb, "{");
+        _nfs_json_int(sb, "C", C, 1);
+        _nfs_json_int(sb, "r", r, 0);
+        _nfs_json_int(sb, "V", V, 0);
+        str_builder_add_cstr(sb, ",\"target\":\"lm_head\"}");
+        e = tula_builder_set_meta(b, "anukulana.adapter", str_cstr(str_builder_build(sb)));
+    }
+    if (e == 0 && base_path != 0) { e = _nfs_file_meta(b, "anukulana.base", base_path); }
+    if (e != 0) { return 0 - 1; }
+    if (tula_builder_write_file_signed(b, path, sk) <= 0) { return 0 - 1; }
     return 0;
 }
 

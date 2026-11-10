@@ -61,15 +61,31 @@ fn _anuk_dtype_name(dt): i64 {
     return "?";
 }
 
+# 1 iff entry e is one of tula's own reserved tables that this reader recognizes:
+# the metadata table (__tula.meta__, ADR 0008) or the long-name table
+# (__tula.names__, ADR 0004). A tensor that merely has one of those names is
+# ordinary (tula's rule), so recognition goes through tula itself.
+fn _anuk_is_tula_table(r, e): i64 {
+    var nm = tula_entry_name(e);
+    if (streq(nm, "__tula.meta__") == 1 && tula_meta_count(r) > 0) { return 1; }
+    if (streq(nm, "__tula.names__") == 1 && tula_has_long_names(r) != 0) { return 1; }
+    return 0;
+}
+
 # enumerate the tensors in an opened+validated tula reader; returns the count.
 # Names are printed in full (tula 1.3.0 long names; through 1.2.1 a long name
-# printed as its 47-byte in-place key).
+# printed as its 47-byte in-place key). tula's own tables are not tensors and are
+# neither listed nor counted (1.4.0; the metadata table prints separately).
 fn anuk_enumerate(r): i64 {
-    var n = tula_count(r);
+    var total = tula_count(r);
+    var n = 0;
+    var j = 0;
+    while (j < total) { if (_anuk_is_tula_table(r, tula_entry(r, j)) == 0) { n = n + 1; } j = j + 1; }
     _anuk_sput("tensors: "); _anuk_puti(n); _anuk_sput("\n");
     var i = 0;
-    while (i < n) {
+    while (i < total) {
         var e = tula_entry(r, i);
+        if (_anuk_is_tula_table(r, e) == 1) { i = i + 1; continue; }
         _anuk_sput("  ");
         _anuk_sput(tula_entry_full_name(r, e));
         _anuk_sput("  dtype=");
@@ -100,11 +116,56 @@ fn anuk_verify(r, pk): i64 {
     return st;
 }
 
+# print the file's metadata table (tula 1.6.0, ADR 0008), one "key = value" per
+# pair, in key order. Returns the pair count.
+fn anuk_print_meta(r): i64 {
+    var n = tula_meta_count(r);
+    if (n <= 0) { _anuk_sput("metadata: none\n"); return 0; }
+    _anuk_sput("metadata: "); _anuk_puti(n); _anuk_sput("\n");
+    var i = 0;
+    while (i < n) {
+        var k = tula_meta_key(r, i);
+        var v = tula_meta_value(r, i);
+        if (k != 0 && v != 0) {
+            _anuk_sput("  "); _anuk_sput(k); _anuk_sput(" = "); _anuk_sput(v); _anuk_sput("\n");
+        }
+        i = i + 1;
+    }
+    return n;
+}
+
+# Load a public key for `inspect --pk` (1.4.0): a 32-byte file is the key itself;
+# a 64-byte file is a seed||pk secret key (ifran's operator.sk) whose halves must
+# agree, and its trailing 32 bytes are used. Returns the 32-byte key or 0.
+fn anuk_pk_load(path): i64 {
+    var buf = alloc(65);
+    var n = file_read_all(path, buf, 65);
+    if (n == 32) { return buf; }
+    if (n == 64) {
+        var sk = anuk_sk_load(path);
+        if (sk == 0) { return 0; }
+        return sk + 32;
+    }
+    return 0;
+}
+
 # open a tula file + report + enumerate. Returns tensor count, or -1 if the file
 # is missing/malformed (tula_read_file returned 0 after full validation).
-fn anuk_inspect(path): i64 {
-    var r = tula_read_file(path);
+fn anuk_inspect(path): i64 { return anuk_inspect_pk(path, 0); }
+
+# anuk_inspect, then (pk != 0, a 32-byte Ed25519 public key) verify the
+# signature: an unsigned file fails as firmly as a bad signature. Returns the
+# tensor count, -1 for a missing/malformed file, -2 for a failed verification
+# (1.4.0). Any file size: the file is read into a private mapping sized from its
+# header (tula_read_file_into), not the heap, whose one-allocation cap is 2 GiB.
+fn anuk_inspect_pk(path, pk): i64 {
+    var len = tula_file_len(path);
+    var buf = 0;
+    var r = 0;
+    if (len > 0) { buf = mmap_anon(len); }
+    if (buf != 0) { r = tula_read_file_into(path, buf, len); }
     if (r == 0) {
+        if (buf != 0) { cyr_munmap(buf, len); }
         _anuk_eput("anukulana: cannot open (missing or malformed): ");
         _anuk_eput(path);
         _anuk_eput("\n");
@@ -112,10 +173,17 @@ fn anuk_inspect(path): i64 {
     }
     _anuk_sput("tula file: "); _anuk_sput(path); _anuk_sput("\n");
     _anuk_sput("format: v"); _anuk_puti(tula_format_version(r)); _anuk_sput("\n");
-    if (tula_is_signed(r) != 0) {
-        _anuk_sput("signature: present (Ed25519) — pass a pubkey to verify\n");
+    var verified = 1;
+    if (pk != 0) {
+        if (anuk_verify(r, pk) != TULA_SIG_OK) { verified = 0; }
+    } elif (tula_is_signed(r) != 0) {
+        _anuk_sput("signature: present (Ed25519) — verify with --pk <key file>\n");
     } else {
         _anuk_sput("signature: none\n");
     }
-    return anuk_enumerate(r);
+    anuk_print_meta(r);
+    var n = anuk_enumerate(r);
+    cyr_munmap(buf, len);
+    if (verified == 0) { return 0 - 2; }
+    return n;
 }

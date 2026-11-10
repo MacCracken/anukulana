@@ -45,7 +45,11 @@ their defenses:
    proves who wrote a file, not that it is well-formed. Key management is the
    caller's (per tula's charter); the demos use ephemeral keys.
    `anuk_sk_load` *(1.2.2)* accepts only an exact 64-byte seed‖pk whose public
-   half is derived from its seed.
+   half is derived from its seed. *(1.4.0)* Files carry signed metadata
+   (provenance: the source model's SHA-256, and for an adapter its base
+   checkpoint's), so tampering with the description is as detectable as with
+   the weights; `inspect --pk` verifies from the CLI and fails an unsigned file
+   as firmly as a bad signature.
 4. **The oracle fixture** (`_orc_read_fixture`). Committed test data, but read
    defensively anyway: magic + count/shape bounds + payload-overrun checks;
    included in the fuzz suite.

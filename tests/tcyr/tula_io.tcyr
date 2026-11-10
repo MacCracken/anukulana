@@ -86,10 +86,58 @@ fn test_print_helpers(): i64 {
     return 0;
 }
 
+# 1.4.0: `inspect --pk` — the key file loader, verification through
+# anuk_inspect_pk, and tula's metadata table kept out of the tensor listing
+fn test_inspect_pk(): i64 {
+    var sk = alloc(64);
+    var pk = alloc(32);
+    var seed = alloc(32);
+    var k = 0;
+    while (k < 32) { store8(seed + k, (k * 9 + 5) & 0xFF); k = k + 1; }
+    ed25519_keypair(seed, sk, pk);
+    # key files: 32 B public key, 64 B seed||pk, and two bad ones
+    file_write_all("/tmp/anuk_pk32.pub", pk, 32);
+    file_write_all("/tmp/anuk_pk64.sk", sk, 64);
+    file_write_all("/tmp/anuk_pk63.bad", sk, 63);
+    var p32 = anuk_pk_load("/tmp/anuk_pk32.pub");
+    assert_nonnull(p32, "32-byte public key file loads");
+    assert_eq(memeq(p32, pk, 32), 1, "and is the key");
+    var p64 = anuk_pk_load("/tmp/anuk_pk64.sk");
+    assert_nonnull(p64, "64-byte seed||pk loads");
+    assert_eq(memeq(p64, pk, 32), 1, "and yields its public half");
+    assert_eq(anuk_pk_load("/tmp/anuk_pk63.bad"), 0, "63-byte file rejected");
+    store8(sk + 40, load8(sk + 40) ^ 0xFF);
+    file_write_all("/tmp/anuk_pk64bad.sk", sk, 64);
+    assert_eq(anuk_pk_load("/tmp/anuk_pk64bad.sk"), 0, "64-byte file whose halves disagree rejected");
+    store8(sk + 40, load8(sk + 40) ^ 0xFF);
+    # a signed file with metadata, and an unsigned one
+    var w = t_alloc(4);
+    var shp = alloc(8);
+    store64(shp, 4);
+    var b = tula_builder_new();
+    tula_builder_add_checked(b, "w", TULA_DT_F64, shp, 1, w, 32);
+    tula_builder_set_meta(b, "anukulana.kind", "test");
+    assert(tula_builder_write_file_signed(b, "/tmp/anuk_pk_signed.tula", sk) > 0, "signed test file written");
+    var b2 = tula_builder_new();
+    tula_builder_add_checked(b2, "w", TULA_DT_F64, shp, 1, w, 32);
+    assert(tula_builder_write_file(b2, "/tmp/anuk_pk_unsigned.tula") > 0, "unsigned test file written");
+    assert_eq(anuk_inspect_pk("/tmp/anuk_pk_signed.tula", pk), 1,
+      "inspect --pk with the right key: 1 tensor (the metadata table isn't one)");
+    var bad = alloc(32);
+    k = 0;
+    while (k < 32) { store8(bad + k, (k + 77) & 0xFF); k = k + 1; }
+    assert_eq(anuk_inspect_pk("/tmp/anuk_pk_signed.tula", bad), 0 - 2, "inspect --pk with a wrong key: -2");
+    assert_eq(anuk_inspect_pk("/tmp/anuk_pk_unsigned.tula", pk), 0 - 2, "inspect --pk on an unsigned file: -2");
+    assert_eq(anuk_inspect_pk("/tmp/anuk_pk_unsigned.tula", 0), 1, "inspect without --pk still lists it");
+    assert_eq(anuk_inspect_pk("/tmp/anuk_no_such_file.tula", 0), 0 - 1, "a missing file: -1");
+    return 0;
+}
+
 fn main(): i64 {
     alloc_init();
     test_tula_io();
     test_print_helpers();
+    test_inspect_pk();
     return assert_summary();
 }
 

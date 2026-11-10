@@ -6,6 +6,56 @@ moving, no API freeze until v1.0).
 
 ## [Unreleased]
 
+## [1.4.0] - 2026-11-09
+
+The roadmap's 1.4.x line: anukulana writes and reads tula files with the calls tula 1.2–1.6 added for
+consumers. Every existing tensor and loader contract is unchanged. Toolchain and dependencies are
+unchanged (cyrius 6.7.18; sigil 3.13.15, tula 1.6.1, rosnet 1.4.1, rupantara 0.5.3).
+
+### Added
+
+- **Signed file metadata** (tula 1.6.0, ADR 0008) on every checkpoint and adapter: `anukulana.kind`,
+  `.version`, and for a checkpoint `.layout`, `.config` (JSON) and `.nf4`, or for an adapter `.adapter`.
+  The values come from the inputs only (no timestamps), so the same inputs give byte-identical files,
+  which a test holds.
+- **Provenance:** `anuk_nf4_save_src(…, src_path)` records the model file it was imported from, and
+  `anuk_adapter_save_src(…, base_path)` the checkpoint the adapter was trained over, as
+  `anukulana.{source,base}.{name,bytes,format,sha256}`. The SHA-256 is sigil's (about 1.7 s for the 548 MB
+  GPT-2 checkpoint). `gpt2-tula` uses both: on the real checkpoint the recorded source digest is HF's
+  published sha256 (`248dfc39…`), and the adapter's base digest equals `sha256sum` of the checkpoint.
+- **`inspect --pk <key file>`** verifies the signature: a 32-byte public key, or a 64-byte seed‖pk key
+  whose halves agree. A bad signature **or an unsigned file** exits 1, and an unknown option exits 2.
+  Through 1.3.0 `inspect` said "pass a pubkey to verify" and had no way to take one. New
+  `anuk_inspect_pk`, `anuk_pk_load` and `anuk_print_meta`.
+- `inspect` prints the metadata table, and no longer lists tula's own tables (`__tula.meta__`,
+  `__tula.names__`) as tensors. They are recognized through tula, so an ordinary tensor with one of those
+  names still lists.
+
+### Changed
+
+- **Saves use tula's checked adds** (`tula_builder_add_checked`): a bad shape or an over-long name fails
+  instead of being truncated. Every add's return is now checked; through 1.3.0 none was, so a failed add
+  would have saved a file missing a tensor. Saved files are strictly valid, which a test holds.
+- **Saves stream through tula's signed writer** (`tula_builder_write_file_signed`). It is crash-safe (the
+  file is built nameless and renamed into place), has no 2 GiB cap and keeps no in-memory copy of the
+  file. An unwritable path returns -1.
+- **Loaders look tensors up by full name** (`tula_find_name`), and require a signature through
+  `tula_verify_required`, as strictly as before.
+- **`inspect` reads files of any size**, into a private mapping sized from the header
+  (`tula_read_file_into`) instead of the heap with its 2 GiB one-allocation cap. Checked once on a 2.2 GB
+  file, which `tula_read_file` refuses.
+- **`anukulana_version()` `10300` → `10400`.** Files written by this release record
+  `anukulana.version = 1.4.0`.
+
+### Verified
+
+- Suite **219 → 257** (`nf4_store` 38 → 63: metadata, provenance digests against independent hashes,
+  format sniffing, strict validity, byte-identical saves, a failing write and a missing source;
+  `tula_io` 17 → 30: key-file loading, `--pk` with the right key, a wrong key and an unsigned file). Lint,
+  fmt, vet and `doc --check` clean.
+- `gpt2-tula` on the real checkpoint: PASS, checkpoint and adapter bit-identical, 8/8; 55.6 s (50.1 s at
+  1.3.0, most of the difference the two SHA-256 passes).
+
 ## [1.3.0] - 2026-11-09
 
 The real-checkpoint gates re-proven at the current pin (none had run since 1.1.3), a real-weights CI

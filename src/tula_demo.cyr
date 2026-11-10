@@ -46,7 +46,9 @@ fn anuk_gpt2_tula(model_path, ckpt_path, adapter_path, sk_path): i64 {
     }
 
     # ---- 1. quantize + save the signed checkpoint -----------------------------
-    if (anuk_nf4_save(ckpt_path, cfg, params, sk) != 0) {
+    # 1.4.0: the checkpoint records the model it came from (name, bytes, format,
+    # SHA-256) in its signed metadata
+    if (anuk_nf4_save_src(ckpt_path, cfg, params, sk, model_path) != 0) {
         _anuk_eput("tula-demo: checkpoint save failed\n");
         return 1;
     }
@@ -104,7 +106,10 @@ fn anuk_gpt2_tula(model_path, ckpt_path, adapter_path, sk_path): i64 {
     t_copy(adapted, _anuk_head_adapter_fwd(ad, qf, base_logits, s), T * V);
 
     # ---- save + reload the adapter, recompute, bit-compare ----------------------
-    if (anuk_adapter_save(adapter_path, _anuk_head_adapter_a(ad), _anuk_head_adapter_b(ad), C, r, V, s, sk) != 0) {
+    # 1.4.0: the adapter records the checkpoint it was trained over
+    var ada = _anuk_head_adapter_a(ad);
+    var adb = _anuk_head_adapter_b(ad);
+    if (anuk_adapter_save_src(adapter_path, ada, adb, C, r, V, s, sk, ckpt_path) != 0) {
         _anuk_eput("tula-demo: adapter save failed\n");
         return 1;
     }

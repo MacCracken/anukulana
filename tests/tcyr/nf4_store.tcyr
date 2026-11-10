@@ -295,6 +295,90 @@ fn test_sk_file_checks(): i64 {
     return 0;
 }
 
+# read a whole file into a fresh buffer; its length via out_len
+fn _mf_slurp(path, out_len): i64 {
+    var cap = 128 * 1024 * 1024;
+    var buf = mmap_anon(cap);
+    var n = file_read_all(path, buf, cap);
+    store64(out_len, n);
+    return buf;
+}
+fn _mf_meta_is(r, key, want): i64 {
+    var v = tula_meta_get(r, key);
+    if (v == 0) { return 0; }
+    return streq(v, want);
+}
+
+# 1.4.0: both savers write signed metadata through tula's checked, streaming
+# writer; the _src variants record the input file and its SHA-256.
+fn test_metadata(): i64 {
+    var cfg = alloc(64);
+    ru_cfg_init(cfg, 11, 4, 2, 1, 1, 1, 16, 1);
+    var np = ru_params_count(cfg);
+    var params = t_alloc(np);
+    _fillp(params, np);
+    var sk = alloc(64);
+    var pk = alloc(32);
+    _mf_keys(sk, pk);
+    # a source "model": a few bytes that look like safetensors (u64 hlen, then '{')
+    var src = alloc(64);
+    store64(src, 2);
+    store8(src + 8, 123); store8(src + 9, 125);
+    var j = 10;
+    while (j < 64) { store8(src + j, j); j = j + 1; }
+    file_write_all("/tmp/anuk_meta_src.safetensors", src, 64);
+    var want_sha = sha256_hex(src, 64);
+    var path = "/tmp/anuk_meta_ckpt.tula";
+    assert_eq(anuk_nf4_save_src(path, cfg, params, sk, "/tmp/anuk_meta_src.safetensors"), 0, "nf4_save_src ok");
+    var r = tula_read_file(path);
+    assert_nonnull(r, "checkpoint with metadata opens");
+    assert_eq(tula_validate_strict(r, tula_total_len(r)), TULA_OK, "and is strictly valid (checked adds)");
+    assert_eq(_mf_meta_is(r, "anukulana.kind", "nf4-checkpoint"), 1, "meta kind");
+    assert_eq(_mf_meta_is(r, "anukulana.version", _nfs_version_str()), 1, "meta version");
+    assert_eq(_mf_meta_is(r, "anukulana.layout", "rupantara-gpt2"), 1, "meta layout");
+    assert_eq(_mf_meta_is(r, "anukulana.config",
+        "{\"V\":11,\"C\":4,\"T\":2,\"nh\":1,\"nkv\":1,\"NL\":1,\"F\":16,\"attn_bias\":1}"), 1, "meta config JSON");
+    assert_eq(_mf_meta_is(r, "anukulana.source.sha256", want_sha), 1, "meta source sha256 = sha256 of the source");
+    assert_eq(_mf_meta_is(r, "anukulana.source.bytes", "64"), 1, "meta source bytes");
+    assert_eq(_mf_meta_is(r, "anukulana.source.name", "anuk_meta_src.safetensors"), 1, "meta source basename");
+    assert_eq(_mf_meta_is(r, "anukulana.source.format", "safetensors"), 1, "meta source format sniffed");
+    var cfg2 = alloc(64);
+    assert_nonnull(anuk_nf4_load(path, pk, cfg2), "a checkpoint with metadata still loads through the cfg tensor");
+    # no timestamps: the same inputs give the same bytes
+    var path2 = "/tmp/anuk_meta_ckpt2.tula";
+    anuk_nf4_save_src(path2, cfg, params, sk, "/tmp/anuk_meta_src.safetensors");
+    var l1 = alloc(8); var l2 = alloc(8);
+    var f1 = _mf_slurp(path, l1);
+    var f2 = _mf_slurp(path2, l2);
+    assert_eq(load64(l1), load64(l2), "two saves: same length");
+    assert_eq(memeq(f1, f2, load64(l1)), 1, "two saves of the same inputs are byte-identical");
+    # the plain saver writes everything but the source keys
+    anuk_nf4_save(path2, cfg, params, sk);
+    var rp = tula_read_file(path2);
+    assert_eq(_mf_meta_is(rp, "anukulana.kind", "nf4-checkpoint"), 1, "plain save: meta kind");
+    assert_eq(tula_meta_get(rp, "anukulana.source.sha256"), 0, "plain save: no source keys");
+    # the adapter records its base checkpoint
+    var C = 4; var rr = 2; var V = 3;
+    var apath = "/tmp/anuk_meta_adapter.tula";
+    assert_eq(anuk_adapter_save_src(apath, t_alloc(C * rr), t_alloc(rr * V), C, rr, V, f64_from(2), sk, path), 0,
+      "adapter_save_src ok");
+    var ra = tula_read_file(apath);
+    assert_eq(tula_validate_strict(ra, tula_total_len(ra)), TULA_OK, "adapter is strictly valid");
+    assert_eq(_mf_meta_is(ra, "anukulana.kind", "lora-adapter"), 1, "adapter meta kind");
+    assert_eq(_mf_meta_is(ra, "anukulana.adapter", "{\"C\":4,\"r\":2,\"V\":3,\"target\":\"lm_head\"}"), 1,
+      "adapter meta shape JSON");
+    assert_eq(_mf_meta_is(ra, "anukulana.base.sha256", sha256_hex(f1, load64(l1))), 1,
+      "adapter meta base sha256 = sha256 of the checkpoint");
+    assert_eq(_mf_meta_is(ra, "anukulana.base.format", "tula"), 1, "adapter meta base format sniffed as tula");
+    var A2 = t_alloc(C * rr); var B2 = t_alloc(rr * V); var o = t_alloc(2);
+    assert_eq(anuk_adapter_load(apath, pk, A2, B2, C, rr, V, o), 0, "adapter with metadata still loads");
+    # a write that can't happen fails cleanly, and a missing source fails the save
+    assert_eq(anuk_nf4_save("/nonexistent-dir/x.tula", cfg, params, sk), 0 - 1, "unwritable path -> -1");
+    assert_eq(anuk_nf4_save_src(path2, cfg, params, sk, "/tmp/anuk_no_such_source"), 0 - 1,
+      "missing source file -> -1");
+    return 0;
+}
+
 fn main(): i64 {
     alloc_init();
     test_store();
@@ -302,6 +386,7 @@ fn main(): i64 {
     test_bad_cfg_rejected();
     test_malformed_files();
     test_sk_file_checks();
+    test_metadata();
     return assert_summary();
 }
 

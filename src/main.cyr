@@ -16,7 +16,7 @@ fn _u(fd, s): i64 { sys_write(fd, s, strlen(s)); return 0; }
 fn usage(fd): i64 {
     _u(fd, "anukulana - sovereign pretrained-import reference\n\n");
     _u(fd, "usage: anukulana <command> [args]\n");
-    _u(fd, "  inspect <file.tula>   open a tula checkpoint: list tensors + signature\n");
+    _u(fd, "  inspect <file.tula> [--pk <key>]      list tensors + metadata; --pk verifies\n");
     _u(fd, "  version               print the packed version int\n");
     _u(fd, "  gpt2 <model.safetensors>              import + run (no-oracle validation)\n");
     _u(fd, "  gpt2-oracle <model.safetensors> <fixture.bin>   HF-fidelity gate\n");
@@ -164,8 +164,24 @@ fn main(): i64 {
     var cmd = argv(1);
     if (streq(cmd, "help") == 1 || streq(cmd, "--help") == 1 || streq(cmd, "-h") == 1) { usage(1); return 0; }
     if (streq(cmd, "inspect") == 1) {
-        if (_need(3, "anukulana: inspect needs a <file.tula>\n") == 0) { return 1; }
-        if (anuk_inspect(argv(2)) < 0) { return 1; }
+        if (_need(3, "anukulana: inspect needs a <file.tula> [--pk <key file>]\n") == 0) { return 1; }
+        var pk = 0;
+        if (argc() >= 4) {
+            if (streq(argv(3), "--pk") == 0 || argc() > 5) {
+                _anuk_eput("anukulana: inspect: unknown option (only --pk <key file>)\n");
+                return 2;
+            }
+            if (_need(5, "anukulana: --pk needs a <key file> (32-byte public key or 64-byte seed||pk)\n") == 0) {
+                return 1;
+            }
+            pk = anuk_pk_load(argv(4));
+            if (pk == 0) {
+                _anuk_eput("anukulana: --pk: not a 32-byte public key or a consistent 64-byte seed||pk: ");
+                _anuk_eput(argv(4)); _anuk_eput("\n");
+                return 1;
+            }
+        }
+        if (anuk_inspect_pk(argv(2), pk) < 0) { return 1; }
         return 0;
     }
     if (streq(cmd, "version") == 1) {
