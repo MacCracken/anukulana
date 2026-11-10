@@ -37,7 +37,10 @@ element size; fuzz-gated in `tests/tcyr/fuzz.tcyr`) · `st_read_file(path,
 maxlen)` · `st_open_mmap(path)` (zero-copy, for >256 MB files) · accessors
 `st_count` / `st_entry` / `st_entry_{name,name_len,dtype,ndim,dim,nelems,data}` /
 `st_find` (`st_entry_dim` is 0 past ndim, 1.2.2) · `st_read_f64(r, e, dst)`
-(widens F64/F32/F16/BF16 per dtype).
+(widens F64/F32/F16/BF16 per dtype). *(1.3.0)* `st_read_f64_range(r, e, start, n,
+dst)` → 0 | -1 (a flat element range, widened; -1 outside the tensor or for a
+dtype that isn't a float weight) · `st_entry_nbytes(e)` (the payload's byte
+span) · `ST_MAX_ELEMS()` (2^56, the element-count cap).
 
 ### GPT-2 mapping — `src/gpt2.cyr`
 `anuk_gpt2_import(path, nh, T_run, cfg)` → params | 0 — one-shot: mmap → infer
@@ -48,6 +51,12 @@ config with `T_run` applied, must pass rupantara's `ru_cfg_check`, or import
 returns 0 and `anuk_gpt2_infer_cfg` returns -1. *(1.2.2)* Every tensor must have
 exactly HF GPT-2's shape (`wte` [V,C], `wpe` [≥T,C], `c_attn.weight` [C,3C], …),
 not just its element count; `anuk_gpt2_pack` returns -2 otherwise.
+*(1.3.0)* `anuk_decode_check(cfg, params, tokens, Lb)` → the number of differing
+logits | a negative `RU_ERR_*` — the batch forward over `T` tokens into `Lb`
+(`T`×`V`), then the KV-cache decode token by token, compared bit for bit;
+allocation-free per token (the `gpt2` / `gpt2-gguf` gate) ·
+`anuk_argmax_matches(logits, targets, T, V)` → how many of the `T` rows have
+their argmax at `targets[t]`.
 
 ### Foreign import — `src/gguf.cyr` (untrusted input; added 1.1.0)
 `gg_open(buf, len)` → reader | 0 (GGUF v2/v3 — typed-KV walk with structural
@@ -59,6 +68,8 @@ extent validation; wrap-safe bounds throughout; fuzz-gated in
 `gg_read_f64(r, e, dst)` (widens F32/F16; quantized GGML block types reject).
 *(1.2.2)* Element counts are checked at every multiply; KV integers are read at
 their own width and i8/i16/i32 sign-extended; `gg_entry_dim` is 0 past ndim.
+*(1.3.0)* `gg_read_f64_range(r, e, start, n, dst)` → n | -1 (a flat element
+range, widened) · `GG_MAX_ELEMS()` (2^29, the element-count cap).
 
 ### GPT-2 mapping (GGUF) — `src/gpt2_gguf.cyr` (added 1.1.0)
 `anuk_ggpt2_import(path, T_run, cfg)` → params | 0 — one-shot: mmap → infer
@@ -116,15 +127,12 @@ final-LN features, composed from rupantara's public ops (once-per-run).
 
 ## Out of freeze
 
-- **Added in 1.2.2, out of freeze until the next minor** (a patch adds no frozen
-  surface, per `STABILITY.md`): `st_read_f64_range(r, e, start, n, dst)` /
-  `gg_read_f64_range(r, e, start, n, dst)` (a flat element range, widened) ·
-  `st_entry_nbytes(e)` · `ST_MAX_ELEMS()` / `GG_MAX_ELEMS()` ·
-  `anuk_decode_check(cfg, params, tokens, Lb)` → logit diffs | `RU_ERR_*` (batch
-  vs KV-cache decode, allocation-free per token) · `anuk_demo_tokens(T, V)` /
-  `anuk_demo_targets(tokens, T)` / `anuk_argmax_matches(logits, targets, T, V)` ·
-  `anuk_head_adapter_new / _a / _b / _fwd / _fwd_with / _train` (the demos' shared
-  LoRA head adapter).
+- **The 1.2.2 additions, settled at 1.3.0.** Frozen above: `st_read_f64_range`,
+  `st_entry_nbytes`, `ST_MAX_ELEMS`, `gg_read_f64_range`, `GG_MAX_ELEMS`,
+  `anuk_decode_check`, `anuk_argmax_matches`. Made internal (renamed with a `_`):
+  the demos' fixed token pattern (`_anuk_demo_tokens` / `_anuk_demo_targets`) and
+  their shared head adapter (`_anuk_head_adapter_*`), which carries the demo
+  knobs below (seed 20260704, init std 0.02).
 - Everything `_`-prefixed (wideners, LE readers, print helpers, fuzz LCG).
 - The demo training hyperparameters (steps/lr/r/seed inside `gpt2-lora` /
   `gpt2-qlora` / `gpt2-tula`) — the *gates* are frozen, the knobs are not.

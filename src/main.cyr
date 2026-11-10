@@ -51,7 +51,7 @@ fn _anuk_run_check(label, cfg, params): i64 {
     _anuk_sput(" NL="); _anuk_puti(_cfg_NL(cfg));
     _anuk_sput(" heads="); _anuk_puti(_cfg_nh(cfg));
     _anuk_sput(" T_run="); _anuk_puti(T_run); _anuk_sput("\n");
-    var tokens = anuk_demo_tokens(T_run, V);
+    var tokens = _anuk_demo_tokens(T_run, V);
     var Lb = alloc(T_run * V * 8);
     var diffs = anuk_decode_check(cfg, params, tokens, Lb);
     if (diffs < 0) {
@@ -126,7 +126,7 @@ fn _gpt2_cross(st_path, gg_path): i64 {
     _anuk_sput("packed params: "); _anuk_puti(np);
     _anuk_sput(" total, diffs="); _anuk_puti(pdiffs); _anuk_sput("\n");
     var V = _cfg_V(cfgA);
-    var tokens = anuk_demo_tokens(T_run, V);
+    var tokens = _anuk_demo_tokens(T_run, V);
     var LA = alloc(T_run * V * 8);
     var LB = alloc(T_run * V * 8);
     var ra = ru_model_fwd(cfgA, pA, tokens, LA, 0);

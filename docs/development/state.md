@@ -1,9 +1,16 @@
 # anukulana — Current State
 
-> **Last refresh**: 2026-11-09 (1.2.2) | **Cadence**: every release.
+> **Last refresh**: 2026-11-09 (1.3.0) | **Cadence**: every release.
 > `CLAUDE.md` is preferences/process; this file is volatile state.
 
 ## Version
+
+**1.3.0 — 2026-11-09 (re-proven on real weights).** All seven real-checkpoint commands pass on HF GPT-2
+small (now pinned by revision and sha256) at cyrius 6.7.18: fidelity argmax exact 48/48, worst maxrel
+1.049e-6; `gpt2-cross` bit-identical; LoRA/QLoRA 8/8; the signed NF4 round trip bit-identical. Real-weights
+import is 2.3× (safetensors) and 1.7× (GGUF) faster than 1.2.1, measured. New CI: `realweights.yml`
+(manual), `bounds`, `aarch64`. The 1.2.2 helpers are frozen or made internal. `gpt2-lora` is slower than
+at 1.0 (26.6 s; training steps cost about 30 ms, upstream math), tracked in the roadmap.
 
 **1.2.2 — 2026-11-09 (the P(-1) hardening, optimization and repair sweep).**
 [`docs/audit/2026-11-09-audit.md`](../audit/2026-11-09-audit.md): two HIGH
@@ -119,9 +126,7 @@ CHANGELOG.
 
 ## Next
 
-**1.3.x — re-prove on real weights; settle the 1.2.2 surface** ([`roadmap.md`](roadmap.md)): re-run
-the seven real-checkpoint commands (none since 1.1.3) and re-capture the end-to-end benchmarks, add a
-real-weights CI job (tula's ask; a 548 MB download, the maintainer's call) and `--bounds` /
-`--aarch64` CI jobs, and freeze the 1.2.2 helpers. After that: the tula 1.2–1.6 surface (1.4.x),
-`convert` at source precision (1.5.x), rupantara 0.6–0.7 (1.6.x, gated), quantized GGUF (1.7.x) and
-the llama architecture (1.8.x, gated on rupantara).
+**1.3.x follow-through** ([`roadmap.md`](roadmap.md)): the first `realweights.yml` run on GitHub (and
+whether to schedule it), and the first runs of the `bounds` / `aarch64` jobs. Then the tula 1.2–1.6
+surface (1.4.x), `convert` at source precision (1.5.x), rupantara 0.6–0.7 (1.6.x, gated), quantized GGUF
+(1.7.x) and the llama architecture (1.8.x, gated on rupantara).

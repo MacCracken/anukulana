@@ -77,7 +77,7 @@ fn anuk_gpt2_qlora(path): i64 {
     _anuk_sput("  NaN "); _anuk_puti(qnan); _anuk_sput("\n");
 
     # ---- forward fidelity: f64 base vs NF4 base (reported) ---------------------
-    var tokens = anuk_demo_tokens(T, V);
+    var tokens = _anuk_demo_tokens(T, V);
     var f64f = anuk_frozen_features(cfg, params, tokens, T);
     var qf = anuk_frozen_features(cfg, params_q, tokens, T);
     var lg = t_alloc(T * V);
@@ -107,20 +107,20 @@ fn anuk_gpt2_qlora(path): i64 {
     _anuk_sput("/"); _anuk_puti(T); _anuk_sput("\n");
 
     # ---- QLoRA: the LoRA head adapter over the NF4 base ------------------------
-    var targets = anuk_demo_targets(tokens, T);
+    var targets = _anuk_demo_targets(tokens, T);
     var match0 = anuk_argmax_matches(lgq, targets, T, V);
     var r = 8;
     var s = f64_from(2);
-    var ad = anuk_head_adapter_new(T, C, V, r);
+    var ad = _anuk_head_adapter_new(T, C, V, r);
     var steps = 800;
     var lr = f64_div(f64_from(1), f64_from(100));
     var loss0p = alloc(8);
-    var loss = anuk_head_adapter_train(ad, qf, lgq, targets, s, steps, lr, 200, loss0p);
+    var loss = _anuk_head_adapter_train(ad, qf, lgq, targets, s, steps, lr, 200, loss0p);
     var loss0 = load64(loss0p);
     _anuk_sput("xent loss over NF4 base: step0 "); fmt_float(loss0, 4);
     _anuk_sput(" -> step"); _anuk_puti(steps);
     _anuk_sput(" "); fmt_float(loss, 4); _anuk_sput("\n");
-    var y = anuk_head_adapter_fwd(ad, qf, lgq, s);
+    var y = _anuk_head_adapter_fwd(ad, qf, lgq, s);
     var match1 = anuk_argmax_matches(y, targets, T, V);
     var ck_codes1 = _qlora_codes_checksum(codes, ncode);
     _anuk_sput("greedy argmax == target: nf4-base "); _anuk_puti(match0);

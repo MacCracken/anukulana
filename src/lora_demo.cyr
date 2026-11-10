@@ -40,7 +40,7 @@ fn _had(ad, k): i64 { return load64(ad + k * 8); }
 
 # A new adapter for T rows of C features onto V logits at rank r: A ~ N(0, 0.02²)
 # from tyche seeded with 20260704, B = 0 (so it starts as an exact no-op).
-fn anuk_head_adapter_new(T, C, V, r): i64 {
+fn _anuk_head_adapter_new(T, C, V, r): i64 {
     var ad = alloc(20 * 8);
     store64(ad, T); store64(ad + 8, C); store64(ad + 16, V); store64(ad + 24, r);
     rng_seed(20260704);
@@ -66,13 +66,13 @@ fn anuk_head_adapter_new(T, C, V, r): i64 {
     return ad;
 }
 # The adapter's A (C, r).
-fn anuk_head_adapter_a(ad): i64 { return _had(ad, 4); }
+fn _anuk_head_adapter_a(ad): i64 { return _had(ad, 4); }
 # The adapter's B (r, V).
-fn anuk_head_adapter_b(ad): i64 { return _had(ad, 5); }
+fn _anuk_head_adapter_b(ad): i64 { return _had(ad, 5); }
 
 # y = base + s·(f·A)·B into the adapter's y buffer, for any A, B of its shape
 # (the reload check runs a loaded pair). Returns y (T x V).
-fn anuk_head_adapter_fwd_with(ad, f, base, A, B, s): i64 {
+fn _anuk_head_adapter_fwd_with(ad, f, base, A, B, s): i64 {
     var T = _had(ad, 0); var C = _had(ad, 1); var V = _had(ad, 2); var r = _had(ad, 3);
     var y = _had(ad, 8);
     t_copy(y, base, T * V);
@@ -80,14 +80,14 @@ fn anuk_head_adapter_fwd_with(ad, f, base, A, B, s): i64 {
     return y;
 }
 # The same with the adapter's own A, B.
-fn anuk_head_adapter_fwd(ad, f, base, s): i64 {
-    return anuk_head_adapter_fwd_with(ad, f, base, _had(ad, 4), _had(ad, 5), s);
+fn _anuk_head_adapter_fwd(ad, f, base, s): i64 {
+    return _anuk_head_adapter_fwd_with(ad, f, base, _had(ad, 4), _had(ad, 5), s);
 }
 
 # Train `steps` Adam steps (lr) of softmax cross-entropy toward targets, the base
 # logits fixed. Prints the loss every `every` steps when every > 0. Stores the
 # step-0 loss at loss0_out; returns the last step's loss.
-fn anuk_head_adapter_train(ad, f, base, targets, s, steps, lr, every, loss0_out): i64 {
+fn _anuk_head_adapter_train(ad, f, base, targets, s, steps, lr, every, loss0_out): i64 {
     var T = _had(ad, 0); var C = _had(ad, 1); var V = _had(ad, 2); var r = _had(ad, 3);
     var A = _had(ad, 4); var B = _had(ad, 5);
     var u = _had(ad, 6); var y = _had(ad, 8); var probs = _had(ad, 9); var dy = _had(ad, 10);
@@ -95,7 +95,7 @@ fn anuk_head_adapter_train(ad, f, base, targets, s, steps, lr, every, loss0_out)
     var loss = f64_from(0);
     var step = 0;
     while (step < steps) {
-        anuk_head_adapter_fwd(ad, f, base, s);
+        _anuk_head_adapter_fwd(ad, f, base, s);
         loss = lora_xent_loss(y, probs, targets, T, V);
         if (step == 0) { store64(loss0_out, loss); }
         if (every > 0 && (step % every) == 0) {
@@ -166,8 +166,8 @@ fn anuk_gpt2_lora(path): i64 {
     _anuk_sput(" T="); _anuk_puti(T); _anuk_sput("\n");
 
     # fixed input (the gpt2 command's pattern) + next-token targets
-    var tokens = anuk_demo_tokens(T, V);
-    var targets = anuk_demo_targets(tokens, T);
+    var tokens = _anuk_demo_tokens(T, V);
+    var targets = _anuk_demo_targets(tokens, T);
 
     # ---- frozen forward, ONCE: f = final-LN output; base logits = head(f) ----
     var f = anuk_frozen_features(cfg, params, tokens, T);
@@ -180,10 +180,10 @@ fn anuk_gpt2_lora(path): i64 {
     # ---- the adapter: A(C,r) gaussian, B(r,V) zero; s = alpha/r ---------------
     var r = 8;
     var s = f64_from(2);                                  # alpha = 16, r = 8
-    var ad = anuk_head_adapter_new(T, C, V, r);
+    var ad = _anuk_head_adapter_new(T, C, V, r);
 
     # adapter-off sanity: B=0 => logits bit-identical to base
-    var y = anuk_head_adapter_fwd(ad, f, base_logits, s);
+    var y = _anuk_head_adapter_fwd(ad, f, base_logits, s);
     var offdiffs = 0;
     var i = 0;
     while (i < T * V) { if (load64(y + i * 8) != load64(base_logits + i * 8)) { offdiffs = offdiffs + 1; } i = i + 1; }
@@ -195,14 +195,14 @@ fn anuk_gpt2_lora(path): i64 {
     var steps = 800;
     var lr = f64_div(f64_from(1), f64_from(100));         # 1e-2 (Adam)
     var loss0p = alloc(8);
-    var loss = anuk_head_adapter_train(ad, f, base_logits, targets, s, steps, lr, 200, loss0p);
+    var loss = _anuk_head_adapter_train(ad, f, base_logits, targets, s, steps, lr, 200, loss0p);
     var loss0 = load64(loss0p);
     _anuk_sput("xent loss: step0 "); fmt_float(loss0, 4);
     _anuk_sput(" -> step"); _anuk_puti(steps);
     _anuk_sput(" "); fmt_float(loss, 4); _anuk_sput("\n");
 
     # ---- after: greedy argmax vs targets --------------------------------------
-    y = anuk_head_adapter_fwd(ad, f, base_logits, s);
+    y = _anuk_head_adapter_fwd(ad, f, base_logits, s);
     var match1 = anuk_argmax_matches(y, targets, T, V);
     var ck1 = _lora_xor_checksum(params, np);
     _anuk_sput("greedy argmax == target: base "); _anuk_puti(match0);

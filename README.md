@@ -15,7 +15,7 @@ them: the weight **format** is `tula`; the transformer **forward** is `rupantara
 
 ## Status
 
-**1.2.2 — STABLE: the Type-3 reference, frozen at 1.0.0 + the GGUF door** ([`docs/api.md`](docs/api.md) +
+**1.3.0 — STABLE: the Type-3 reference, frozen at 1.0.0 + the GGUF door** ([`docs/api.md`](docs/api.md) +
 [`STABILITY.md`](STABILITY.md); parsers fuzz-gated, audited —
 [`SECURITY.md`](SECURITY.md) and the 2026-11-09 P(-1) sweep,
 [`docs/audit/2026-11-09-audit.md`](docs/audit/2026-11-09-audit.md); benchmarks captured). The charter (import → run →

@@ -5,10 +5,10 @@
 > **reference binary**: it consumes tula (format), rupantara (forward), rosnet (tensors) and
 > sigil (Ed25519), and does not reinvent them.
 >
-> **Where it stands (1.2.2, 2026-11-09).** The whole charter is built and gated on the real GPT-2
+> **Where it stands (1.3.0, 2026-11-09).** The whole charter is built and gated on the real GPT-2
 > checkpoint: import (safetensors and GGUF, bit-identical across both), run, match HF
-> (`gpt2-oracle`), adapt (LoRA, QLoRA/NF4) and persist (signed tula files). The API froze at
-> 1.0.0. This file lists **remaining work only**. Shipped work is in the
+> (`gpt2-oracle`), adapt (LoRA, QLoRA/NF4) and persist (signed tula files). All seven commands were
+> re-proven at the current pin in 1.3.0. The API froze at 1.0.0. This file lists **remaining work only**. Shipped work is in the
 > [CHANGELOG](../../CHANGELOG.md), [`state.md`](state.md) and the audits
 > ([2026-07-04](../audit/2026-07-04-audit.md), [2026-11-09](../audit/2026-11-09-audit.md)).
 
@@ -50,30 +50,18 @@
 
 ---
 
-## 1.3.x — re-prove on real weights; settle the 1.2.2 surface
+## 1.3.x — follow-through on GitHub
 
-**Goal:** every real-checkpoint gate is green at the current pin and runs somewhere other than one
-person's machine, and the helpers 1.2.2 added are frozen or folded.
+1.3.0 re-proved every real-checkpoint gate locally, added the CI jobs below and froze the 1.2.2 helpers
+(see the CHANGELOG). What is left can only be confirmed on GitHub:
 
-- **Re-run the real-checkpoint gates** on the maintainer's machine: `make fidelity`, then `gpt2`,
-  `gpt2-gguf`, `gpt2-cross`, `gpt2-lora`, `gpt2-qlora` and `gpt2-tula`. None has run since 1.1.3.
-  Since then the toolchain has moved three lines and 1.2.2 rewrote the import paths, which are held
-  bit-identical only by synthetic tests. GELU moved by up to 2 ulp at cyrius 6.6.13 (rupantara's
-  2026-11-09 audit, finding 16), so `maxrel` may shift inside the 1e-5 gate; record the new figure.
-- **Re-capture `docs/benchmarks.md`'s end-to-end table.** It is the v1.0 capture (pin 6.3.31). 1.2.2's
-  micro-benchmarks predict a faster import (pack 1.8–2.4×); measure it.
-- **A real-weights CI job** — tula's cross-repo ask (its roadmap, 1.6.x): stage the GPT-2 checkpoint
-  in CI, checksum-pinned and cached, and run `gpt2-oracle` and `gpt2-tula`. That makes `gpt2-tula`
-  the real-weights gate for tula. ⚠ The maintainer's call: a 548 MB download in CI, probably on a
-  schedule or a manual trigger rather than every push.
-- **CI jobs for `cyrius test --bounds` and `--aarch64`** (qemu). Both were run by hand for 1.2.2 and
-  are green; neither is in CI.
-- **Freeze the 1.2.2 additions** in `docs/api.md` at 1.3.0 (`STABILITY.md`: additions land in
-  minors): `st_read_f64_range`, `st_entry_nbytes`, `gg_read_f64_range`, `ST_MAX_ELEMS`,
-  `GG_MAX_ELEMS`, `anuk_decode_check`, `anuk_demo_tokens` / `_targets`, `anuk_argmax_matches` and
-  `anuk_head_adapter_*`. Drop any that 1.3 work shows nobody outside the demos needs.
-- **Acceptance:** all seven commands green on the real checkpoint at the current pin, with the
-  numbers in the CHANGELOG and `docs/benchmarks.md`; the 1.2.2 helpers frozen or made internal.
+- **The first `realweights.yml` run** (manual trigger; it fetches the 548 MB checkpoint once, then
+  caches it). ⚠ The maintainer's call whether to add a schedule. It covers five of the seven commands;
+  `gpt2-gguf` / `gpt2-cross` stay local because their GGUF comes from a Python converter.
+- **The first runs of the `bounds` and `aarch64` CI jobs.** Both suites were green by hand (aarch64
+  under qemu). The native runner label `ubuntu-26.04-arm` is taken from tula's CI and hasn't run
+  for anukulana yet; if it isn't available, the job (and the release gate, which calls `ci.yml`) fails
+  until it's changed.
 
 ## 1.4.x — the tula 1.2–1.6 surface
 
@@ -163,9 +151,19 @@ missing is the forward and the mapping.
 
 ## 1.x.x — later (unscheduled, demand-gated)
 
-- **NF4 quantization throughput.** About 25 s for 124M params at 1.0, almost all of it in tula's codec
-  (`tula_nf4_pack`); anukulana's double-quant layer is 0.4 ms per 64k scales. Re-measure in 1.3.x,
-  and if it still dominates `gpt2-qlora` / `gpt2-tula`, file it with tula's 1.9.x throughput lane.
+- **The head-adapter training step: about 30 ms, 24 s for 800 steps** (1.3.0 profile, T=8, C=768,
+  V=50257, r=8), so it is now most of `gpt2-lora` (26.6 s), `gpt2-qlora` and `gpt2-tula`. It is about
+  2.6× slower per step than at 1.0, from the toolchain and dependency moves, not anukulana code. The two
+  biggest pieces:
+  - `ru_softmax_fwd` over the 402k logits, 10.0 ms, bound by ganita's `f64_exp` (about 14 ns each).
+    That's rupantara's and ganita's: report it with these numbers. A faster `exp` changes bits, so it
+    needs their parity policy first.
+  - `lora_adam` on B (402k params), 9.1 ms. This one is anukulana's. Bit-identical first: hoist the
+    per-element `1 − β` subtractions out of the loop. Dividing by the bias corrections through a
+    reciprocal would change bits, so it isn't allowed under the Discipline rule.
+
+  (NF4 quantization, the 1.0 hot spot at about 25 s, is now about 4.7 s in tula 1.6.1's codec: no
+  longer the bottleneck.)
 - **Text in, text out.** Wire **akshara** (the GPT-2 BPE) for a prompt → greedy-continuation command.
   It stays greedy: the sampler zoo is the Type-2 reference's, per rupantara's scope.
 - **Per-layer LoRA adapters** — consumes attn11's backward chain (see Standing decisions).
@@ -202,8 +200,9 @@ additive path. Nothing here is scheduled.
 - **Upstream gates on this plan:** rupantara 0.6 / 0.7 / 1.0 (1.6.x), rupantara's architecture breadth
   (1.8.x), tula 1.8 int4 (1.7.x), rosnet quantized linears (1.x.x). Larger models will want rosnet's
   mabda GPU profile (deferred).
-- **Outstanding cross-repo asks addressed to anukulana:** tula — the real-weights gate in CI (1.3.x),
-  and its 1.2–1.6 calls (1.4.x); rupantara — drop the repack and be the 1.0 consumer gate (1.6.x).
+- **Outstanding cross-repo asks addressed to anukulana:** tula — the real-weights gate in CI (the
+  workflow landed in 1.3.0; its first run is pending, 1.3.x) and its 1.2–1.6 calls (1.4.x); rupantara —
+  drop the repack and be the 1.0 consumer gate (1.6.x).
   Already done in 1.2.2: decode on `ru_model_fwd_row_s`, `RU_ERR_*` checked, off rupantara 0.4.2.
 - **Boundary:** training/backward → attn11 · QAT → tentib · the format → tula · the forward →
   rupantara · sampling beyond greedy → the Type-2 reference. Rotation-PTQ and one-shot sparsity stay

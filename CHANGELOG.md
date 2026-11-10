@@ -6,8 +6,56 @@ moving, no API freeze until v1.0).
 
 ## [Unreleased]
 
+## [1.3.0] - 2026-11-09
+
+The real-checkpoint gates re-proven at the current pin (none had run since 1.1.3), a real-weights CI
+workflow, bounds-checked and aarch64 CI jobs, and the 1.2.2 helpers settled. No change to any output.
+
+### Verified
+
+- **All seven real-checkpoint commands pass** on HF GPT-2 small, now pinned to revision `607a30d7` and
+  sha256 `248dfc39…` (`~/models/gpt2/model.safetensors`; the GGUF made by `tests/oracle/gen_gguf.py` in a
+  disposable venv), at cyrius 6.7.18 with sigil 3.13.15, tula 1.6.1, rosnet 1.4.1 and rupantara 0.5.3:
+  - `gpt2-oracle` (`make fidelity`): argmax exact at all 48 positions, worst last-row maxrel **1.049e-6**
+    (1.0: 1.05e-6). cyrius 6.6.13's GELU `tanh` change (up to 2 ulp) didn't move the gate.
+  - `gpt2` and `gpt2-gguf`: batch == KV-cache decode, 0 logit diffs, 0 NaN in 123,659,520 params.
+  - `gpt2-cross`: **bit-identical** through both doors (123,659,520 params, 402,056 logits, 0 diffs) —
+    the first real-weights check of 1.2.2's rewritten import paths.
+  - `gpt2-lora` and `gpt2-qlora`: 8/8 after 800 steps, base / NF4 codes bit-frozen.
+  - `gpt2-tula`: the 63.8 MB signed NF4 checkpoint and the 3.3 MB adapter round-trip bit-identical, 8/8.
+- **1.2.2's import speedup, measured on real weights** (same box, against the unmodified 1.2.1 code):
+  `anuk_gpt2_import` 1.72 → **0.75 s** (2.3×), `anuk_ggpt2_import` 1.77 → **1.05 s** (1.7×). 1.2.2 could
+  only project this from synthetic benches (2.40×, 1.78×).
+- **`docs/benchmarks.md` re-captured** (same Ryzen 7 5800H as the 1.0 capture): `gpt2` 3.9 → 2.19 s,
+  `gpt2-oracle` 7.2 → 4.20 s, `gpt2-qlora` 53.5 → 35.2 s, `gpt2-tula` 79.5 → 50.1 s, and `gpt2-gguf` /
+  `gpt2-cross` 2.47 / 3.24 s (first capture). NF4 quantization of the full model fell from about 25 s to
+  about 4.7 s (tula 1.6.1's codec).
+- **`gpt2-lora` is slower, 13.3 → 26.6 s, and not from 1.2.2's refactor:** the unmodified 1.2.1 code takes
+  27.3 s on the same box. A per-step profile puts each of the 800 training steps at about 30 ms:
+  rupantara's `ru_softmax_fwd` over 402k logits 10.0 ms (ganita's `f64_exp`, about 14 ns each) and
+  `lora_adam` on B 9.1 ms lead. The 1.0 note "800 Adam steps cost ~2 s" was wrong by its own table (about
+  9 s), so per step this is about 2.6× slower than 1.0, not 12×. Tracked in the roadmap (1.x.x).
+
+### Added
+
+- **`.github/workflows/realweights.yml`** — tula's cross-repo ask: the real checkpoint, fetched at its
+  pinned revision, sha256-checked and cached, through `make fidelity`, `gpt2`, `gpt2-lora`, `gpt2-qlora` and
+  `gpt2-tula` (which makes `gpt2-tula` tula's real-weights gate). Manual trigger only: the first run
+  downloads 548 MB, so the schedule is the maintainer's call (the workflow says how to add one). The two
+  GGUF commands stay local, because their file comes from a Python converter and Python is never a build,
+  run or test dependency.
+- **CI jobs `bounds` (every suite under `cyrius test --bounds`) and `aarch64`** (a native
+  `ubuntu-26.04-arm` runner building, running and testing, as tula does). Both were run by hand for 1.2.2.
+  `release.yml` calls `ci.yml`, so releases now gate on them too. `actions/cache` is SHA-pinned (v4.3.0
+  `0057852b`).
+
 ### Changed
 
+- **The 1.2.2 additions are settled.** Frozen in `docs/api.md`: `st_read_f64_range`, `st_entry_nbytes`,
+  `ST_MAX_ELEMS`, `gg_read_f64_range`, `GG_MAX_ELEMS`, `anuk_decode_check`, `anuk_argmax_matches`. Made
+  internal (renamed with a `_`): the demos' fixed token pattern (`_anuk_demo_tokens` / `_targets`) and their
+  shared head adapter (`_anuk_head_adapter_*`), which carries the demo knobs `docs/api.md` already keeps out
+  of freeze. `STABILITY.md` now lists `gg_*` (frozen since 1.1.0), the caps, and 1.2.2's exit codes.
 - **`docs/development/roadmap.md` reorganized.** The shipped milestones (M0–M6, the v1.0 criteria, GGUF,
   `--sk`, the applied cyrius 6.7.6 note) are gone from it; they live in this CHANGELOG, `state.md` and the
   audits. The remaining work is grouped by what gates it: 1.3.x (re-prove on real weights, freeze the
@@ -18,6 +66,7 @@ moving, no API freeze until v1.0).
   are kept.
 - Comments in `src/lora.cyr`, `src/lora_demo.cyr` and `src/oracle.cyr`, the README and `state.md` no
   longer point at the removed roadmap sections.
+- **`anukulana_version()` `10202` → `10300`.**
 
 ## [1.2.2] - 2026-11-09
 

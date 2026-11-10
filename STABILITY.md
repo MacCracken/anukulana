@@ -6,9 +6,12 @@ module functions (signatures + contracts).
 
 Guarantees for the 1.x line:
 
-- **Frozen:** CLI commands and their gate semantics; the listed `st_*`,
-  `anuk_*`, `lora_*`, `nf4_*` signatures; the checkpoint/adapter tensor names;
-  the oracle-fixture format v1; exit-code convention (0 = all gates pass).
+- **Frozen:** CLI commands and their gate semantics; the listed `st_*`, `gg_*`
+  (1.1.0), `anuk_*`, `lora_*`, `nf4_*` signatures and the `ST_MAX_ELEMS` /
+  `GG_MAX_ELEMS` caps (1.3.0); the checkpoint/adapter tensor names; the
+  oracle-fixture format v1; the exit-code convention (0 = all gates pass, 1 = a
+  gate failed or an argument is missing, 2 = an unknown command or option —
+  1.2.2).
 - **Additive-only minors:** new CLI commands (e.g. GGUF import), new module
   functions, new checkpoint tensors (readers tolerate extras).
 - **Out of freeze:** `_`-prefixed internals; demo training hyperparameters

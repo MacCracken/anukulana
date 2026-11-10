@@ -107,7 +107,7 @@ fn test_gpt2_f32_roundtrip(): i64 {
 
     # the CLI's batch-vs-decode check on the imported model (1.2.2: one shared copy,
     # allocation-free per token, return codes checked)
-    var tokens = anuk_demo_tokens(T, V);
+    var tokens = _anuk_demo_tokens(T, V);
     var Lb = alloc(T * V * 8);
     assert_eq(anuk_decode_check(cfg2, P2, tokens, Lb), 0, "decode == batch, 0 logit diffs");
     var u0 = alloc_used();

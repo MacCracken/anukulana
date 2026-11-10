@@ -168,7 +168,7 @@ fn test_lora(): i64 {
     return 0;
 }
 
-# 1.2.2: the demos' shared head adapter (anuk_head_adapter_*) against a verbatim
+# 1.2.2: the demos' shared head adapter (_anuk_head_adapter_*) against a verbatim
 # copy of the 1.2.1 demo loop (lora_demo.cyr / qlora_demo.cyr / tula_demo.cyr each
 # held this): same seed, same features and base logits, 120 Adam steps. A, B, the
 # step-0 and final losses, and the final logits must agree bit for bit.
@@ -223,20 +223,20 @@ fn test_head_adapter_matches_1_2_1(): i64 {
     var base = t_alloc(T * V);
     _dfill(f, T * C, 3, 7);
     _dfill(base, T * V, 5, 11);
-    var tokens = anuk_demo_tokens(T, V);
-    var targets = anuk_demo_targets(tokens, T);
+    var tokens = _anuk_demo_tokens(T, V);
+    var targets = _anuk_demo_targets(tokens, T);
     var Ar = t_alloc(C * 8); var Br = t_alloc(8 * V); var lr2 = alloc(16);
     var yref = _ref_train(f, base, targets, T, C, V, steps, Ar, Br, lr2);
-    var ad = anuk_head_adapter_new(T, C, V, 8);
+    var ad = _anuk_head_adapter_new(T, C, V, 8);
     var loss0p = alloc(8);
     var lr = f64_div(f64_from(1), f64_from(100));
-    var loss = anuk_head_adapter_train(ad, f, base, targets, f64_from(2), steps, lr, 0, loss0p);
-    var y = anuk_head_adapter_fwd(ad, f, base, f64_from(2));
+    var loss = _anuk_head_adapter_train(ad, f, base, targets, f64_from(2), steps, lr, 0, loss0p);
+    var y = _anuk_head_adapter_fwd(ad, f, base, f64_from(2));
     var d = 0;
     var i = 0;
-    while (i < C * 8) { if (load64(anuk_head_adapter_a(ad) + i * 8) != load64(Ar + i * 8)) { d = d + 1; } i = i + 1; }
+    while (i < C * 8) { if (load64(_anuk_head_adapter_a(ad) + i * 8) != load64(Ar + i * 8)) { d = d + 1; } i = i + 1; }
     i = 0;
-    while (i < 8 * V) { if (load64(anuk_head_adapter_b(ad) + i * 8) != load64(Br + i * 8)) { d = d + 1; } i = i + 1; }
+    while (i < 8 * V) { if (load64(_anuk_head_adapter_b(ad) + i * 8) != load64(Br + i * 8)) { d = d + 1; } i = i + 1; }
     assert_eq(d, 0, "head adapter: A and B bit-identical to the 1.2.1 loop");
     assert_eq(load64(loss0p), load64(lr2), "head adapter: step-0 loss bit-identical");
     assert_eq(loss, load64(lr2 + 8), "head adapter: final loss bit-identical");

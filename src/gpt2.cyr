@@ -195,14 +195,14 @@ fn anuk_gpt2_import(path, nh, T_run, cfg): i64 {
 
 # ---- run helpers shared by the CLI and the demos (1.2.2) ---------------------
 # The demos' fixed input: tokens[t] = (t * 137 + 11) % V, t in [0, T).
-fn anuk_demo_tokens(T, V): i64 {
+fn _anuk_demo_tokens(T, V): i64 {
     var tokens = alloc(T * 8);
     var i = 0;
     while (i < T) { store64(tokens + i * 8, (i * 137 + 11) % V); i = i + 1; }
     return tokens;
 }
 # Next-token targets for `tokens`: targets[t] = tokens[t + 1], wrapping at the end.
-fn anuk_demo_targets(tokens, T): i64 {
+fn _anuk_demo_targets(tokens, T): i64 {
     var targets = alloc(T * 8);
     var i = 0;
     while (i < T - 1) { store64(targets + i * 8, load64(tokens + (i + 1) * 8)); i = i + 1; }

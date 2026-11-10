@@ -86,25 +86,25 @@ fn anuk_gpt2_tula(model_path, ckpt_path, adapter_path, sk_path): i64 {
     if (cfg_ok == 1) { _anuk_sput("ok\n"); } else { _anuk_sput("MISMATCH\n"); }
 
     # ---- 3. train the adapter over the LOADED base ------------------------------
-    var tokens = anuk_demo_tokens(T, V);
-    var targets = anuk_demo_targets(tokens, T);
+    var tokens = _anuk_demo_tokens(T, V);
+    var targets = _anuk_demo_targets(tokens, T);
     var qf = anuk_frozen_features(cfg2, loaded, tokens, T);
     var base_logits = t_alloc(T * V);
     ru_head_fwd(qf, _p_tokemb(loaded), base_logits, T, C, V);
     var r = 8;
     var s = f64_from(2);
-    var ad = anuk_head_adapter_new(T, C, V, r);
+    var ad = _anuk_head_adapter_new(T, C, V, r);
     var lr = f64_div(f64_from(1), f64_from(100));
     var loss0p = alloc(8);
-    var loss = anuk_head_adapter_train(ad, qf, base_logits, targets, s, 800, lr, 0, loss0p);
+    var loss = _anuk_head_adapter_train(ad, qf, base_logits, targets, s, 800, lr, 0, loss0p);
     var loss0 = load64(loss0p);
     _anuk_sput("adapter trained over loaded base: loss "); fmt_float(loss0, 4);
     _anuk_sput(" -> "); fmt_float(loss, 4); _anuk_sput("\n");
     var adapted = t_alloc(T * V);
-    t_copy(adapted, anuk_head_adapter_fwd(ad, qf, base_logits, s), T * V);
+    t_copy(adapted, _anuk_head_adapter_fwd(ad, qf, base_logits, s), T * V);
 
     # ---- save + reload the adapter, recompute, bit-compare ----------------------
-    if (anuk_adapter_save(adapter_path, anuk_head_adapter_a(ad), anuk_head_adapter_b(ad), C, r, V, s, sk) != 0) {
+    if (anuk_adapter_save(adapter_path, _anuk_head_adapter_a(ad), _anuk_head_adapter_b(ad), C, r, V, s, sk) != 0) {
         _anuk_eput("tula-demo: adapter save failed\n");
         return 1;
     }
@@ -117,7 +117,7 @@ fn anuk_gpt2_tula(model_path, ckpt_path, adapter_path, sk_path): i64 {
         return 1;
     }
     var s2 = load64(meta);
-    var y = anuk_head_adapter_fwd_with(ad, qf, base_logits, A2, B2, s2);
+    var y = _anuk_head_adapter_fwd_with(ad, qf, base_logits, A2, B2, s2);
     var adiffs = 0;
     i = 0;
     while (i < T * V) { if (load64(y + i * 8) != load64(adapted + i * 8)) { adiffs = adiffs + 1; } i = i + 1; }
